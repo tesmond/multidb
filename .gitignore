@@ -1,0 +1,83 @@
+# =========================
+# OS / Editor junk
+# =========================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# =========================
+# Go (backend)
+# =========================
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Output directories
+/bin/
+/build/
+/dist/
+
+# Go workspace / modules
+go.work
+go.work.sum
+
+# Coverage
+*.out
+coverage.out
+
+# Vendor (optional: include if you commit deps)
+vendor/
+
+# =========================
+# Svelte / Node (frontend)
+# =========================
+node_modules/
+
+# Build output (Vite/SvelteKit)
+dist/
+build/
+.svelte-kit/
+.output/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Package managers
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# =========================
+# Testing / tooling
+# =========================
+coverage/
+.nyc_output/
+
+# =========================
+# Wails
+# =========================
+wailsjs/
+frontend/dist/
+build/
+
+# =========================
+# Misc
+# =========================
+*.log
+tmp/
+temp/
