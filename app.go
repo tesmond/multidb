@@ -15,11 +15,11 @@ import (
 
 // App is the main application struct exposed to the Wails frontend.
 type App struct {
-	ctx      context.Context
-	connMgr  *connections.Manager
-	executor *queries.Executor
+	ctx       context.Context
+	connMgr   *connections.Manager
+	executor  *queries.Executor
 	inspector *schema.Inspector
-	store    *history.Store
+	store     *history.Store
 
 	// cancel functions for in-flight queries keyed by a client-supplied query ID
 	queryMu      sync.Mutex

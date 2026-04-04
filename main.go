@@ -17,9 +17,9 @@ func main() {
 
 	// Create application with options
 	err := wails.Run(&options.App{
-		Title:  "multidb",
-		Width:  1280,
-		Height: 800,
+		Title:     "multidb",
+		Width:     1280,
+		Height:    800,
 		MinWidth:  900,
 		MinHeight: 600,
 		AssetServer: &assetserver.Options{
