@@ -10,6 +10,9 @@
   let scrollTop = 0;
   let containerHeight = 0;
 
+  // Reset scroll position when result changes
+  $: if (result) scrollTop = 0;
+
   $: visibleStart = Math.floor(scrollTop / ROW_HEIGHT);
   $: visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + 4;
   $: rows = result?.rows ?? [];
@@ -26,6 +29,10 @@
   }
 
   let resizing: { idx: number; startX: number; startW: number } | null = null;
+  let scrollContainer: HTMLDivElement;
+
+  // Reset scroll position when result changes
+  $: if (result && scrollContainer) scrollContainer.scrollTop = 0;
 
   function startResize(e: MouseEvent, idx: number) {
     e.preventDefault();
@@ -54,6 +61,42 @@
 
   function copyRow(row: any[]) {
     navigator.clipboard.writeText(row.map(v => v === null ? 'NULL' : String(v)).join('\t')).catch(() => {});
+  }
+
+  function escapeCSV(value: any): string {
+    if (value === null) return '';
+    const str = String(value);
+    // If the value contains comma, quote, or newline, wrap in quotes and escape quotes
+    if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  }
+
+  function exportToCSV() {
+    if (!result || !result.columns || !result.rows) return;
+
+    const csvRows = [
+      // Header row
+      result.columns.map(col => escapeCSV(col)).join(','),
+      // Data rows
+      ...result.rows.map(row => row.map(cell => escapeCSV(cell)).join(','))
+    ];
+
+    const csvContent = csvRows.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+
+    if (link.download !== undefined) {
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', 'query_results.csv');
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
   }
 
   let sortCol = -1;
@@ -130,6 +173,7 @@
     <!-- Scrollable body -->
     <div
       class="grid-scroll"
+      bind:this={scrollContainer}
       on:scroll={onGridScroll}
       bind:clientHeight={containerHeight}
       role="grid"

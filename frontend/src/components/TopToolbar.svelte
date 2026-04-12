@@ -29,21 +29,7 @@
     </button>
   </div>
 
-  <div class="toolbar-right">
-    {#if $activeConnections.length > 0}
-      <select
-        class="conn-select"
-        bind:value={$selectedConnId}
-      >
-        <option value="">— connection —</option>
-        {#each $activeConnections as conn}
-          <option value={conn.config.id}>
-            {conn.config.name} ({conn.config.driver})
-          </option>
-        {/each}
-      </select>
-    {/if}
-  </div>
+  <div class="toolbar-right"></div>
 </header>
 
 <style>
@@ -67,10 +53,4 @@
     font-size: 12px; cursor: pointer;
   }
   .tb-btn:hover { border-color: var(--accent); }
-  .conn-select {
-    background: var(--bg-input); border: 1px solid var(--border);
-    color: var(--text); padding: 4px 8px; border-radius: 4px;
-    font-size: 12px; max-width: 200px;
-  }
-  .conn-select:focus { outline: none; border-color: var(--accent); }
 </style>

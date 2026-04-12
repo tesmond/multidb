@@ -149,10 +149,11 @@ func (a *App) ExecuteQuery(connID, queryID, query string, maxRows int) ExecuteRe
 
 	if a.store != nil {
 		_ = a.store.AddQueryHistory(a.ctx, history.QueryRecord{
-			ConnID:   connID,
-			Query:    query,
-			Duration: qr.Duration,
-			Error:    qr.Error,
+			ConnID:      connID,
+			Query:       query,
+			Duration:    qr.Duration,
+			ResultCount: len(qr.Rows),
+			Error:       qr.Error,
 		})
 	}
 
@@ -197,10 +198,26 @@ func (a *App) GetQueryHistory(limit int) ([]history.QueryRecord, error) {
 	return a.store.GetQueryHistory(a.ctx, limit)
 }
 
+// GetQueryHistoryByConnID returns query history records for a specific connection.
+func (a *App) GetQueryHistoryByConnID(connID string, limit int) ([]history.QueryRecord, error) {
+	if a.store == nil {
+		return nil, fmt.Errorf("store not initialised")
+	}
+	return a.store.GetQueryHistoryByConnID(a.ctx, connID, limit)
+}
+
 // ClearQueryHistory removes all history records.
 func (a *App) ClearQueryHistory() error {
 	if a.store == nil {
 		return fmt.Errorf("store not initialised")
 	}
 	return a.store.ClearQueryHistory(a.ctx)
+}
+
+// ClearQueryHistoryByConnID removes all history records for a specific connection.
+func (a *App) ClearQueryHistoryByConnID(connID string) error {
+	if a.store == nil {
+		return fmt.Errorf("store not initialised")
+	}
+	return a.store.ClearQueryHistoryByConnID(a.ctx, connID)
 }

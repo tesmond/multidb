@@ -65,7 +65,7 @@ func (i *Inspector) mysqlSchema(ctx context.Context, db *sql.DB) (SchemaTree, er
 
 	dbRows, err := db.QueryContext(ctx, `
 		SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
-		WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql','sys')
+		WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql')
 		ORDER BY SCHEMA_NAME`)
 	if err != nil {
 		return tree, fmt.Errorf("databases query: %w", err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"multidb/backend/connections"
@@ -13,12 +14,13 @@ import (
 
 // QueryRecord is a saved query history entry.
 type QueryRecord struct {
-	ID        int64  `json:"id"`
-	ConnID    string `json:"connId"`
-	Query     string `json:"query"`
-	Duration  int64  `json:"duration"` // ms
-	Error     string `json:"error,omitempty"`
-	CreatedAt string `json:"createdAt"`
+	ID          int64  `json:"id"`
+	ConnID      string `json:"connId"`
+	Query       string `json:"query"`
+	Duration    int64  `json:"duration"` // ms
+	ResultCount int    `json:"resultCount"`
+	Error       string `json:"error,omitempty"`
+	CreatedAt   string `json:"createdAt"`
 }
 
 // Store persists query history and saved connections in a local SQLite DB.
@@ -43,12 +45,14 @@ func NewStore(path string) (*Store, error) {
 }
 
 func (s *Store) migrate() error {
+	// Create tables
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS query_history (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
 			conn_id     TEXT    NOT NULL,
 			query       TEXT    NOT NULL,
 			duration_ms INTEGER NOT NULL DEFAULT 0,
+			result_count INTEGER NOT NULL DEFAULT 0,
 			error       TEXT    NOT NULL DEFAULT '',
 			created_at  TEXT    NOT NULL
 		);
@@ -64,7 +68,21 @@ func (s *Store) migrate() error {
 			dsn      TEXT NOT NULL DEFAULT ''
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Add result_count column if it doesn't exist (for migration from older versions)
+	_, err = s.db.Exec(`
+		ALTER TABLE query_history 
+		ADD COLUMN result_count INTEGER NOT NULL DEFAULT 0
+	`)
+	// Ignore error if column already exists
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") && !strings.Contains(err.Error(), "already exists") {
+		return err
+	}
+
+	return nil
 }
 
 // AddQueryHistory inserts a history record.
@@ -73,9 +91,9 @@ func (s *Store) AddQueryHistory(ctx context.Context, rec QueryRecord) error {
 		rec.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO query_history (conn_id, query, duration_ms, error, created_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		rec.ConnID, rec.Query, rec.Duration, rec.Error, rec.CreatedAt)
+		INSERT INTO query_history (conn_id, query, duration_ms, result_count, error, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		rec.ConnID, rec.Query, rec.Duration, rec.ResultCount, rec.Error, rec.CreatedAt)
 	return err
 }
 
@@ -85,7 +103,7 @@ func (s *Store) GetQueryHistory(ctx context.Context, limit int) ([]QueryRecord, 
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, conn_id, query, duration_ms, error, created_at
+		SELECT id, conn_id, query, duration_ms, result_count, error, created_at
 		FROM query_history
 		ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -96,7 +114,33 @@ func (s *Store) GetQueryHistory(ctx context.Context, limit int) ([]QueryRecord, 
 	var records []QueryRecord
 	for rows.Next() {
 		var r QueryRecord
-		if err := rows.Scan(&r.ID, &r.ConnID, &r.Query, &r.Duration, &r.Error, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.ConnID, &r.Query, &r.Duration, &r.ResultCount, &r.Error, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+// GetQueryHistoryByConnID returns the last n history records for a specific connection (most recent first).
+func (s *Store) GetQueryHistoryByConnID(ctx context.Context, connID string, limit int) ([]QueryRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, conn_id, query, duration_ms, result_count, error, created_at
+		FROM query_history
+		WHERE conn_id = ?
+		ORDER BY id DESC LIMIT ?`, connID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []QueryRecord
+	for rows.Next() {
+		var r QueryRecord
+		if err := rows.Scan(&r.ID, &r.ConnID, &r.Query, &r.Duration, &r.ResultCount, &r.Error, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		records = append(records, r)
@@ -107,6 +151,12 @@ func (s *Store) GetQueryHistory(ctx context.Context, limit int) ([]QueryRecord, 
 // ClearQueryHistory removes all query history records.
 func (s *Store) ClearQueryHistory(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, "DELETE FROM query_history")
+	return err
+}
+
+// ClearQueryHistoryByConnID removes all query history records for a specific connection.
+func (s *Store) ClearQueryHistoryByConnID(ctx context.Context, connID string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM query_history WHERE conn_id = ?", connID)
 	return err
 }
 
