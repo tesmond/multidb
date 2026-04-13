@@ -29,18 +29,24 @@ describe('ResultsGrid', () => {
   it('renders column headers', () => {
     const { getAllByRole } = render(ResultsGrid, { props: { result: mockResult } });
     const headers = getAllByRole('columnheader');
-    // First header is the row-number column, then one per column
-    expect(headers.length).toBeGreaterThanOrEqual(mockResult.columns.length);
+    // Row-number header (#) plus one per data column
+    expect(headers.length).toBe(mockResult.columns.length + 1);
     const headerTexts = headers.map((h: HTMLElement) => h.textContent?.trim());
     expect(headerTexts).toContain('id');
     expect(headerTexts).toContain('name');
     expect(headerTexts).toContain('age');
   });
 
-  it('renders row count in status bar', () => {
+  it('exposes row count via aria-rowcount', () => {
+    const { container } = render(ResultsGrid, { props: { result: mockResult } });
+    const grid = container.querySelector('[role="grid"]');
+    expect(grid?.getAttribute('aria-rowcount')).toBe('3');
+  });
+
+  it('includes row count in accessible text', () => {
     const { container } = render(ResultsGrid, { props: { result: mockResult } });
     const text = container.textContent ?? '';
-    expect(text).toContain('3');
+    expect(text).toContain('3 rows');
   });
 
   it('handles empty rows gracefully', () => {

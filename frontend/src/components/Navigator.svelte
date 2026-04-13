@@ -372,9 +372,6 @@
     <button role="menuitem" on:click={() => handleContextAction('copy')}>
       Copy Name
     </button>
-    <button role="menuitem" on:click={() => handleContextAction('select')}>
-      Generate SELECT
-    </button>
   </div>
 {/if}
 
@@ -395,7 +392,6 @@
   .nav-title { letter-spacing: 0.05em; }
   .nav-content { flex: 1; overflow-y: auto; padding: 4px 0; }
 
-  .conn-node { }
   .conn-label {
     display: flex; align-items: center; gap: 4px;
     padding: 5px 8px; cursor: pointer; user-select: none;
@@ -424,7 +420,6 @@
   .section-label.schema-node { color: var(--text); font-size: 13px; }
   .count { font-weight: 400; opacity: 0.7; }
 
-  .table-node { }
   .table-label {
     display: flex; align-items: center; gap: 4px;
     padding: 3px 8px; cursor: pointer; user-select: none;

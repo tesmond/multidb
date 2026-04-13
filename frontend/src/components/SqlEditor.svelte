@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { tabs, activeConnections, selectedConnId, statusMessage, outputTab } from '../stores/appStore';
-  import { ExecuteQuery, CancelQuery } from '../../wailsjs/go/main/App';
+  import { ExecuteQueryStreamed, CancelQuery } from '../../wailsjs/go/main/App';
+  import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
   import { get } from 'svelte/store';
 
   // CodeMirror 6
@@ -18,6 +19,10 @@
   export let tabId: string;
 
   $: tab = $tabs.find(t => t.id === tabId);
+
+  // Cleanup function for the active streaming query's event listeners.
+  // Replaced on each new query; called on cancel, destroy, and query start.
+  let cancelListeners: (() => void) | null = null;
 
   let editorEl: HTMLDivElement;
   let view: EditorView | null = null;
@@ -83,28 +88,101 @@
       return;
     }
 
+    // Clean up any lingering listeners from the previous query.
+    cancelListeners?.();
+    cancelListeners = null;
+
     const queryId = crypto.randomUUID();
     tabs.updateTab(tabId, { running: true, queryId, result: null, connId });
     statusMessage.set('Running query…');
     outputTab.set('results');
 
-    try {
-      const result = await ExecuteQuery(connId, queryId, sql, 1000000);
-      tabs.updateTab(tabId, { running: false, result, queryId: '' });
-      if (result.error) {
-        statusMessage.set(`Error: ${result.error}`);
+    // Local mutable accumulator – mutated in place; Svelte reactivity is
+    // triggered by replacing the result wrapper object each chunk.
+    let streamCols: string[] = [];
+    let streamRows: any[][] = [];
+
+    // Rendezvous state: finalize only once BOTH the done signal has arrived
+    // AND all expected rows have been received. This handles the case where
+    // Wails sends query:done and the last query:chunk as separate WebSocket
+    // frames (separate macrotasks) that can arrive in either order.
+    let pendingTotalRows = -1;  // -1 = done not yet received
+    let pendingDuration = 0;
+    let pendingError = '';
+
+    function tryFinalize() {
+      if (pendingTotalRows < 0) return;                    // done not received yet
+      if (streamRows.length < pendingTotalRows) return;    // chunks still in-flight
+      offMeta(); offChunk(); offDone();
+      cancelListeners = null;
+      tabs.updateTab(tabId, {
+        running: false,
+        queryId: '',
+        result: {
+          columns: streamCols,
+          rows: streamRows,
+          _rowCount: streamRows.length,
+          rowsAffected: 0,
+          duration: pendingDuration,
+          error: pendingError,
+        },
+      });
+      if (pendingError) {
+        statusMessage.set(`Error: ${pendingError}`);
         outputTab.set('messages');
       } else {
-        statusMessage.set(`${result.rows?.length ?? 0} rows · ${result.duration}ms`);
+        statusMessage.set(`${streamRows.length} rows · ${pendingDuration}ms`);
       }
-    } catch (e: any) {
-      tabs.updateTab(tabId, { running: false, queryId: '', result: { columns: [], rows: [], rowsAffected: 0, duration: 0, error: String(e) } });
+    }
+
+    const offMeta = EventsOn('query:meta', (meta: { queryId: string; columns: string[] }) => {
+      if (meta.queryId !== queryId) return;
+      streamCols = meta.columns;
+      streamRows = [];
+      tabs.updateTab(tabId, {
+        result: { columns: streamCols, rows: streamRows, _rowCount: 0, rowsAffected: 0, duration: 0, error: '' },
+      });
+    });
+
+    const offChunk = EventsOn('query:chunk', (chunk: { queryId: string; rows: any[][] }) => {
+      if (chunk.queryId !== queryId) return;
+      const incoming = chunk.rows;
+      for (let i = 0; i < incoming.length; i++) streamRows.push(incoming[i]);
+      const rowCount = streamRows.length;
+      tabs.updateTab(tabId, {
+        result: { columns: streamCols, rows: streamRows, _rowCount: rowCount, rowsAffected: 0, duration: 0, error: '' },
+      });
+      statusMessage.set(`Loading… ${rowCount} rows`);
+      tryFinalize(); // handle case: done arrived before this last chunk
+    });
+
+    const offDone = EventsOn('query:done', (done: { queryId: string; totalRows: number; duration: number; error?: string }) => {
+      if (done.queryId !== queryId) return;
+      pendingTotalRows = done.totalRows;
+      pendingDuration = done.duration;
+      pendingError = done.error ?? '';
+      tryFinalize(); // handle case: all chunks already arrived
+    });
+
+    cancelListeners = () => { offMeta(); offChunk(); offDone(); };
+
+    // Fire and forget – all coordination flows through the events above.
+    ExecuteQueryStreamed(connId, queryId, sql, 1_000_000).catch((e: any) => {
+      offMeta(); offChunk(); offDone();
+      cancelListeners = null;
+      tabs.updateTab(tabId, {
+        running: false,
+        queryId: '',
+        result: { columns: [], rows: [], rowsAffected: 0, duration: 0, error: String(e) },
+      });
       statusMessage.set(`Error: ${e}`);
       outputTab.set('messages');
-    }
+    });
   }
 
   async function cancelQuery() {
+    cancelListeners?.();
+    cancelListeners = null;
     if (!tab?.queryId) return;
     await CancelQuery(tab.queryId);
     tabs.updateTab(tabId, { running: false, queryId: '' });
@@ -179,6 +257,8 @@
   });
 
   onDestroy(() => {
+    cancelListeners?.();
+    cancelListeners = null;
     view?.destroy();
     view = null;
   });

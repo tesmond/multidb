@@ -6,11 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"multidb/backend/connections"
 	"multidb/backend/history"
 	"multidb/backend/queries"
 	"multidb/backend/schema"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App is the main application struct exposed to the Wails frontend.
@@ -167,6 +170,190 @@ func (a *App) CancelQuery(queryID string) {
 	if cancel, ok := a.queryCancels[queryID]; ok {
 		cancel()
 	}
+}
+
+// -----------------------------------------------------------------------
+// Streaming query event payloads
+// -----------------------------------------------------------------------
+
+type queryStreamMeta struct {
+	QueryID string   `json:"queryId"`
+	Columns []string `json:"columns"`
+}
+
+type queryStreamChunk struct {
+	QueryID string  `json:"queryId"`
+	Rows    [][]any `json:"rows"`
+	Offset  int     `json:"offset"`
+}
+
+type queryStreamDone struct {
+	QueryID   string `json:"queryId"`
+	TotalRows int    `json:"totalRows"`
+	Duration  int64  `json:"duration"`
+	Error     string `json:"error,omitempty"`
+}
+
+// ExecuteQueryStreamed runs a SQL query and pushes results to the frontend via
+// Wails events instead of a single large return value. This lets the UI render
+// the first rows almost immediately while the rest continue loading.
+//
+// Events emitted (all carry a queryId field so concurrent queries don't mix):
+//
+//	"query:meta"  – once, immediately after column names are known
+//	"query:chunk" – once per batch of rows (first batch ≈500 rows, then ≈50 000)
+//	"query:done"  – once, with the final row count, duration and any error
+func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
+	db, err := a.connMgr.Get(connID)
+	if err != nil {
+		runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{QueryID: queryID, Error: err.Error()})
+		return
+	}
+
+	if maxRows <= 0 {
+		maxRows = 1_000_000
+	}
+
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.queryMu.Lock()
+	a.queryCancels[queryID] = cancel
+	a.queryMu.Unlock()
+
+	defer func() {
+		a.queryMu.Lock()
+		delete(a.queryCancels, queryID)
+		a.queryMu.Unlock()
+		cancel()
+	}()
+
+	start := time.Now()
+
+	dbRows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
+			QueryID:  queryID,
+			Duration: time.Since(start).Milliseconds(),
+			Error:    err.Error(),
+		})
+		return
+	}
+	defer dbRows.Close()
+
+	cols, err := dbRows.Columns()
+	if err != nil {
+		runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
+			QueryID:  queryID,
+			Duration: time.Since(start).Milliseconds(),
+			Error:    fmt.Sprintf("columns: %v", err),
+		})
+		return
+	}
+
+	// Emit column names immediately – the frontend can render the header at once.
+	runtime.EventsEmit(a.ctx, "query:meta", queryStreamMeta{QueryID: queryID, Columns: cols})
+
+	const (
+		firstChunkSize = 500
+		chunkSize      = 50_000
+	)
+
+	ncols := len(cols)
+	chunk := make([][]any, 0, firstChunkSize)
+	total := 0
+	firstFlushed := false
+
+	flush := func() {
+		if len(chunk) == 0 {
+			return
+		}
+		runtime.EventsEmit(a.ctx, "query:chunk", queryStreamChunk{
+			QueryID: queryID,
+			Rows:    chunk,
+			Offset:  total - len(chunk),
+		})
+		cap := chunkSize
+		if !firstFlushed {
+			firstFlushed = true
+		}
+		chunk = make([][]any, 0, cap)
+	}
+
+	for dbRows.Next() && total < maxRows {
+		select {
+		case <-ctx.Done():
+			flush()
+			runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
+				QueryID:   queryID,
+				TotalRows: total,
+				Duration:  time.Since(start).Milliseconds(),
+				Error:     "query cancelled",
+			})
+			return
+		default:
+		}
+
+		vals := make([]any, ncols)
+		ptrs := make([]any, ncols)
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := dbRows.Scan(ptrs...); err != nil {
+			flush()
+			runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
+				QueryID:   queryID,
+				TotalRows: total,
+				Duration:  time.Since(start).Milliseconds(),
+				Error:     fmt.Sprintf("scan: %v", err),
+			})
+			return
+		}
+
+		row := make([]any, ncols)
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok {
+				row[i] = string(b)
+			} else {
+				row[i] = v
+			}
+		}
+		chunk = append(chunk, row)
+		total++
+
+		limit := chunkSize
+		if !firstFlushed {
+			limit = firstChunkSize
+		}
+		if len(chunk) >= limit {
+			flush()
+		}
+	}
+
+	flush()
+
+	if err := dbRows.Err(); err != nil {
+		runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
+			QueryID:   queryID,
+			TotalRows: total,
+			Duration:  time.Since(start).Milliseconds(),
+			Error:     err.Error(),
+		})
+		return
+	}
+
+	if a.store != nil {
+		_ = a.store.AddQueryHistory(a.ctx, history.QueryRecord{
+			ConnID:      connID,
+			Query:       query,
+			Duration:    time.Since(start).Milliseconds(),
+			ResultCount: total,
+		})
+	}
+
+	runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
+		QueryID:   queryID,
+		TotalRows: total,
+		Duration:  time.Since(start).Milliseconds(),
+	})
 }
 
 // -----------------------------------------------------------------------
