@@ -1,7 +1,7 @@
 <script lang="ts">
   import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, tabs, activeTabId, statusMessage } from '../stores/appStore';
   import type { ActiveConnection } from '../stores/appStore';
-  import { GetSchema, Disconnect } from '../../wailsjs/go/main/App';
+  import { GetSchema, Disconnect, BackupTable, ImportTable } from '../../wailsjs/go/main/App';
   import { get } from 'svelte/store';
 
   // Expandable node state
@@ -87,20 +87,52 @@
   }
 
   // Context menu state
-  let contextMenu: { x: number; y: number; tableName: string; connId: string; schemaName?: string } | null = null;
+  let contextMenu:
+    | { kind: 'table'; x: number; y: number; tableName: string; connId: string; schemaName?: string }
+    | { kind: 'database'; x: number; y: number; connId: string }
+    | null = null;
 
-  function openContextMenu(e: MouseEvent, connId: string, tableName: string, schemaName?: string) {
+  function openTableContextMenu(e: MouseEvent, connId: string, tableName: string, schemaName?: string) {
     e.preventDefault();
-    contextMenu = { x: e.clientX, y: e.clientY, tableName, connId, schemaName };
+    e.stopPropagation();
+    contextMenu = { kind: 'table', x: e.clientX, y: e.clientY, tableName, connId, schemaName };
   }
 
-  function handleContextAction(action: 'view' | 'copy' | 'select') {
+  function openDatabaseContextMenu(e: MouseEvent, connId: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenu = { kind: 'database', x: e.clientX, y: e.clientY, connId };
+  }
+
+  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'import') {
     if (!contextMenu) return;
-    const { connId, tableName, schemaName } = contextMenu;
+    const menu = contextMenu;
     contextMenu = null;
-    if (action === 'view') openTableQuery(connId, tableName, schemaName);
-    else if (action === 'copy') copyName(qualifyTable(connId, tableName, schemaName));
-    else if (action === 'select') openTableQuery(connId, tableName, schemaName);
+
+    try {
+      if (action === 'import' && menu.kind === 'database') {
+        await ImportTable(menu.connId);
+        statusMessage.set('Import completed');
+        const conn = get(activeConnections).find(c => c.config.id === menu.connId);
+        if (conn) {
+          await loadSchema(conn);
+        }
+        return;
+      }
+
+      if (menu.kind !== 'table') return;
+
+      const { connId, tableName, schemaName } = menu;
+      if (action === 'view') openTableQuery(connId, tableName, schemaName);
+      else if (action === 'copy') copyName(qualifyTable(connId, tableName, schemaName));
+      else if (action === 'select') openTableQuery(connId, tableName, schemaName);
+      else if (action === 'backup') {
+        await BackupTable(connId, tableName, schemaName ?? '');
+        statusMessage.set(`Backed up ${qualifyTable(connId, tableName, schemaName)}`);
+      }
+    } catch (e: any) {
+      statusMessage.set(String(e));
+    }
   }
 
   function closeContextMenu() { contextMenu = null; }
@@ -121,6 +153,7 @@
           class="conn-label"
           class:selected={$selectedConnId === conn.config.id}
           on:click={() => toggleConn(conn.config.id, conn)}
+          on:contextmenu={e => openDatabaseContextMenu(e, conn.config.id)}
           role="treeitem" aria-selected={false}
           aria-expanded={!!expanded[conn.config.id]}
           tabindex="0"
@@ -179,7 +212,7 @@
                                 <div
                                   class="table-label"
                                   on:click={() => toggleTable(`${conn.config.id}-${pgSchema.name}-t-${table.name}`)}
-                                  on:contextmenu={e => openContextMenu(e, conn.config.id, table.name, pgSchema.name)}
+                                  on:contextmenu={e => openTableContextMenu(e, conn.config.id, table.name, pgSchema.name)}
                                   role="treeitem" aria-selected={false}
                                   tabindex="0"
                                   on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-${pgSchema.name}-t-${table.name}`)}
@@ -272,7 +305,7 @@
                       <div
                         class="table-label"
                         on:click={() => toggleTable(`${conn.config.id}-t-${table.name}`)}
-                        on:contextmenu={e => openContextMenu(e, conn.config.id, table.name)}
+                        on:contextmenu={e => openTableContextMenu(e, conn.config.id, table.name)}
                         role="treeitem" aria-selected={false}
                         tabindex="0"
                         on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-t-${table.name}`)}
@@ -366,12 +399,21 @@
     style="left:{contextMenu.x}px; top:{contextMenu.y}px"
     role="menu"
   >
-    <button role="menuitem" on:click={() => handleContextAction('view')}>
-      View Data (SELECT * LIMIT 100)
-    </button>
-    <button role="menuitem" on:click={() => handleContextAction('copy')}>
-      Copy Name
-    </button>
+    {#if contextMenu.kind === 'table'}
+      <button role="menuitem" on:click={() => handleContextAction('view')}>
+        View Data (SELECT * LIMIT 100)
+      </button>
+      <button role="menuitem" on:click={() => handleContextAction('copy')}>
+        Copy Name
+      </button>
+      <button role="menuitem" on:click={() => handleContextAction('backup')}>
+        Backup Table...
+      </button>
+    {:else if contextMenu.kind === 'database'}
+      <button role="menuitem" on:click={() => handleContextAction('import')}>
+        Import...
+      </button>
+    {/if}
   </div>
 {/if}
 

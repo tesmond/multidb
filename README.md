@@ -14,3 +14,14 @@ to this in your browser, and you can call your Go code from devtools.
 ## Building
 
 To build a redistributable, production mode package, use `wails build`.
+
+## App Icons
+
+This project uses committed application icons for desktop builds:
+
+- macOS icon: `resources/appicon.icns`
+- Windows icon: `resources/appicon.ico`
+
+The Wails config points at the committed macOS icon in `wails.json`. The Windows `.ico` file is also stored in `resources/` so it can be used during Windows packaging without relying on generated files in `build/`.
+
+If you update the source image (`frontend/src/assets/images/capy.png`), regenerate and replace the committed icon files in `resources/` before building release artifacts.
