@@ -20,6 +20,7 @@
   // --- DOM refs ---
   let canvas: HTMLCanvasElement;
   let scrollContainer: HTMLDivElement;
+  let gridWrap: HTMLDivElement;
   let containerWidth = 0;
   let containerHeight = 0;
 
@@ -499,11 +500,20 @@
     scheduleRender();
   }
 
-  // ─── Keyboard: copy selection / clear ────────────────────────────────────────
+  // ─── Keyboard: copy selection / clear / select-all ───────────────────────────
   function onGridKeyDown(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
       e.preventDefault();
       copySelection();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+      // Only activate select-all when the grid already has a selection, so we
+      // don't steal Ctrl/Cmd+A from other contexts (SQL editor, etc.).
+      if (sel !== null && rows.length > 0 && result?.columns?.length) {
+        e.preventDefault();
+        sel = { r0: 0, c0: 0, r1: totalRows - 1, c1: result.columns.length - 1 };
+        scheduleRender();
+      }
     }
     if (e.key === 'Escape') {
       sel = null;
@@ -605,10 +615,20 @@
     if (tabId) tabs.updateTab(tabId, { sortCol: -1, sortDirection: 'asc' });
   }
 
+  // ─── Click-outside: clear selection ──────────────────────────────────────────
+  function onDocumentMouseDown(e: MouseEvent) {
+    if (sel === null) return;
+    if (gridWrap && !gridWrap.contains(e.target as Node)) {
+      sel = null;
+      scheduleRender();
+    }
+  }
+
   // ─── Lifecycle ────────────────────────────────────────────────────────────────
   onMount(() => {
     resolveColors();
     scheduleRender();
+    document.addEventListener('mousedown', onDocumentMouseDown);
   });
 
   onDestroy(() => {
@@ -616,6 +636,7 @@
     window.removeEventListener('mouseup',   onWindowSelectionMouseUp);
     window.removeEventListener('mousemove', onResize);
     window.removeEventListener('mouseup',   stopResize);
+    document.removeEventListener('mousedown', onDocumentMouseDown);
   });
 </script>
 
@@ -630,6 +651,7 @@
   <!-- svelte-ignore a11y-no-noninteractive-tabindex -->
   <div
     class="grid-wrap"
+    bind:this={gridWrap}
     tabindex="0"
     role="region"
     aria-label="Query results"
