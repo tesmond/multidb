@@ -59,32 +59,45 @@
   }
 
   // ─── Column max widths (for auto-fit on resize-handle double-click) ───────────
-  // Scanned once per result set and cached so repeated double-clicks are instant.
+  // Computed lazily on first double-click per result set using the actual bound
+  // canvas element so that system font keywords (-apple-system etc.) resolve
+  // correctly.  An unattached canvas created with document.createElement cannot
+  // resolve those fonts and returns near-identical widths for every string.
   let colMaxWidths: number[] = [];
-  let _colMaxKey = '';
+  let _colMaxResult: ExecuteResult | null = null;
 
-  $: {
-    const key = result?.columns ? result.columns.join('\x00') : '';
-    if (key !== _colMaxKey) {
-      _colMaxKey = key;
-      const cols = result?.columns;
-      const dataRows = result?.rows ?? [];
-      if (!cols || cols.length === 0) {
-        colMaxWidths = [];
-      } else {
-        // Seed with header label width (leave room for the sort icon too)
-        const maxW = cols.map(c => c.length * AVG_CHAR_W + CELL_PAD_X * 2 + 22);
-        for (const row of dataRows) {
-          for (let c = 0; c < row.length && c < cols.length; c++) {
-            const v = row[c];
-            const len = v === null ? 4 : String(v).length; // NULL = 4 chars
-            const w = len * AVG_CHAR_W + CELL_PAD_X * 2;
-            if (w > maxW[c]) maxW[c] = w;
-          }
-        }
-        colMaxWidths = maxW.map(w => Math.min(Math.max(w, 50), 800));
+  function ensureColMaxWidths() {
+    if (!canvas || !result || result === _colMaxResult) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const cols = result.columns;
+    const dataRows = result.rows ?? [];
+
+    // Save/restore so we don't disturb the renderer's font state.
+    ctx.save();
+
+    ctx.font = FONT;
+    const maxW: number[] = cols.map(c => ctx.measureText(c).width + CELL_PAD_X * 2 + 22);
+
+    // Pre-measure NULL once with its italic variant.
+    ctx.font = FONT_NULL;
+    const nullW = ctx.measureText('NULL').width + CELL_PAD_X * 2;
+    ctx.font = FONT;
+
+    for (const row of dataRows) {
+      for (let c = 0; c < row.length && c < cols.length; c++) {
+        const v = row[c];
+        const w = v === null ? nullW : ctx.measureText(String(v)).width + CELL_PAD_X * 2;
+        if (w > maxW[c]) maxW[c] = w;
       }
     }
+
+    ctx.restore();
+
+    colMaxWidths = maxW.map(w => Math.min(Math.max(w, 50), 800));
+    _colMaxResult = result;
   }
 
   // ─── Resize drag state ────────────────────────────────────────────────────────
@@ -544,13 +557,20 @@
     resizing = null;
     window.removeEventListener('mousemove', onResize);
     window.removeEventListener('mouseup',  stopResize);
+    // Reset here so the very next header click triggers a sort normally.
+    // The resize handle's on:click|stopPropagation already prevents any drag
+    // mouseup from bubbling into the header's click handler, so keeping
+    // didResize=true after stopResize only caused the first post-resize
+    // header click to be swallowed unnecessarily.
+    didResize = false;
   }
 
   // ─── Auto-fit column on resize-handle double-click ───────────────────────────
-  // Uses the precomputed colMaxWidths so there is no re-scan of the data.
+  // Ensures colMaxWidths is populated (lazy, cached per result), then applies.
   function autoFitColumn(e: MouseEvent, idx: number) {
     e.preventDefault();
     e.stopPropagation();
+    ensureColMaxWidths();
     if (colMaxWidths[idx] != null) {
       colWidths[idx] = colMaxWidths[idx];
       colWidths = [...colWidths];
