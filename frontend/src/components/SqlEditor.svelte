@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { tabs, activeConnections, selectedConnId, statusMessage, outputTab } from '../stores/appStore';
+  import { tabs, activeConnections, selectedConnId, statusMessage, outputTab, requestSchemaRefresh } from '../stores/appStore';
   import { ExecuteQueryStreamed, CancelQuery } from '../../wailsjs/go/main/App';
   import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
   import { get } from 'svelte/store';
@@ -11,6 +11,7 @@
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { sql, MySQL, PostgreSQL, SQLite } from '@codemirror/lang-sql';
   import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
+  import { buildSqlNamespace, makeSmartCompletionSource, type DbSchema } from '../lib/sqlComplete';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { lineNumbers, highlightActiveLineGutter, highlightActiveLine } from '@codemirror/view';
   import { bracketMatching, indentOnInput } from '@codemirror/language';
@@ -28,44 +29,89 @@
   let view: EditorView | null = null;
   let sqlCompartment = new Compartment();
 
-  // Build a schema map for CodeMirror SQL autocomplete from stored schema data
-  function buildSchemaForCodemirror(connId: string): Record<string, string[]> {
+  // Convert the active-connection schema into the DbSchema shape used by
+  // the smart completion engine.
+  function getConnectionDbSchema(connId: string): DbSchema | null {
     const conn = get(activeConnections).find(c => c.config.id === connId);
-    if (!conn?.schema) return {};
+    if (!conn?.schema) return null;
 
-    const result: Record<string, string[]> = {};
-
-    function addTable(table: { name: string; columns?: { name: string }[] }) {
-      result[table.name] = (table.columns ?? []).map(c => c.name);
-    }
+    const driver = conn.config.driver ?? 'postgres';
 
     if (conn.schema.schemas?.length) {
-      for (const s of conn.schema.schemas) {
-        for (const t of s.tables ?? []) addTable(t);
-        for (const v of s.views ?? []) addTable(v);
-      }
-    } else {
-      for (const t of conn.schema.tables ?? []) addTable(t);
-      for (const v of conn.schema.views ?? []) addTable(v);
+      return {
+        driver,
+        schemas: conn.schema.schemas.map(s => ({
+          name: s.name,
+          tables: [
+            ...(s.tables ?? []).map(t => ({
+              name: t.name,
+              columns: (t.columns ?? []).map(c => ({ name: c.name, type: c.type, key: c.key })),
+              isView: false,
+            })),
+            ...(s.views ?? []).map(t => ({
+              name: t.name,
+              columns: (t.columns ?? []).map(c => ({ name: c.name, type: c.type, key: c.key })),
+              isView: true,
+            })),
+          ],
+        })),
+      };
     }
 
-    return result;
+    return {
+      driver,
+      tables: (conn.schema.tables ?? []).map(t => ({
+        name: t.name,
+        columns: (t.columns ?? []).map(c => ({ name: c.name, type: c.type, key: c.key })),
+        isView: false,
+      })),
+      views: (conn.schema.views ?? []).map(t => ({
+        name: t.name,
+        columns: (t.columns ?? []).map(c => ({ name: c.name, type: c.type, key: c.key })),
+        isView: true,
+      })),
+    };
   }
 
   function getDialect(connId: string) {
     const conn = get(activeConnections).find(c => c.config.id === connId);
     switch (conn?.config.driver) {
-      case 'mysql': return MySQL;
+      case 'mysql':    return MySQL;
       case 'postgres': return PostgreSQL;
-      case 'sqlite': return SQLite;
-      default: return PostgreSQL;
+      case 'sqlite':   return SQLite;
+      default:         return PostgreSQL;
     }
   }
 
+  /**
+   * Returns true for any SQL statement that modifies the schema
+   * (DDL) so we know to refresh the navigator tree afterwards.
+   */
+  function isDDL(sqlText: string): boolean {
+    return /^\s*(?:CREATE|DROP|ALTER|RENAME|TRUNCATE|COMMENT\s+ON)\b/im.test(sqlText);
+  }
+
   function makeSqlExtension(connId: string) {
-    const schema = buildSchemaForCodemirror(connId);
-    const dialect = getDialect(connId);
-    return sql({ dialect, schema, upperCaseKeywords: true });
+    const dialect  = getDialect(connId);
+    const dbSchema = getConnectionDbSchema(connId);
+
+    // Build hierarchical namespace for the built-in schema completion
+    // (handles schema.table and table.column dot-completions natively).
+    const namespace = dbSchema ? buildSqlNamespace(dbSchema) : {};
+
+    const sqlLang = sql({ dialect, schema: namespace, upperCaseKeywords: true });
+
+    if (dbSchema) {
+      // Register our smart source on the language data so it runs
+      // alongside (not instead of) the built-in keyword + schema completion.
+      const smartSource = makeSmartCompletionSource(dbSchema);
+      return [
+        sqlLang.language.data.of({ autocomplete: smartSource }),
+        sqlLang,
+      ];
+    }
+
+    return sqlLang;
   }
 
   function getSelectedOrAllSQL(): string {
@@ -132,6 +178,11 @@
         outputTab.set('messages');
       } else {
         statusMessage.set(`${streamRows.length} rows · ${pendingDuration}ms`);
+        // Automatically refresh the schema tree when a DDL statement
+        // succeeds (CREATE TABLE, DROP TABLE, ALTER TABLE, etc.)
+        if (isDDL(sql)) {
+          requestSchemaRefresh(connId);
+        }
       }
     }
 
@@ -206,7 +257,11 @@
           indentOnInput(),
           highlightSelectionMatches(),
           history(),
-          autocompletion(),
+          autocompletion({
+            activateOnTyping: true,
+            maxRenderedOptions: 50,
+            defaultKeymap: true,
+          }),
           sqlCompartment.of(makeSqlExtension(initialConnId)),
           keymap.of([
             { key: 'Ctrl-Enter', mac: 'Cmd-Enter', run: () => { runQuery(); return true; } },

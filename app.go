@@ -897,6 +897,68 @@ func ioReadAll(rc interface{ Read([]byte) (int, error) }) ([]byte, error) {
 	}
 }
 
+// SaveCSV opens a native save-file dialog and writes the CSV content to the
+// chosen path. This is required on macOS/Wails because WKWebView does not
+// support blob URL downloads triggered by a simulated link click.
+func (a *App) SaveCSV(csvContent string, defaultFilename string) error {
+	if defaultFilename == "" {
+		defaultFilename = "query_results.csv"
+	}
+
+	targetPath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Export CSV",
+		DefaultFilename: defaultFilename,
+		Filters: []runtime.FileFilter{
+			{
+				DisplayName: "CSV File (*.csv)",
+				Pattern:     "*.csv",
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if targetPath == "" {
+		// User cancelled – not an error
+		return nil
+	}
+
+	if err := os.WriteFile(targetPath, []byte(csvContent), 0600); err != nil {
+		return fmt.Errorf("write CSV file: %w", err)
+	}
+	return nil
+}
+
+// SaveFile writes the provided data to the given absolute or relative path,
+// creating parent directories if necessary. It writes to a temporary file
+// first and then atomically renames it into place to avoid partial writes.
+func (a *App) SaveFile(path string, data []byte, perm os.FileMode) error {
+	if path == "" {
+		return fmt.Errorf("empty path")
+	}
+
+	// Ensure parent directory exists
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create parent directories: %w", err)
+		}
+	}
+
+	// Write to a temp file in the same directory then rename
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, perm); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+
+	// Ensure rename is atomic where possible
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("finalise write: %w", err)
+	}
+	return nil
+}
+
 // -----------------------------------------------------------------------
 // History API
 // -----------------------------------------------------------------------

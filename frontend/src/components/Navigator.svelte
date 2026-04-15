@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, tabs, activeTabId, statusMessage } from '../stores/appStore';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, tabs, activeTabId, statusMessage, schemaRefreshSignal } from '../stores/appStore';
   import type { ActiveConnection } from '../stores/appStore';
   import { GetSchema, Disconnect, BackupTable, ImportTable } from '../../wailsjs/go/main/App';
   import { get } from 'svelte/store';
@@ -104,18 +104,24 @@
     contextMenu = { kind: 'database', x: e.clientX, y: e.clientY, connId };
   }
 
-  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'import') {
+  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'import' | 'refresh') {
     if (!contextMenu) return;
     const menu = contextMenu;
     contextMenu = null;
 
     try {
-      if (action === 'import' && menu.kind === 'database') {
-        await ImportTable(menu.connId);
-        statusMessage.set('Import completed');
-        const conn = get(activeConnections).find(c => c.config.id === menu.connId);
-        if (conn) {
-          await loadSchema(conn);
+      if (menu.kind === 'database') {
+        if (action === 'refresh') {
+          statusMessage.set('Refreshing schema…');
+          await refreshSchema(menu.connId);
+          statusMessage.set('Schema refreshed');
+          return;
+        }
+        if (action === 'import') {
+          await ImportTable(menu.connId);
+          statusMessage.set('Import completed');
+          await refreshSchema(menu.connId);
+          return;
         }
         return;
       }
@@ -136,6 +142,22 @@
   }
 
   function closeContextMenu() { contextMenu = null; }
+
+  // ── Schema refresh ─────────────────────────────────────────────────────────
+  // Triggered by the context menu "Refresh" action OR by SqlEditor after a DDL
+  // statement completes (via the schemaRefreshSignal store).
+  async function refreshSchema(connId: string) {
+    const conn = get(activeConnections).find(c => c.config.id === connId);
+    if (conn) await loadSchema(conn);
+  }
+
+  // Watch the shared signal so any component can request a schema refresh
+  // without needing a direct reference to this component.
+  let _lastRefreshTs = 0;
+  $: if ($schemaRefreshSignal && $schemaRefreshSignal.ts !== _lastRefreshTs) {
+    _lastRefreshTs = $schemaRefreshSignal.ts;
+    refreshSchema($schemaRefreshSignal.connId);
+  }
 </script>
 
 <svelte:window on:click={closeContextMenu} />
@@ -410,6 +432,10 @@
         Backup Table...
       </button>
     {:else if contextMenu.kind === 'database'}
+      <button role="menuitem" on:click={() => handleContextAction('refresh')}>
+        Refresh Schema
+      </button>
+      <div class="context-separator"></div>
       <button role="menuitem" on:click={() => handleContextAction('import')}>
         Import...
       </button>
@@ -508,4 +534,7 @@
     color: var(--text); font-size: 13px; cursor: pointer;
   }
   .context-menu button:hover { background: var(--bg-hover); }
+  .context-separator {
+    height: 1px; background: var(--border); margin: 3px 0;
+  }
 </style>

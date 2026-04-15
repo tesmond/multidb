@@ -81,7 +81,7 @@
     // Check if connection is already active
     const activeConns = get(activeConnections);
     const isActive = activeConns.some(conn => conn.config.id === connId);
-    
+
     if (!isActive) {
       // Find the saved connection config and connect to it
       try {
@@ -91,11 +91,11 @@
         const { ListSavedConnections } = await import('../../wailsjs/go/main/App');
         const savedConns = await ListSavedConnections();
         const savedConn = savedConns.find(c => c.id === connId);
-        
+
         if (savedConn) {
           await SaveAndConnect(savedConn);
           // Add to active connections
-          activeConnections.update(conns => 
+          activeConnections.update(conns =>
             [...conns, { config: savedConn, schema: null, schemaLoading: false, schemaError: null }]
           );
         } else {
@@ -110,7 +110,7 @@
 
     // Switch to the correct connection
     selectedConnId.set(connId);
-    
+
     // Create new tab with the query
     tabs.add(connId);
     const allTabs = get(tabs);
@@ -135,7 +135,7 @@
 
   <div class="output-content">
     {#if $outputTab === 'results'}
-      <ResultsGrid result={$activeTab?.result ?? null} />
+      <ResultsGrid result={$activeTab?.result ?? null} tabId={$activeTab?.id ?? ''} />
 
     {:else if $outputTab === 'messages'}
       <div class="messages">

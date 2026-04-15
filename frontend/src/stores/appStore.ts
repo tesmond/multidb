@@ -1,5 +1,10 @@
-import { writable, derived, get } from 'svelte/store';
-import type { connections, schema, history, main } from '../../wailsjs/go/models';
+import { writable, derived, get } from "svelte/store";
+import type {
+  connections,
+  schema,
+  history,
+  main,
+} from "../../wailsjs/go/models";
 
 // -----------------------------------------------------------------------
 // Connection state
@@ -18,7 +23,7 @@ export interface ActiveConnection {
 }
 
 export const activeConnections = writable<ActiveConnection[]>([]);
-export const selectedConnId = writable<string>('');
+export const selectedConnId = writable<string>("");
 
 // -----------------------------------------------------------------------
 // Tab / editor state
@@ -32,11 +37,23 @@ export interface Tab {
   result: ExecuteResult | null;
   running: boolean;
   queryId: string;
+  sortCol: number;
+  sortDirection: "asc" | "desc";
 }
 
-function makeTab(connId = ''): Tab {
+function makeTab(connId = ""): Tab {
   const id = crypto.randomUUID();
-  return { id, title: 'Query', connId, sql: '', result: null, running: false, queryId: '' };
+  return {
+    id,
+    title: "Query",
+    connId,
+    sql: "",
+    result: null,
+    running: false,
+    queryId: "",
+    sortCol: -1,
+    sortDirection: "asc",
+  };
 }
 
 function createTabStore() {
@@ -45,34 +62,35 @@ function createTabStore() {
   return {
     subscribe,
     add(connId: string) {
-      update(tabs => [...tabs, makeTab(connId)]);
+      update((tabs) => [...tabs, makeTab(connId)]);
     },
     remove(id: string) {
-      update(tabs => {
-        const next = tabs.filter(t => t.id !== id);
+      update((tabs) => {
+        const next = tabs.filter((t) => t.id !== id);
         return next.length > 0 ? next : [makeTab()];
       });
     },
     updateTab(id: string, patch: Partial<Tab>) {
-      update(tabs => tabs.map(t => (t.id === id ? { ...t, ...patch } : t)));
+      update((tabs) => tabs.map((t) => (t.id === id ? { ...t, ...patch } : t)));
     },
     set,
   };
 }
 
 export const tabs = createTabStore();
-export const activeTabId = writable<string>('');
+export const activeTabId = writable<string>("");
 
 // Ensure the active tab id is always valid
-tabs.subscribe($tabs => {
+tabs.subscribe(($tabs) => {
   const $active = get(activeTabId);
-  if (!$tabs.find(t => t.id === $active)) {
-    activeTabId.set($tabs[0]?.id ?? '');
+  if (!$tabs.find((t) => t.id === $active)) {
+    activeTabId.set($tabs[0]?.id ?? "");
   }
 });
 
-export const activeTab = derived([tabs, activeTabId], ([$tabs, $id]) =>
-  $tabs.find(t => t.id === $id) ?? null
+export const activeTab = derived(
+  [tabs, activeTabId],
+  ([$tabs, $id]) => $tabs.find((t) => t.id === $id) ?? null,
 );
 
 // -----------------------------------------------------------------------
@@ -82,7 +100,24 @@ export const activeTab = derived([tabs, activeTabId], ([$tabs, $id]) =>
 export const showConnectionDialog = writable(false);
 export const editingConnection = writable<ConnectionConfig | null>(null);
 
-export const outputTab = writable<'results' | 'messages' | 'history'>('results');
+export const outputTab = writable<"results" | "messages" | "history">(
+  "results",
+);
 
-export const statusMessage = writable('Ready');
+export const statusMessage = writable("Ready");
 export const queryHistoryStore = writable<QueryRecord[]>([]);
+
+// -----------------------------------------------------------------------
+// Schema refresh signal
+// -----------------------------------------------------------------------
+// Components (SqlEditor) set this to trigger Navigator to re-fetch the schema
+// for a given connection after a DDL statement is executed.
+
+export const schemaRefreshSignal = writable<{
+  connId: string;
+  ts: number;
+} | null>(null);
+
+export function requestSchemaRefresh(connId: string) {
+  schemaRefreshSignal.set({ connId, ts: Date.now() });
+}
