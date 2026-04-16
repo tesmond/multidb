@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, tabs, activeTabId, statusMessage, schemaRefreshSignal } from '../stores/appStore';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, tabs, activeTabId, statusMessage, schemaRefreshSignal, saveCachedSchema } from '../stores/appStore';
   import type { ActiveConnection } from '../stores/appStore';
   import { GetSchema, Disconnect, BackupTable, ImportTable } from '../../wailsjs/go/main/App';
   import { get } from 'svelte/store';
@@ -18,6 +18,9 @@
       activeConnections.update(conns =>
         conns.map(c => c.config.id === conn.config.id ? { ...c, schema: tree, schemaLoading: false } : c)
       );
+      // Save to cache for persistence
+      const hash = JSON.stringify(tree); // Simple hash for now
+      await saveCachedSchema(conn.config.id, tree, hash);
     } catch (e: any) {
       activeConnections.update(conns =>
         conns.map(c => c.config.id === conn.config.id ? { ...c, schemaLoading: false, schemaError: String(e) } : c)

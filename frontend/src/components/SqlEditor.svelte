@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { tabs, activeConnections, selectedConnId, statusMessage, outputTab, requestSchemaRefresh } from '../stores/appStore';
+  import { tabs, activeConnections, selectedConnId, statusMessage, outputTab, requestSchemaRefresh, extractFirstTableName } from '../stores/appStore';
   import { ExecuteQueryStreamed, CancelQuery } from '../../wailsjs/go/main/App';
   import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
   import { get } from 'svelte/store';
@@ -182,6 +182,14 @@
         // succeeds (CREATE TABLE, DROP TABLE, ALTER TABLE, etc.)
         if (isDDL(sql)) {
           requestSchemaRefresh(connId);
+        }
+        // Dynamic tab naming: if not manually renamed, set title to first table name
+        const currentTab = get(tabs).find(t => t.id === tabId);
+        if (currentTab && !currentTab.manuallyRenamed) {
+          const tableName = extractFirstTableName(sql);
+          if (tableName) {
+            tabs.updateTab(tabId, { title: tableName });
+          }
         }
       }
     }

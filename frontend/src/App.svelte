@@ -6,9 +6,76 @@
   import OutputPanel from './components/OutputPanel.svelte';
   import StatusBar from './components/StatusBar.svelte';
   import ConnectionDialog from './components/ConnectionDialog.svelte';
-  import { tabs, activeTabId, activeConnections, queryHistoryStore, selectedConnId } from './stores/appStore';
+  import { tabs, activeTabId, activeConnections, queryHistoryStore, selectedConnId, hydrateCachedSchemas } from './stores/appStore';
   import { ListSavedConnections, GetQueryHistory } from '../wailsjs/go/main/App';
   import { get } from 'svelte/store';
+
+  // Tab context menu state
+  let tabContextMenu: { tabId: string; x: number; y: number } | null = null;
+
+  // Drag-drop state
+  let draggedTabIndex: number | null = null;
+
+  // Tab context menu handlers
+  function openTabContextMenu(e: MouseEvent, tabId: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    tabContextMenu = { tabId, x: e.clientX, y: e.clientY };
+  }
+
+  function closeTabContextMenu() {
+    tabContextMenu = null;
+  }
+
+  function handleTabAction(action: 'rename' | 'duplicate' | 'closeOthers' | 'closeRight' | 'closeLeft') {
+    if (!tabContextMenu) return;
+    const { tabId } = tabContextMenu;
+    tabContextMenu = null;
+
+    switch (action) {
+      case 'rename':
+        const newTitle = window.prompt('Enter new tab name:', get(tabs).find(t => t.id === tabId)?.title || 'Query');
+        if (newTitle && newTitle.trim()) {
+          tabs.renameTab(tabId, newTitle.trim());
+        }
+        break;
+      case 'duplicate':
+        tabs.duplicateTab(tabId);
+        break;
+      case 'closeOthers':
+        tabs.closeOtherTabs(tabId);
+        break;
+      case 'closeRight':
+        tabs.closeTabsToRight(tabId);
+        break;
+      case 'closeLeft':
+        tabs.closeTabsToLeft(tabId);
+        break;
+    }
+  }
+
+  // Drag-drop handlers
+  function onTabDragStart(e: DragEvent, index: number) {
+    draggedTabIndex = index;
+    e.dataTransfer!.effectAllowed = 'move';
+  }
+
+  function onTabDragOver(e: DragEvent) {
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'move';
+  }
+
+  function onTabDrop(e: DragEvent, dropIndex: number) {
+    e.preventDefault();
+    if (draggedTabIndex !== null && draggedTabIndex !== dropIndex) {
+      tabs.reorderTabs(draggedTabIndex, dropIndex);
+    }
+    draggedTabIndex = null;
+  }
+
+  function onTabDragEnd() {
+    draggedTabIndex = null;
+  }
 
   // Pane sizes
   let navWidth = 240;
@@ -48,6 +115,8 @@
       if (saved && saved.length > 0) {
         activeConnections.set(saved.map(cfg => ({ config: cfg, schema: null, schemaLoading: false, schemaError: null })));
         selectedConnId.set(saved[0].id);
+        // Hydrate cached schemas
+        await hydrateCachedSchemas();
       }
     } catch (_) {}
 
@@ -59,7 +128,7 @@
   });
 </script>
 
-<svelte:window on:mousemove={onMouseMove} on:mouseup={onMouseUp} />
+<svelte:window on:mousemove={onMouseMove} on:mouseup={onMouseUp} on:click={closeTabContextMenu} />
 
 <div class="app">
   <TopToolbar />
@@ -77,11 +146,18 @@
     <div class="main-area" id="main-area">
       <!-- Tab bar -->
       <div class="tab-bar" role="tablist">
-        {#each $tabs as tab (tab.id)}
+        {#each $tabs as tab, i (tab.id)}
           <button
             class="tab"
             class:active={$activeTabId === tab.id}
+            class:dragging={draggedTabIndex === i}
             on:click={() => activeTabId.set(tab.id)}
+            on:contextmenu={(e) => openTabContextMenu(e, tab.id)}
+            draggable="true"
+            on:dragstart={(e) => onTabDragStart(e, i)}
+            on:dragover={onTabDragOver}
+            on:drop={(e) => onTabDrop(e, i)}
+            on:dragend={onTabDragEnd}
             role="tab"
             aria-selected={$activeTabId === tab.id}
           >
@@ -126,6 +202,33 @@
 </div>
 
 <ConnectionDialog />
+
+{#if tabContextMenu}
+  <div
+    class="tab-context-menu"
+    style="left:{tabContextMenu.x}px; top:{tabContextMenu.y}px"
+    role="menu"
+  >
+    <button role="menuitem" on:click={() => handleTabAction('rename')}>
+      Rename Tab
+    </button>
+    <button role="menuitem" on:click={() => handleTabAction('duplicate')}>
+      Duplicate Tab
+    </button>
+    <div class="context-separator"></div>
+    <button role="menuitem" on:click={() => handleTabAction('closeOthers')}>
+      Close Other Tabs
+    </button>
+    <button role="menuitem" on:click={() => handleTabAction('closeRight')}>
+      Close Tabs to the Right
+    </button>
+    <button role="menuitem" on:click={() => handleTabAction('closeLeft')}>
+      Close Tabs to the Left
+    </button>
+  </div>
+{/if}
+
+
 
 <style>
   :global(*) { box-sizing: border-box; }
@@ -229,4 +332,23 @@
 
   .tab-panel { display: none; height: 100%; }
   .tab-panel.active { display: flex; flex-direction: column; height: 100%; }
+
+  .tab-context-menu {
+    position: fixed; z-index: 300;
+    background: var(--bg-surface); border: 1px solid var(--border);
+    border-radius: 4px; min-width: 160px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    overflow: hidden;
+  }
+  .tab-context-menu button {
+    display: block; width: 100%; text-align: left;
+    padding: 8px 16px; background: none; border: none;
+    color: var(--text); font-size: 13px; cursor: pointer;
+  }
+  .tab-context-menu button:hover { background: var(--bg-hover); }
+  .context-separator {
+    height: 1px; background: var(--border); margin: 3px 0;
+  }
+
+  .tab.dragging { opacity: 0.5; }
 </style>

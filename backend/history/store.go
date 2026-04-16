@@ -67,6 +67,12 @@ func (s *Store) migrate() error {
 			database TEXT NOT NULL DEFAULT '',
 			dsn      TEXT NOT NULL DEFAULT ''
 		);
+		CREATE TABLE IF NOT EXISTS schema_cache (
+			conn_id           TEXT PRIMARY KEY,
+			schema_json       TEXT NOT NULL,
+			last_refreshed_at TEXT NOT NULL,
+			hash              TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		return err
@@ -74,7 +80,7 @@ func (s *Store) migrate() error {
 
 	// Add result_count column if it doesn't exist (for migration from older versions)
 	_, err = s.db.Exec(`
-		ALTER TABLE query_history 
+		ALTER TABLE query_history
 		ADD COLUMN result_count INTEGER NOT NULL DEFAULT 0
 	`)
 	// Ignore error if column already exists
@@ -201,6 +207,33 @@ func (s *Store) ListSavedConnections(ctx context.Context) ([]connections.Connect
 		cfgs = append(cfgs, c)
 	}
 	return cfgs, rows.Err()
+}
+
+// SaveSchema persists the schema for a connection.
+func (s *Store) SaveSchema(ctx context.Context, connID string, schemaJson string, hash string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO schema_cache (conn_id, schema_json, last_refreshed_at, hash)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(conn_id) DO UPDATE SET
+			schema_json=excluded.schema_json,
+			last_refreshed_at=excluded.last_refreshed_at,
+			hash=excluded.hash`,
+		connID, schemaJson, time.Now().UTC().Format(time.RFC3339), hash)
+	return err
+}
+
+// LoadSchema retrieves the cached schema for a connection.
+func (s *Store) LoadSchema(ctx context.Context, connID string) (schemaJson string, lastRefreshedAt string, hash string, err error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT schema_json, last_refreshed_at, hash FROM schema_cache WHERE conn_id = ?`, connID)
+	err = row.Scan(&schemaJson, &lastRefreshedAt, &hash)
+	return
+}
+
+// DeleteSchema removes the cached schema for a connection.
+func (s *Store) DeleteSchema(ctx context.Context, connID string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM schema_cache WHERE conn_id = ?", connID)
+	return err
 }
 
 // Close closes the underlying database.

@@ -687,6 +687,7 @@
                 on:mousedown={e => startResize(e, i)}
                 on:dblclick={e => autoFitColumn(e, i)}
                 on:click|stopPropagation={() => {}}
+                on:keydown|stopPropagation={() => {}}
                 role="separator"
                 aria-label="Resize column"
               ></div>

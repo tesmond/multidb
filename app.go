@@ -233,7 +233,7 @@ func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
 	}
 
 	if maxRows <= 0 {
-		maxRows = 1_000_000
+		maxRows = 10_000_000
 	}
 
 	ctx, cancel := context.WithCancel(a.ctx)
@@ -393,6 +393,22 @@ func (a *App) GetSchema(connID string) (schema.SchemaTree, error) {
 		return schema.SchemaTree{}, fmt.Errorf("config not found for %q", connID)
 	}
 	return a.inspector.GetSchema(a.ctx, db, cfg.Driver)
+}
+
+// LoadSchema retrieves the cached schema for a connection.
+func (a *App) LoadSchema(connID string) (schemaJson string, lastRefreshedAt string, hash string, err error) {
+	if a.store == nil {
+		return "", "", "", fmt.Errorf("store not initialised")
+	}
+	return a.store.LoadSchema(a.ctx, connID)
+}
+
+// SaveSchema persists the schema for a connection.
+func (a *App) SaveSchema(connID string, schemaJson string, hash string) error {
+	if a.store == nil {
+		return fmt.Errorf("store not initialised")
+	}
+	return a.store.SaveSchema(a.ctx, connID, schemaJson, hash)
 }
 
 // -----------------------------------------------------------------------
