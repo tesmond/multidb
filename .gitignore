@@ -21,7 +21,6 @@ Thumbs.db
 
 # Output directories
 /bin/
-/build/
 /dist/
 
 # Go workspace / modules
@@ -41,8 +40,7 @@ vendor/
 node_modules/
 
 # Build output (Vite/SvelteKit)
-dist/
-build/
+frontend/dist/
 .svelte-kit/
 .output/
 
@@ -71,9 +69,10 @@ coverage/
 # =========================
 # Wails
 # =========================
+# Generated JS/TS bindings (regenerated on every build)
 wailsjs/
-frontend/dist/
-build/
+# Compiled app binaries only - build/darwin/, build/icon.iconset/ etc. are committed
+build/bin/
 
 # =========================
 # Misc
