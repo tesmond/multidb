@@ -213,19 +213,14 @@ export async function loadCachedSchema(connId: string) {
     const res: any = await LoadSchema(connId);
     if (!res) return;
 
-    // Normalize possible response shapes
-    const schemaJson: string | undefined =
-      typeof res === "string" ? res : (res?.schemaJson ?? res?.schema_json);
+    // LoadSchema now returns a struct: { schemaJson, lastRefreshedAt, hash }
+    const schemaJson: string = res.schemaJson ?? res.schema_json ?? (typeof res === 'string' ? res : '');
     if (!schemaJson) return;
 
     const schema = JSON.parse(schemaJson) as SchemaTree;
-    const lastRefreshedAt: string =
-      res?.lastRefreshedAt ??
-      res?.last_refreshed_at ??
-      new Date().toISOString();
-    const hash: string = res?.hash ?? res?.h ?? "";
+    const lastRefreshedAt: string = res.lastRefreshedAt ?? res.last_refreshed_at ?? new Date().toISOString();
+    const hash: string = res.hash ?? '';
 
-    // Update stores
     schemaCache.update((cache) => ({
       ...cache,
       [connId]: { schema, lastRefreshedAt, hash },

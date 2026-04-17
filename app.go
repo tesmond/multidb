@@ -51,6 +51,15 @@ type tableBackupArchive struct {
 	Table   tableBackupPayload `json:"table"`
 }
 
+
+// SchemaCacheEntry is returned by LoadSchema so the frontend receives a
+// single structured value rather than a bare tuple.
+type SchemaCacheEntry struct {
+	SchemaJson      string `json:"schemaJson"`
+	LastRefreshedAt string `json:"lastRefreshedAt"`
+	Hash            string `json:"hash"`
+}
+
 // NewApp constructs the App.
 func NewApp() *App {
 	return &App{
@@ -396,11 +405,19 @@ func (a *App) GetSchema(connID string) (schema.SchemaTree, error) {
 }
 
 // LoadSchema retrieves the cached schema for a connection.
-func (a *App) LoadSchema(connID string) (schemaJson string, lastRefreshedAt string, hash string, err error) {
+func (a *App) LoadSchema(connID string) (*SchemaCacheEntry, error) {
 	if a.store == nil {
-		return "", "", "", fmt.Errorf("store not initialised")
+		return nil, fmt.Errorf("store not initialised")
 	}
-	return a.store.LoadSchema(a.ctx, connID)
+	schemaJson, lastRefreshedAt, hash, err := a.store.LoadSchema(a.ctx, connID)
+	if err != nil {
+		return nil, err
+	}
+	return &SchemaCacheEntry{
+		SchemaJson:      schemaJson,
+		LastRefreshedAt: lastRefreshedAt,
+		Hash:            hash,
+	}, nil
 }
 
 // SaveSchema persists the schema for a connection.

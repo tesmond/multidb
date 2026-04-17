@@ -15,6 +15,12 @@
 
   // Drag-drop state
   let draggedTabIndex: number | null = null;
+  // Index where the tab will be inserted if dropped (0..n)
+  let dropTargetIndex: number | null = null;
+  // Reference to the tab-bar element for measuring positions
+  let tabBarEl: HTMLDivElement;
+  // X coordinate for indicator inside tab-bar (px)
+  let indicatorX = 0;
 
   // Tab context menu handlers
   function openTabContextMenu(e: MouseEvent, tabId: string) {
@@ -57,24 +63,61 @@
   // Drag-drop handlers
   function onTabDragStart(e: DragEvent, index: number) {
     draggedTabIndex = index;
+    dropTargetIndex = null;
     e.dataTransfer!.effectAllowed = 'move';
+    e.dataTransfer!.setData('text/plain', String(index));
   }
 
-  function onTabDragOver(e: DragEvent) {
+  // Shared helper: given mouse clientX, compute insertion index and indicator position
+  function updateDropTarget(clientX: number) {
+    if (!tabBarEl) return;
+    const barRect = tabBarEl.getBoundingClientRect();
+    const children = Array.from(tabBarEl.querySelectorAll<HTMLElement>('.tab'));
+
+    // Default: append after all tabs
+    let insertAt = children.length;
+    let newIndicatorX = children.length > 0
+      ? children[children.length - 1].getBoundingClientRect().right - barRect.left
+      : 0;
+
+    for (let i = 0; i < children.length; i++) {
+      const rect = children[i].getBoundingClientRect();
+      const mid = rect.left + rect.width / 2;
+      if (clientX < mid) {
+        insertAt = i;
+        newIndicatorX = rect.left - barRect.left;
+        break;
+      }
+    }
+
+    dropTargetIndex = insertAt;
+    indicatorX = newIndicatorX;
+  }
+
+  function onTabBarDragOver(e: DragEvent) {
     e.preventDefault();
     e.dataTransfer!.dropEffect = 'move';
+    updateDropTarget(e.clientX);
   }
 
-  function onTabDrop(e: DragEvent, dropIndex: number) {
+  function onTabBarDrop(e: DragEvent) {
     e.preventDefault();
-    if (draggedTabIndex !== null && draggedTabIndex !== dropIndex) {
-      tabs.reorderTabs(draggedTabIndex, dropIndex);
+    const from = draggedTabIndex;
+    const to = dropTargetIndex;
+    if (from !== null && to !== null && from !== to) {
+      // After splice(from, 1), indices > from shift left by 1
+      const adjustedTo = from < to ? to - 1 : to;
+      tabs.reorderTabs(from, adjustedTo);
     }
     draggedTabIndex = null;
+    dropTargetIndex = null;
+    indicatorX = 0;
   }
 
   function onTabDragEnd() {
     draggedTabIndex = null;
+    dropTargetIndex = null;
+    indicatorX = 0;
   }
 
   // Pane sizes
@@ -145,38 +188,43 @@
     <!-- Main content area -->
     <div class="main-area" id="main-area">
       <!-- Tab bar -->
-      <div class="tab-bar" role="tablist">
-        {#each $tabs as tab, i (tab.id)}
-          <button
-            class="tab"
-            class:active={$activeTabId === tab.id}
-            class:dragging={draggedTabIndex === i}
-            on:click={() => activeTabId.set(tab.id)}
-            on:contextmenu={(e) => openTabContextMenu(e, tab.id)}
-            draggable="true"
-            on:dragstart={(e) => onTabDragStart(e, i)}
-            on:dragover={onTabDragOver}
-            on:drop={(e) => onTabDrop(e, i)}
-            on:dragend={onTabDragEnd}
-            role="tab"
-            aria-selected={$activeTabId === tab.id}
-          >
-            <span class="tab-title">{tab.title}</span>
-            {#if tab.running}
-              <span class="tab-spinner">⟳</span>
-            {/if}
-            <span
-              class="tab-close"
-              on:click|stopPropagation={() => tabs.remove(tab.id)}
-              role="button"
-              tabindex="0"
-              on:keydown={e => e.key === 'Enter' && tabs.remove(tab.id)}
-              aria-label="Close tab"
-            >✕</span>
-          </button>
-        {/each}
-        <button class="tab-add" on:click={() => { tabs.add(get(selectedConnId)); const t = get(tabs); activeTabId.set(t[t.length-1].id); }} title="New query tab" aria-label="Add tab">+</button>
-      </div>
+      <div class="tab-bar" role="tablist" bind:this={tabBarEl} on:dragover={onTabBarDragOver} on:drop={onTabBarDrop} >
+        <!-- insertion indicator -->
+        <div
+          class="insertion-indicator"
+          style="left:{indicatorX}px; display:{dropTargetIndex !== null ? 'block' : 'none'}"
+          aria-hidden="true"
+        ></div>
+
+            {#each $tabs as tab, i (tab.id)}
+              <button
+                class="tab"
+                class:active={$activeTabId === tab.id}
+                class:dragging={draggedTabIndex === i}
+                on:click={() => activeTabId.set(tab.id)}
+                on:contextmenu={(e) => openTabContextMenu(e, tab.id)}
+                draggable="true"
+                on:dragstart={(e) => onTabDragStart(e, i)}
+                on:dragend={onTabDragEnd}
+                role="tab"
+                aria-selected={$activeTabId === tab.id}
+              >
+                <span class="tab-title">{tab.title}</span>
+                {#if tab.running}
+                  <span class="tab-spinner">⟳</span>
+                {/if}
+                <span
+                  class="tab-close"
+                  on:click|stopPropagation={() => tabs.remove(tab.id)}
+                  role="button"
+                  tabindex="0"
+                  on:keydown={e => e.key === 'Enter' && tabs.remove(tab.id)}
+                  aria-label="Close tab"
+                >✕</span>
+              </button>
+            {/each}
+            <button class="tab-add" on:click={() => { tabs.add(get(selectedConnId)); const t = get(tabs); activeTabId.set(t[t.length-1].id); }} title="New query tab" aria-label="Add tab">+</button>
+          </div>
 
       <!-- Editor + Output split -->
       <div class="editor-output-split">
@@ -296,8 +344,23 @@
     border-bottom: 1px solid var(--border);
     overflow-x: auto; flex-shrink: 0;
     scrollbar-width: none;
+    position: relative; /* needed for insertion indicator positioning */
   }
   .tab-bar::-webkit-scrollbar { display: none; }
+
+  /* Insertion indicator shown while dragging a tab */
+  .insertion-indicator {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    width: 6px;
+    background: #ffffff;
+    border-radius: 2px;
+    z-index: 50;
+    box-shadow: 0 0 0 2px rgba(255,255,255,0.05);
+    pointer-events: none;
+    transition: left 0.08s linear;
+  }
   .tab {
     display: flex; align-items: center; gap: 6px;
     padding: 6px 14px; background: none; border: none;
