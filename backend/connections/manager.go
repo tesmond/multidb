@@ -3,8 +3,11 @@ package connections
 import (
 	"database/sql"
 	"fmt"
+	"net"
 	"net/url"
+	"os/exec"
 	"sync"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -22,6 +25,14 @@ type ConnectionConfig struct {
 	Password string `json:"password"`
 	Database string `json:"database"`
 	DSN      string `json:"dsn"` // optional override
+
+	// Kubernetes port-forwarding
+	UseKubePortForward bool   `json:"useKubePortForward"`
+	KubeContext        string `json:"kubeContext"`
+	KubeNamespace      string `json:"kubeNamespace"`
+	KubeResource       string `json:"kubeResource"` // e.g. "service/postgres"
+	KubeLocalPort      int    `json:"kubeLocalPort"`
+	KubeRemotePort     int    `json:"kubeRemotePort"`
 }
 
 // Manager manages active database connections.
@@ -29,6 +40,7 @@ type Manager struct {
 	mu      sync.RWMutex
 	conns   map[string]*sql.DB
 	configs map[string]ConnectionConfig
+	pfCmds  map[string]*exec.Cmd // running kubectl port-forward processes
 }
 
 // NewManager creates a new connection manager.
@@ -36,6 +48,7 @@ func NewManager() *Manager {
 	return &Manager{
 		conns:   make(map[string]*sql.DB),
 		configs: make(map[string]ConnectionConfig),
+		pfCmds:  make(map[string]*exec.Cmd),
 	}
 }
 
@@ -69,16 +82,80 @@ func buildDSN(cfg ConnectionConfig) (string, string) {
 	}
 }
 
+// startPortForward launches a kubectl port-forward process and waits for the
+// local port to become available. Returns the running Cmd on success.
+func startPortForward(cfg ConnectionConfig) (*exec.Cmd, error) {
+	var args []string
+	if cfg.KubeContext != "" {
+		args = append(args, "--context="+cfg.KubeContext)
+	}
+	args = append(args, "port-forward")
+	if cfg.KubeNamespace != "" {
+		args = append(args, "-n", cfg.KubeNamespace)
+	}
+	args = append(args, cfg.KubeResource,
+		fmt.Sprintf("%d:%d", cfg.KubeLocalPort, cfg.KubeRemotePort))
+
+	cmd := exec.Command("kubectl", args...) // #nosec G204 -- args are user-supplied connection config values
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("kubectl port-forward: %w", err)
+	}
+
+	if err := waitForLocalPort(cfg.KubeLocalPort, 30*time.Second); err != nil {
+		cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("port-forward not ready: %w", err)
+	}
+	return cmd, nil
+}
+
+// waitForLocalPort polls until a TCP listener is available on the given port or
+// the timeout elapses.
+func waitForLocalPort(port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			c.Close()
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("port %d not ready after %s", port, timeout)
+}
+
 // Connect opens and registers a connection.
 func (m *Manager) Connect(cfg ConnectionConfig) error {
-	driver, dsn := buildDSN(cfg)
+	var pfCmd *exec.Cmd
+	effectiveCfg := cfg
+
+	if cfg.UseKubePortForward {
+		cmd, err := startPortForward(cfg)
+		if err != nil {
+			return err
+		}
+		pfCmd = cmd
+		effectiveCfg.Host = "127.0.0.1"
+		effectiveCfg.Port = cfg.KubeLocalPort
+	}
+
+	driver, dsn := buildDSN(effectiveCfg)
 
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
+		if pfCmd != nil {
+			pfCmd.Process.Kill()
+			_ = pfCmd.Wait()
+		}
 		return fmt.Errorf("open: %w", err)
 	}
 	if err := db.Ping(); err != nil {
 		db.Close()
+		if pfCmd != nil {
+			pfCmd.Process.Kill()
+			_ = pfCmd.Wait()
+		}
 		return fmt.Errorf("ping: %w", err)
 	}
 	db.SetMaxOpenConns(10)
@@ -90,14 +167,39 @@ func (m *Manager) Connect(cfg ConnectionConfig) error {
 	if old, ok := m.conns[cfg.ID]; ok {
 		old.Close()
 	}
+	// Kill existing port-forward for same ID if present
+	if oldCmd, ok := m.pfCmds[cfg.ID]; ok {
+		oldCmd.Process.Kill()
+		_ = oldCmd.Wait()
+	}
 	m.conns[cfg.ID] = db
 	m.configs[cfg.ID] = cfg
+	if pfCmd != nil {
+		m.pfCmds[cfg.ID] = pfCmd
+	} else {
+		delete(m.pfCmds, cfg.ID)
+	}
 	return nil
 }
 
 // TestConnection opens a connection to test it without storing it.
 func (m *Manager) TestConnection(cfg ConnectionConfig) error {
-	driver, dsn := buildDSN(cfg)
+	effectiveCfg := cfg
+
+	if cfg.UseKubePortForward {
+		cmd, err := startPortForward(cfg)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			cmd.Process.Kill()
+			_ = cmd.Wait()
+		}()
+		effectiveCfg.Host = "127.0.0.1"
+		effectiveCfg.Port = cfg.KubeLocalPort
+	}
+
+	driver, dsn := buildDSN(effectiveCfg)
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
@@ -120,6 +222,11 @@ func (m *Manager) Disconnect(id string) error {
 	err := db.Close()
 	delete(m.conns, id)
 	delete(m.configs, id)
+	if cmd, ok := m.pfCmds[id]; ok {
+		cmd.Process.Kill()
+		_ = cmd.Wait()
+		delete(m.pfCmds, id)
+	}
 	return err
 }
 
@@ -164,5 +271,10 @@ func (m *Manager) CloseAll() {
 		db.Close()
 		delete(m.conns, id)
 		delete(m.configs, id)
+	}
+	for id, cmd := range m.pfCmds {
+		cmd.Process.Kill()
+		_ = cmd.Wait()
+		delete(m.pfCmds, id)
 	}
 }

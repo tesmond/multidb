@@ -188,7 +188,7 @@
     <!-- Main content area -->
     <div class="main-area" id="main-area">
       <!-- Tab bar -->
-      <div class="tab-bar" role="tablist" bind:this={tabBarEl} on:dragover={onTabBarDragOver} on:drop={onTabBarDrop} >
+      <div class="tab-bar" role="tablist" tabindex="0" bind:this={tabBarEl} on:dragover={onTabBarDragOver} on:drop={onTabBarDrop} >
         <!-- insertion indicator -->
         <div
           class="insertion-indicator"

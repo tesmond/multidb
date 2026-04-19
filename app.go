@@ -51,7 +51,6 @@ type tableBackupArchive struct {
 	Table   tableBackupPayload `json:"table"`
 }
 
-
 // SchemaCacheEntry is returned by LoadSchema so the frontend receives a
 // single structured value rather than a bare tuple.
 type SchemaCacheEntry struct {
@@ -154,6 +153,7 @@ func (a *App) ListSavedConnections() ([]connections.ConnectionConfig, error) {
 // ExecuteResult is the return type sent to the frontend.
 type ExecuteResult struct {
 	Columns      []string `json:"columns"`
+	ColumnTypes  []string `json:"columnTypes"` // database type names per column
 	Rows         [][]any  `json:"rows"`
 	RowsAffected int64    `json:"rowsAffected"`
 	Duration     int64    `json:"duration"`
@@ -209,8 +209,9 @@ func (a *App) CancelQuery(queryID string) {
 // -----------------------------------------------------------------------
 
 type queryStreamMeta struct {
-	QueryID string   `json:"queryId"`
-	Columns []string `json:"columns"`
+	QueryID     string   `json:"queryId"`
+	Columns     []string `json:"columns"`
+	ColumnTypes []string `json:"columnTypes"`
 }
 
 type queryStreamChunk struct {
@@ -281,8 +282,16 @@ func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
 		return
 	}
 
+	// Collect column type names before streaming rows.
+	colTypeNames := make([]string, len(cols))
+	if dbColTypes, err := dbRows.ColumnTypes(); err == nil {
+		for i, ct := range dbColTypes {
+			colTypeNames[i] = ct.DatabaseTypeName()
+		}
+	}
+
 	// Emit column names immediately – the frontend can render the header at once.
-	runtime.EventsEmit(a.ctx, "query:meta", queryStreamMeta{QueryID: queryID, Columns: cols})
+	runtime.EventsEmit(a.ctx, "query:meta", queryStreamMeta{QueryID: queryID, Columns: cols, ColumnTypes: colTypeNames})
 
 	const (
 		firstChunkSize = 500

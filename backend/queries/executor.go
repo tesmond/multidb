@@ -10,6 +10,7 @@ import (
 // QueryResult holds the result of a SQL query execution.
 type QueryResult struct {
 	Columns      []string `json:"columns"`
+	ColumnTypes  []string `json:"columnTypes"` // database type names per column
 	Rows         [][]any  `json:"rows"`
 	RowsAffected int64    `json:"rowsAffected"`
 	Duration     int64    `json:"duration"` // milliseconds
@@ -50,9 +51,17 @@ func (e *Executor) Execute(ctx context.Context, db *sql.DB, query string, maxRow
 		}
 	}
 
+	colTypeNames := make([]string, len(cols))
+	if dbColTypes, err := rows.ColumnTypes(); err == nil {
+		for i, ct := range dbColTypes {
+			colTypeNames[i] = ct.DatabaseTypeName()
+		}
+	}
+
 	result := QueryResult{
-		Columns: cols,
-		Rows:    make([][]any, 0),
+		Columns:     cols,
+		ColumnTypes: colTypeNames,
+		Rows:        make([][]any, 0),
 	}
 
 	for rows.Next() && len(result.Rows) < maxRows {
