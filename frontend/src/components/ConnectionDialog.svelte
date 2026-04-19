@@ -16,7 +16,7 @@
   }
 
   function emptyForm(): ConnectionConfig {
-    return { id: crypto.randomUUID(), name: '', driver: 'mysql', host: 'localhost', port: 3306, username: '', password: '', database: '', dsn: '' };
+    return { id: crypto.randomUUID(), name: '', driver: 'mysql', host: 'localhost', port: 3306, username: '', password: '', database: '', dsn: '', useKubePortForward: false, kubeContext: '', kubeNamespace: '', kubeResource: '', kubeLocalPort: 0, kubeRemotePort: 0 };
   }
 
   function driverDefaultPort(driver: string): number {
@@ -27,6 +27,13 @@
 
   function onDriverChange() {
     form.port = driverDefaultPort(form.driver);
+  }
+
+  function onKubeToggle() {
+    if (form.useKubePortForward) {
+      if (!form.kubeRemotePort) form.kubeRemotePort = form.port;
+      if (!form.kubeLocalPort) form.kubeLocalPort = form.port;
+    }
   }
 
   async function handleTest() {
@@ -126,6 +133,40 @@
       </div>
       {/if}
 
+      {#if form.driver !== 'sqlite'}
+      <div class="form-row">
+        <label class="checkbox-label">
+          <input type="checkbox" bind:checked={form.useKubePortForward} on:change={onKubeToggle} />
+          Use Kubernetes port forwarding
+        </label>
+      </div>
+      {#if form.useKubePortForward}
+      <div class="kube-section">
+        <div class="form-row two-col">
+          <label>Context
+            <input type="text" bind:value={form.kubeContext} placeholder="my-cluster" />
+          </label>
+          <label>Namespace
+            <input type="text" bind:value={form.kubeNamespace} placeholder="default" />
+          </label>
+        </div>
+        <div class="form-row">
+          <label>Target
+            <input type="text" bind:value={form.kubeResource} placeholder="service/postgres" />
+          </label>
+        </div>
+        <div class="form-row two-col">
+          <label>Local Port
+            <input type="number" bind:value={form.kubeLocalPort} min="1" max="65535" />
+          </label>
+          <label>Remote Port
+            <input type="number" bind:value={form.kubeRemotePort} min="1" max="65535" />
+          </label>
+        </div>
+      </div>
+      {/if}
+      {/if}
+
       {#if testResult}
         <p class="success">{testResult}</p>
       {/if}
@@ -198,5 +239,14 @@
   .btn-secondary:hover { border-color: var(--accent); }
   .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
   .success { color: var(--success); font-size: 12px; margin: 0; }
+  .checkbox-label {
+    flex-direction: row; align-items: center; gap: 8px; cursor: pointer;
+  }
+  .checkbox-label input[type="checkbox"] { width: auto; cursor: pointer; }
+  .kube-section {
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 12px; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--bg-input);
+  }
   .error { color: var(--error); font-size: 12px; margin: 0; }
 </style>

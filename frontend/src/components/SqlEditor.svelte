@@ -146,6 +146,7 @@
     // Local mutable accumulator – mutated in place; Svelte reactivity is
     // triggered by replacing the result wrapper object each chunk.
     let streamCols: string[] = [];
+    let streamColTypes: string[] = [];
     let streamRows: any[][] = [];
 
     // Rendezvous state: finalize only once BOTH the done signal has arrived
@@ -166,12 +167,13 @@
         queryId: '',
         result: {
           columns: streamCols,
+          columnTypes: streamColTypes,
           rows: streamRows,
           _rowCount: streamRows.length,
           rowsAffected: 0,
           duration: pendingDuration,
           error: pendingError,
-        },
+        } as any,
       });
       if (pendingError) {
         statusMessage.set(`Error: ${pendingError}`);
@@ -194,12 +196,13 @@
       }
     }
 
-    const offMeta = EventsOn('query:meta', (meta: { queryId: string; columns: string[] }) => {
+    const offMeta = EventsOn('query:meta', (meta: { queryId: string; columns: string[]; columnTypes: string[] }) => {
       if (meta.queryId !== queryId) return;
       streamCols = meta.columns;
+      streamColTypes = meta.columnTypes ?? [];
       streamRows = [];
       tabs.updateTab(tabId, {
-        result: { columns: streamCols, rows: streamRows, _rowCount: 0, rowsAffected: 0, duration: 0, error: '' },
+        result: { columns: streamCols, columnTypes: streamColTypes, rows: streamRows, _rowCount: 0, rowsAffected: 0, duration: 0, error: '' } as any,
       });
     });
 
@@ -209,7 +212,7 @@
       for (let i = 0; i < incoming.length; i++) streamRows.push(incoming[i]);
       const rowCount = streamRows.length;
       tabs.updateTab(tabId, {
-        result: { columns: streamCols, rows: streamRows, _rowCount: rowCount, rowsAffected: 0, duration: 0, error: '' },
+        result: { columns: streamCols, columnTypes: streamColTypes, rows: streamRows, _rowCount: rowCount, rowsAffected: 0, duration: 0, error: '' } as any,
       });
       statusMessage.set(`Loading… ${rowCount} rows`);
       tryFinalize(); // handle case: done arrived before this last chunk
@@ -232,7 +235,7 @@
       tabs.updateTab(tabId, {
         running: false,
         queryId: '',
-        result: { columns: [], rows: [], rowsAffected: 0, duration: 0, error: String(e) },
+        result: { columns: [], columnTypes: [], rows: [], rowsAffected: 0, duration: 0, error: String(e) },
       });
       statusMessage.set(`Error: ${e}`);
       outputTab.set('messages');

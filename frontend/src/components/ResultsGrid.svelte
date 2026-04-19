@@ -2,7 +2,6 @@
   import { onMount, onDestroy } from 'svelte';
   import type { ExecuteResult } from '../stores/appStore';
   import { tabs } from '../stores/appStore';
-  import { exportResultToCSV } from '../lib/csv';
 
   export let result: ExecuteResult | null = null;
   export let tabId: string = '';
@@ -15,7 +14,7 @@
   const FONT_SMALL = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
   const FONT_NULL = 'italic 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
   // Average character width at 12px sans-serif — used for content-width estimation
-  const AVG_CHAR_W = 7;
+  const AVG_CHAR_W = 5.6;
 
   // --- DOM refs ---
   let canvas: HTMLCanvasElement;
@@ -48,57 +47,59 @@
   // We guard with a string key so widths only reset when column names truly change.
   let colWidths: number[] = [];
   let _colWidthsKey = '';
+  // Maximum cell text length (chars) per column — updated incrementally on every
+  // rows change so it stays correct across streaming chunks.
+  let colMaxTextLen: number[] = [];
+  let _colMaxTextLenRowCount = 0; // how many rows have already been scanned
 
+  // Reset column state when the column set changes (new query).
   $: {
     const key = result?.columns ? result.columns.join('\x00') : '';
     if (key !== _colWidthsKey) {
       _colWidthsKey = key;
-      colWidths = result?.columns
-        ? result.columns.map(c => Math.max(c.length * AVG_CHAR_W + CELL_PAD_X * 2 + 16, 100))
-        : [];
+      if (result?.columns) {
+        colMaxTextLen = result.columns.map(c => c.length);
+        colWidths = result.columns.map(c => Math.max(c.length * AVG_CHAR_W + CELL_PAD_X * 2 + 16, 100));
+      } else {
+        colMaxTextLen = [];
+        colWidths = [];
+      }
+      _colMaxTextLenRowCount = 0;
+    }
+  }
+
+  // Incrementally scan only newly-arrived rows so streaming chunks don't cause
+  // a full re-scan of all rows on every update.
+  $: {
+    const dataRows = result?.rows;
+    if (dataRows && colMaxTextLen.length > 0) {
+      const prev = _colMaxTextLenRowCount;
+      const next = dataRows.length;
+      if (next > prev) {
+        const maxLen = colMaxTextLen; // mutate in place — no new array needed
+        for (let r = prev; r < next; r++) {
+          const row = dataRows[r];
+          for (let c = 0; c < row.length && c < maxLen.length; c++) {
+            const v = row[c];
+            const len = v === null ? 4 /* "NULL" */ : String(v).length;
+            if (len > maxLen[c]) maxLen[c] = len;
+          }
+        }
+        _colMaxTextLenRowCount = next;
+        colMaxTextLen = maxLen; // trigger Svelte reactivity
+      }
     }
   }
 
   // ─── Column max widths (for auto-fit on resize-handle double-click) ───────────
-  // Computed lazily on first double-click per result set using the actual bound
-  // canvas element so that system font keywords (-apple-system etc.) resolve
-  // correctly.  An unattached canvas created with document.createElement cannot
-  // resolve those fonts and returns near-identical widths for every string.
-  let colMaxWidths: number[] = [];
-  let _colMaxResult: ExecuteResult | null = null;
-
+  // Derived instantly from colMaxTextLen using AVG_CHAR_W — no canvas scan needed.
   function ensureColMaxWidths() {
-    if (!canvas || !result || result === _colMaxResult) return;
+    // colMaxTextLen is already up to date from the reactive block above; nothing to do.
+  }
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const cols = result.columns;
-    const dataRows = result.rows ?? [];
-
-    // Save/restore so we don't disturb the renderer's font state.
-    ctx.save();
-
-    ctx.font = FONT;
-    const maxW: number[] = cols.map(c => ctx.measureText(c).width + CELL_PAD_X * 2 + 22);
-
-    // Pre-measure NULL once with its italic variant.
-    ctx.font = FONT_NULL;
-    const nullW = ctx.measureText('NULL').width + CELL_PAD_X * 2;
-    ctx.font = FONT;
-
-    for (const row of dataRows) {
-      for (let c = 0; c < row.length && c < cols.length; c++) {
-        const v = row[c];
-        const w = v === null ? nullW : ctx.measureText(String(v)).width + CELL_PAD_X * 2;
-        if (w > maxW[c]) maxW[c] = w;
-      }
-    }
-
-    ctx.restore();
-
-    colMaxWidths = maxW.map(w => Math.min(Math.max(w, 50), 800));
-    _colMaxResult = result;
+  // Convert a max text length to a clamped pixel width.
+  function textLenToWidth(len: number): number {
+    return Math.min(Math.max(len * AVG_CHAR_W + CELL_PAD_X * 2 + 4, 50), 800);
   }
 
   // ─── Resize drag state ────────────────────────────────────────────────────────
@@ -182,6 +183,22 @@
 
   // ─── Hover state ──────────────────────────────────────────────────────────────
   let hoveredRow = -1;
+
+  // ─── Column header tooltip ────────────────────────────────────────────────────
+  let tooltipCol: number | null = null;
+  let tooltipX = 0;
+  let tooltipY = 0;
+
+  function onHeaderMouseEnter(e: MouseEvent, idx: number) {
+    tooltipCol = idx;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    tooltipX = rect.left;
+    tooltipY = rect.bottom + 4;
+  }
+
+  function onHeaderMouseLeave() {
+    tooltipCol = null;
+  }
 
   // ─── Render scheduling ────────────────────────────────────────────────────────
   let rafId = 0;
@@ -580,9 +597,9 @@
   function autoFitColumn(e: MouseEvent, idx: number) {
     e.preventDefault();
     e.stopPropagation();
-    ensureColMaxWidths();
-    if (colMaxWidths[idx] != null) {
-      colWidths[idx] = colMaxWidths[idx];
+    const len = colMaxTextLen[idx];
+    if (len != null) {
+      colWidths[idx] = textLenToWidth(len);
       colWidths = [...colWidths];
     }
   }
@@ -672,6 +689,8 @@
               class="header-cell"
               style="width:{colWidths[i]}px; min-width:{colWidths[i]}px"
               on:click={() => onHeaderClick(i)}
+              on:mouseenter={e => onHeaderMouseEnter(e, i)}
+              on:mouseleave={onHeaderMouseLeave}
               role="columnheader"
               aria-sort={sortCol === i ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
               tabindex="0"
@@ -721,6 +740,19 @@
 
     <span class="sr-only">{totalRows} rows</span>
   </div>
+
+  {#if tooltipCol !== null}
+    <div
+      class="col-tooltip"
+      style="left:{tooltipX}px; top:{tooltipY}px"
+      role="tooltip"
+    >
+      {#if result?.columnTypes?.[tooltipCol]}
+        <span class="col-tooltip-type">{result.columnTypes[tooltipCol]}</span>
+      {/if}
+      <span class="col-tooltip-len">max length: {colMaxTextLen[tooltipCol] ?? 0}</span>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -770,6 +802,31 @@
     cursor: col-resize; z-index: 1;
   }
   .resize-handle:hover { background: var(--accent); opacity: 0.5; }
+
+  .col-tooltip {
+    position: fixed;
+    z-index: 100;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    pointer-events: none;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  .col-tooltip-type {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent, #4682ff);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .col-tooltip-len {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
 
   .grid-body { flex: 1; overflow: auto; }
   /* Cell cursor to hint that data is selectable */
