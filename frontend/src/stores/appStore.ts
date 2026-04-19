@@ -124,6 +124,12 @@ function createTabStore() {
         return newTabs;
       });
     },
+    closeTabsForConn(connId) {
+      update((tabs) => {
+        const remaining = tabs.filter((t) => t.connId !== connId);
+        return remaining.length > 0 ? remaining : [makeTab()];
+      });
+    },
     set,
   };
 }

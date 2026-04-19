@@ -15,23 +15,6 @@
   }
 </script>
 
-<header class="toolbar">
-  <div class="toolbar-left">
-    <span class="app-name">multidb</span>
-  </div>
-
-  <div class="toolbar-center">
-    <button class="tb-btn" on:click={newConnection} title="New Connection">
-      🔌 <span>New Connection</span>
-    </button>
-    <button class="tb-btn" on:click={newTab} title="Open new SQL tab">
-      + <span>New Query</span>
-    </button>
-  </div>
-
-  <div class="toolbar-right"></div>
-</header>
-
 <style>
   .toolbar {
     display: flex; align-items: center;

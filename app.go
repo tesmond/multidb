@@ -129,6 +129,7 @@ func (a *App) Disconnect(id string) error {
 	err := a.connMgr.Disconnect(id)
 	if a.store != nil {
 		_ = a.store.DeleteConnection(a.ctx, id)
+		_ = a.store.DeleteSchema(a.ctx, id)
 	}
 	return err
 }

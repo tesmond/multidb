@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, tabs, activeTabId, statusMessage, schemaRefreshSignal, saveCachedSchema } from '../stores/appStore';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, tabs, activeTabId, statusMessage, schemaRefreshSignal, saveCachedSchema, deleteCachedSchema } from '../stores/appStore';
   import type { ActiveConnection } from '../stores/appStore';
-  import { GetSchema, Disconnect, BackupTable, ImportTable } from '../../wailsjs/go/main/App';
+  import { GetSchema, Disconnect, TestConnection, BackupTable, ImportTable } from '../../wailsjs/go/main/App';
   import { get } from 'svelte/store';
 
   // Expandable node state
@@ -50,11 +50,29 @@
   async function disconnectConn(id: string) {
     try {
       await Disconnect(id);
+      // Clean up frontend state
       activeConnections.update(conns => conns.filter(c => c.config.id !== id));
+      await deleteCachedSchema(id);
+      tabs.closeTabsForConn(id);
       const $sel = get(selectedConnId);
       if ($sel === id) selectedConnId.set('');
     } catch (e: any) {
       statusMessage.set(`Disconnect error: ${e}`);
+    }
+  }
+
+  // Test the saved connection config without opening a new one
+  let testingConnId: string | null = null;
+  async function testConn(conn: ActiveConnection) {
+    testingConnId = conn.config.id;
+    statusMessage.set('Testing connection…');
+    try {
+      await TestConnection(conn.config);
+      statusMessage.set(`Connection to ${conn.config.name} succeeded ✓`);
+    } catch (e: any) {
+      statusMessage.set(`Connection failed: ${e}`);
+    } finally {
+      testingConnId = null;
     }
   }
 
@@ -107,7 +125,7 @@
     contextMenu = { kind: 'database', x: e.clientX, y: e.clientY, connId };
   }
 
-  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'import' | 'refresh') {
+  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'import' | 'refresh' | 'test' | 'delete') {
     if (!contextMenu) return;
     const menu = contextMenu;
     contextMenu = null;
@@ -124,6 +142,15 @@
           await ImportTable(menu.connId);
           statusMessage.set('Import completed');
           await refreshSchema(menu.connId);
+          return;
+        }
+        if (action === 'test') {
+          const conn = get(activeConnections).find(c => c.config.id === menu.connId);
+          if (conn) await testConn(conn);
+          return;
+        }
+        if (action === 'delete') {
+          await disconnectConn(menu.connId);
           return;
         }
         return;
@@ -167,7 +194,7 @@
 
 <aside class="navigator">
   <div class="nav-header">
-    <span class="nav-title">Navigator</span>
+    <span class="nav-title">Connections</span>
     <button class="icon-btn" on:click={() => { showConnectionDialog.set(true); editingConnection.set(null); }} title="New Connection">+</button>
   </div>
 
@@ -435,12 +462,19 @@
         Backup Table...
       </button>
     {:else if contextMenu.kind === 'database'}
+      <button role="menuitem" on:click={() => handleContextAction('test')} disabled={testingConnId === contextMenu.connId}>
+        {testingConnId === contextMenu.connId ? 'Testing…' : 'Test Connection'}
+      </button>
+      <div class="context-separator"></div>
       <button role="menuitem" on:click={() => handleContextAction('refresh')}>
         Refresh Schema
       </button>
-      <div class="context-separator"></div>
       <button role="menuitem" on:click={() => handleContextAction('import')}>
         Import...
+      </button>
+      <div class="context-separator"></div>
+      <button role="menuitem" class="danger" on:click={() => handleContextAction('delete')}>
+        Remove Connection
       </button>
     {/if}
   </div>
@@ -537,6 +571,10 @@
     color: var(--text); font-size: 13px; cursor: pointer;
   }
   .context-menu button:hover { background: var(--bg-hover); }
+  .context-menu button:disabled { opacity: 0.5; cursor: default; }
+  .context-menu button:disabled:hover { background: none; }
+  .context-menu button.danger { color: var(--error); }
+  .context-menu button.danger:hover { background: rgba(248, 113, 113, 0.1); }
   .context-separator {
     height: 1px; background: var(--border); margin: 3px 0;
   }
