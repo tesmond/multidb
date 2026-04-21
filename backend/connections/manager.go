@@ -59,7 +59,7 @@ func buildDSN(cfg ConnectionConfig) (string, string) {
 	}
 	switch cfg.Driver {
 	case "mysql":
-		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&multiStatements=true",
+		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&multiStatements=true&tls=preferred",
 			cfg.Username, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
 		return "mysql", dsn
 	case "postgres":
@@ -68,7 +68,7 @@ func buildDSN(cfg ConnectionConfig) (string, string) {
 			User:     url.UserPassword(cfg.Username, cfg.Password),
 			Host:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 			Path:     "/" + cfg.Database,
-			RawQuery: "sslmode=disable",
+			RawQuery: "sslmode=prefer",
 		}
 		return "pgx", u.String()
 	case "sqlite":
