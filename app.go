@@ -3,18 +3,25 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"multidb/backend/connections"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5"
 	"multidb/backend/history"
 	"multidb/backend/queries"
 	"multidb/backend/schema"
@@ -510,7 +517,11 @@ func (a *App) BackupTable(connID, tableName, schemaName string) error {
 	return nil
 }
 
-func (a *App) ImportTable(connID string) error {
+func (a *App) DropTable(connID, tableName, schemaName string) error {
+	if strings.TrimSpace(tableName) == "" {
+		return fmt.Errorf("table name is required")
+	}
+
 	db, err := a.connMgr.Get(connID)
 	if err != nil {
 		return err
@@ -520,22 +531,67 @@ func (a *App) ImportTable(connID string) error {
 		return fmt.Errorf("config not found for %q", connID)
 	}
 
+	qualified := a.qualifiedTableName(cfg.Driver, tableName, schemaName)
+	stmt := "DROP TABLE IF EXISTS " + qualified
+	if cfg.Driver == "postgres" {
+		stmt += " CASCADE"
+	}
+
+	if _, err := db.ExecContext(a.ctx, stmt); err != nil {
+		return fmt.Errorf("drop table %s: %w", qualified, err)
+	}
+
+	return nil
+}
+
+func (a *App) SelectImportFile(importType string) (string, error) {
+	filter := runtime.FileFilter{
+		DisplayName: "Zip Archive (*.zip)",
+		Pattern:     "*.zip",
+	}
+	title := "Select import file"
+	if importType == "pgdump" {
+		filter = runtime.FileFilter{
+			DisplayName: "PostgreSQL Dump (*.sql, *.dump, *.pgdump, *.sql.gz)",
+			Pattern:     "*.sql;*.dump;*.pgdump;*.sql.gz",
+		}
+		title = "Select PostgreSQL dump file"
+	}
+
 	sourcePath, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Import Table Backup",
-		Filters: []runtime.FileFilter{
-			{
-				DisplayName: "Zip Archive (*.zip)",
-				Pattern:     "*.zip",
-			},
-		},
+		Title:   title,
+		Filters: []runtime.FileFilter{filter},
 	})
+	if err != nil {
+		return "", err
+	}
+	return sourcePath, nil
+}
+
+func (a *App) ImportTable(connID, importType, sourcePath string) error {
+	db, err := a.connMgr.Get(connID)
 	if err != nil {
 		return err
 	}
+	cfg, ok := a.connMgr.GetConfig(connID)
+	if !ok {
+		return fmt.Errorf("config not found for %q", connID)
+	}
 	if sourcePath == "" {
-		return nil
+		return fmt.Errorf("source path not provided")
 	}
 
+	switch importType {
+	case "zipped-sql":
+		return a.importBackupArchive(db, cfg, sourcePath)
+	case "pgdump":
+		return a.importPGDump(cfg, sourcePath)
+	default:
+		return fmt.Errorf("unknown import type: %s", importType)
+	}
+}
+
+func (a *App) importBackupArchive(db *sql.DB, cfg connections.ConnectionConfig, sourcePath string) error {
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
 		return fmt.Errorf("read backup file: %w", err)
@@ -573,6 +629,10 @@ func (a *App) ImportTable(connID string) error {
 
 	if archive.Version != 1 {
 		return fmt.Errorf("unsupported backup version: %d", archive.Version)
+	}
+
+	if archive.Table.Driver != cfg.Driver {
+		return fmt.Errorf("backup archive is for %s, but connection uses %s", archive.Table.Driver, cfg.Driver)
 	}
 
 	if archive.Table.TableName == "" {
@@ -627,6 +687,253 @@ func (a *App) ImportTable(connID string) error {
 	}
 
 	return nil
+}
+
+func (a *App) importPGDump(cfg connections.ConnectionConfig, sourcePath string) error {
+	if cfg.Driver != "postgres" {
+		return fmt.Errorf("pgdump import is only supported for PostgreSQL connections")
+	}
+
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("open import file: %w", err)
+	}
+	defer file.Close()
+
+	reader := io.Reader(file)
+	if strings.HasSuffix(strings.ToLower(sourcePath), ".gz") {
+		gr, err := gzip.NewReader(file)
+		if err != nil {
+			return fmt.Errorf("open gzip: %w", err)
+		}
+		defer gr.Close()
+		reader = gr
+	}
+
+	data, err := ioReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("read import file: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return fmt.Errorf("import file is empty")
+	}
+
+	dsn, err := a.buildPostgresDSN(cfg)
+	if err != nil {
+		return err
+	}
+
+	pgxConn, err := pgx.Connect(a.ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("connect pgx: %w", err)
+	}
+	defer pgxConn.Close(a.ctx)
+
+	segments, err := parsePGDumpSegments(string(data))
+	if err != nil {
+		return fmt.Errorf("parse pgdump: %w", err)
+	}
+
+	for _, seg := range segments {
+		switch seg.kind {
+		case "sql":
+			if strings.TrimSpace(seg.sql) == "" {
+				continue
+			}
+			if _, err := pgxConn.Exec(a.ctx, seg.sql); err != nil {
+				if shouldIgnorePGDumpExecError(err) {
+					continue
+				}
+				return fmt.Errorf("execute dump statement: %w", err)
+			}
+		case "copy":
+			if err := executePGCopy(a.ctx, pgxConn, seg.copyStmt, seg.copyRows); err != nil {
+				return fmt.Errorf("execute dump copy: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (a *App) buildPostgresDSN(cfg connections.ConnectionConfig) (string, error) {
+	if cfg.DSN != "" {
+		return cfg.DSN, nil
+	}
+
+	u := &url.URL{
+		Scheme: "postgres",
+		Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Path:   "/" + cfg.Database,
+	}
+	if cfg.Username != "" {
+		if cfg.Password != "" {
+			u.User = url.UserPassword(cfg.Username, cfg.Password)
+		} else {
+			u.User = url.User(cfg.Username)
+		}
+	}
+	u.RawQuery = "sslmode=prefer"
+	return u.String(), nil
+}
+
+type pgDumpSegment struct {
+	kind     string
+	sql      string
+	copyStmt string
+	copyRows [][]any
+}
+
+func parsePGDumpSegments(data string) ([]pgDumpSegment, error) {
+	lines := strings.Split(data, "\n")
+	var segments []pgDumpSegment
+	var buf strings.Builder
+	inCopy := false
+	var copyStmt string
+	var copyRows [][]any
+
+	for _, raw := range lines {
+		line := strings.TrimRight(raw, "\r")
+		trimmed := strings.TrimSpace(line)
+
+		if inCopy {
+			if trimmed == "\\." {
+				segments = append(segments, pgDumpSegment{kind: "copy", copyStmt: copyStmt, copyRows: copyRows})
+				inCopy = false
+				copyStmt = ""
+				copyRows = nil
+				continue
+			}
+
+			if trimmed == "" {
+				continue
+			}
+
+			parts := strings.Split(line, "\t")
+			row := make([]any, len(parts))
+			for i, part := range parts {
+				if part == "\\N" {
+					row[i] = nil
+				} else {
+					row[i] = part
+				}
+			}
+			copyRows = append(copyRows, row)
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "--") || trimmed == "" {
+			continue
+		}
+
+		if buf.Len() > 0 {
+			buf.WriteString("\n")
+		}
+		buf.WriteString(line)
+
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(buf.String())), "COPY ") && strings.Contains(strings.ToUpper(strings.TrimSpace(buf.String())), "FROM STDIN;") {
+			copyStmt = buf.String()
+			buf.Reset()
+			inCopy = true
+			continue
+		}
+
+		if strings.HasSuffix(trimmed, ";") {
+			segments = append(segments, pgDumpSegment{kind: "sql", sql: buf.String()})
+			buf.Reset()
+		}
+	}
+
+	if inCopy {
+		return nil, fmt.Errorf("unterminated COPY section")
+	}
+	if buf.Len() > 0 {
+		segments = append(segments, pgDumpSegment{kind: "sql", sql: buf.String()})
+	}
+
+	return segments, nil
+}
+
+func executePGCopy(ctx context.Context, conn *pgx.Conn, copyStmt string, rows [][]any) error {
+	tableName, cols, err := parsePGCopyStatement(copyStmt)
+	if err != nil {
+		return err
+	}
+
+	_, err = conn.CopyFrom(ctx, tableName, cols, pgx.CopyFromRows(rows))
+	return err
+}
+
+func parsePGCopyStatement(stmt string) (pgx.Identifier, []string, error) {
+	trimmed := strings.TrimSpace(stmt)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "COPY ") {
+		return nil, nil, fmt.Errorf("invalid COPY statement")
+	}
+
+	pattern := `(?i)^COPY\s+(.+)\s*\((.+)\)\s+FROM\s+STDIN;`
+	r := regexp.MustCompile(pattern)
+	matches := r.FindStringSubmatch(trimmed)
+	if len(matches) != 3 {
+		return nil, nil, fmt.Errorf("unsupported COPY statement: %s", stmt)
+	}
+
+	tableIdent := strings.TrimSpace(matches[1])
+	colsRaw := matches[2]
+	parts := splitCSVColumns(colsRaw)
+	columns := make([]string, 0, len(parts))
+	for _, part := range parts {
+		columns = append(columns, unquoteIdentifier(strings.TrimSpace(part)))
+	}
+
+	identifier, err := splitQualifiedIdentifier(tableIdent)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return identifier, columns, nil
+}
+
+func splitCSVColumns(input string) []string {
+	parts := strings.Split(input, ",")
+	for i, part := range parts {
+		parts[i] = strings.TrimSpace(part)
+	}
+	return parts
+}
+
+func splitQualifiedIdentifier(input string) (pgx.Identifier, error) {
+	parts := strings.SplitN(input, ".", 2)
+	if len(parts) == 1 {
+		return pgx.Identifier{unquoteIdentifier(strings.TrimSpace(parts[0]))}, nil
+	}
+	return pgx.Identifier{unquoteIdentifier(strings.TrimSpace(parts[0])), unquoteIdentifier(strings.TrimSpace(parts[1]))}, nil
+}
+
+func unquoteIdentifier(name string) string {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, `"`) && strings.HasSuffix(name, `"`) {
+		inner := name[1 : len(name)-1]
+		return strings.ReplaceAll(inner, `""`, `"`)
+	}
+	return name
+}
+
+func shouldIgnorePGDumpExecError(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+
+	switch pgErr.Code {
+	case "42P07": // duplicate_table
+		return true
+	case "42710": // duplicate_object
+		return true
+	case "42P06": // duplicate_schema
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) buildTableBackupPayload(db *sql.DB, driver, tableName, schemaName string) (tableBackupPayload, error) {

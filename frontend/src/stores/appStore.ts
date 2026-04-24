@@ -156,6 +156,8 @@ export const activeTab = derived(
 
 export const showConnectionDialog = writable(false);
 export const editingConnection = writable<ConnectionConfig | null>(null);
+export const showImportDialog = writable(false);
+export const importDialogConnId = writable<string>("");
 
 export const outputTab = writable<"results" | "messages" | "history">(
   "results",

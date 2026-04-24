@@ -6,6 +6,7 @@
     import OutputPanel from "./components/OutputPanel.svelte";
     import StatusBar from "./components/StatusBar.svelte";
     import ConnectionDialog from "./components/ConnectionDialog.svelte";
+    import ImportDialog from "./components/ImportDialog.svelte";
     import {
         tabs,
         activeTabId,
@@ -385,6 +386,7 @@
 </div>
 
 <ConnectionDialog />
+<ImportDialog />
 
 {#if tabContextMenu}
     <div

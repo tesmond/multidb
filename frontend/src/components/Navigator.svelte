@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, tabs, activeTabId, statusMessage, schemaRefreshSignal, saveCachedSchema, deleteCachedSchema } from '../stores/appStore';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, saveCachedSchema, deleteCachedSchema } from '../stores/appStore';
   import type { ActiveConnection } from '../stores/appStore';
-  import { GetSchema, Disconnect, TestConnection, BackupTable, ImportTable } from '../../wailsjs/go/main/App';
+  import { GetSchema, Disconnect, TestConnection, BackupTable, DropTable } from '../../wailsjs/go/main/App';
   import { get } from 'svelte/store';
 
   // Expandable node state
@@ -111,21 +111,36 @@
   let contextMenu:
     | { kind: 'table'; x: number; y: number; tableName: string; connId: string; schemaName?: string }
     | { kind: 'database'; x: number; y: number; connId: string }
+    | { kind: 'dropConfirm'; x: number; y: number; tableName: string; connId: string; schemaName?: string }
     | null = null;
+
+  function clampMenuPosition(x: number, y: number, kind: 'table' | 'database' | 'dropConfirm') {
+    const pad = 8;
+    const estimatedWidth = 220;
+    const estimatedHeight = kind === 'database' ? 210 : kind === 'dropConfirm' ? 120 : 165;
+    const maxX = Math.max(pad, window.innerWidth - estimatedWidth - pad);
+    const maxY = Math.max(pad, window.innerHeight - estimatedHeight - pad);
+    return {
+      x: Math.max(pad, Math.min(x, maxX)),
+      y: Math.max(pad, Math.min(y, maxY)),
+    };
+  }
 
   function openTableContextMenu(e: MouseEvent, connId: string, tableName: string, schemaName?: string) {
     e.preventDefault();
     e.stopPropagation();
-    contextMenu = { kind: 'table', x: e.clientX, y: e.clientY, tableName, connId, schemaName };
+    const pos = clampMenuPosition(e.clientX, e.clientY, 'table');
+    contextMenu = { kind: 'table', x: pos.x, y: pos.y, tableName, connId, schemaName };
   }
 
   function openDatabaseContextMenu(e: MouseEvent, connId: string) {
     e.preventDefault();
     e.stopPropagation();
-    contextMenu = { kind: 'database', x: e.clientX, y: e.clientY, connId };
+    const pos = clampMenuPosition(e.clientX, e.clientY, 'database');
+    contextMenu = { kind: 'database', x: pos.x, y: pos.y, connId };
   }
 
-  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'import' | 'refresh' | 'test' | 'delete') {
+  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'dropTable' | 'import' | 'refresh' | 'test' | 'delete') {
     if (!contextMenu) return;
     const menu = contextMenu;
     contextMenu = null;
@@ -139,9 +154,8 @@
           return;
         }
         if (action === 'import') {
-          await ImportTable(menu.connId);
-          statusMessage.set('Import completed');
-          await refreshSchema(menu.connId);
+          importDialogConnId.set(menu.connId);
+          showImportDialog.set(true);
           return;
         }
         if (action === 'test') {
@@ -165,13 +179,32 @@
       else if (action === 'backup') {
         await BackupTable(connId, tableName, schemaName ?? '');
         statusMessage.set(`Backed up ${qualifyTable(connId, tableName, schemaName)}`);
+      } else if (action === 'dropTable') {
+        const pos = clampMenuPosition(menu.x, menu.y, 'dropConfirm');
+        contextMenu = { kind: 'dropConfirm', x: pos.x, y: pos.y, connId, tableName, schemaName };
       }
     } catch (e: any) {
       statusMessage.set(String(e));
     }
   }
 
-  function closeContextMenu() { contextMenu = null; }
+  async function confirmDropTable() {
+    if (!contextMenu || contextMenu.kind !== 'dropConfirm') return;
+    const { connId, tableName, schemaName } = contextMenu;
+    contextMenu = null;
+
+    try {
+      await DropTable(connId, tableName, schemaName ?? '');
+      statusMessage.set(`Dropped ${qualifyTable(connId, tableName, schemaName)}`);
+      await refreshSchema(connId);
+    } catch (e: any) {
+      statusMessage.set(String(e));
+    }
+  }
+
+  function closeContextMenu() {
+    contextMenu = null;
+  }
 
   // ── Schema refresh ─────────────────────────────────────────────────────────
   // Triggered by the context menu "Refresh" action OR by SqlEditor after a DDL
@@ -450,6 +483,7 @@
     class="context-menu"
     style="left:{contextMenu.x}px; top:{contextMenu.y}px"
     role="menu"
+    on:click|stopPropagation
   >
     {#if contextMenu.kind === 'table'}
       <button role="menuitem" on:click={() => handleContextAction('view')}>
@@ -460,6 +494,10 @@
       </button>
       <button role="menuitem" on:click={() => handleContextAction('backup')}>
         Backup Table...
+      </button>
+      <div class="context-separator"></div>
+      <button role="menuitem" class="danger" on:click={() => handleContextAction('dropTable')}>
+        Drop Table...
       </button>
     {:else if contextMenu.kind === 'database'}
       <button role="menuitem" on:click={() => handleContextAction('test')} disabled={testingConnId === contextMenu.connId}>
@@ -475,6 +513,14 @@
       <div class="context-separator"></div>
       <button role="menuitem" class="danger" on:click={() => handleContextAction('delete')}>
         Remove Connection
+      </button>
+    {:else if contextMenu.kind === 'dropConfirm'}
+      <div class="context-title">Drop {contextMenu.schemaName ? `${contextMenu.schemaName}.${contextMenu.tableName}` : contextMenu.tableName}?</div>
+      <button role="menuitem" class="danger" on:click={confirmDropTable}>
+        Yes, drop table
+      </button>
+      <button role="menuitem" on:click={closeContextMenu}>
+        No, cancel
       </button>
     {/if}
   </div>
@@ -577,5 +623,11 @@
   .context-menu button.danger:hover { background: rgba(248, 113, 113, 0.1); }
   .context-separator {
     height: 1px; background: var(--border); margin: 3px 0;
+  }
+  .context-title {
+    font-size: 12px;
+    color: var(--text-muted);
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
   }
 </style>

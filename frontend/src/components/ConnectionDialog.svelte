@@ -80,7 +80,7 @@
 </script>
 
 {#if $showConnectionDialog}
-<div class="modal-overlay" on:click|self={close} on:keydown={e => e.key === 'Escape' && close()} role="dialog" aria-modal="true" aria-label="Connection Manager">
+<div class="modal-overlay" role="dialog" aria-modal="true" aria-label="Connection Manager">
   <div class="modal">
     <div class="modal-header">
       <h2>{$editingConnection ? 'Edit Connection' : 'New Connection'}</h2>
