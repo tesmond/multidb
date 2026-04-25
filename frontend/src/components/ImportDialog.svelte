@@ -57,19 +57,18 @@
 
     <div class="modal-body">
       <div class="form-row">
-        <label>Import format
-          <select bind:value={importType}>
-            <option value="zipped-sql">Import zipped sql</option>
-            <option value="pgdump">Import from pgdump</option>
-          </select>
-        </label>
+        <label for="import-type">Import format</label>
+        <select id="import-type" bind:value={importType}>
+          <option value="zipped-sql">Import zipped sql</option>
+          <option value="pgdump">Import from pgdump</option>
+        </select>
       </div>
 
       <div class="form-row">
-        <label>File</label>
+        <label for="import-file-path">File</label>
         <div class="file-row">
           <button class="btn-secondary" type="button" on:click={browseFile}>Browse...</button>
-          <input type="text" readonly value={sourcePath} placeholder="No file selected" />
+          <input id="import-file-path" type="text" readonly value={sourcePath} placeholder="No file selected" />
         </div>
       </div>
 

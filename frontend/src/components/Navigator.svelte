@@ -483,7 +483,9 @@
     class="context-menu"
     style="left:{contextMenu.x}px; top:{contextMenu.y}px"
     role="menu"
+    tabindex="0"
     on:click|stopPropagation
+    on:keydown|stopPropagation={() => {}}
   >
     {#if contextMenu.kind === 'table'}
       <button role="menuitem" on:click={() => handleContextAction('view')}>
