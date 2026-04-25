@@ -556,7 +556,7 @@
         const v = c < row.length ? row[c] : null;
         cells.push(v === null ? '' : String(v));
       }
-      lines.push(cells.join(','));
+      lines.push(cells.join('\t'));
     }
 
     navigator.clipboard.writeText(lines.join('\n')).catch(() => {});
