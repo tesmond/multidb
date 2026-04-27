@@ -136,6 +136,7 @@
   let sel: { r0: number; c0: number; r1: number; c1: number } | null = null;
   let isSelecting = false;
   let selAnchor: { row: number; col: number } | null = null;
+  let lastSelectedCell: { row: number; col: number } | null = null;
 
   // ─── Reset when result is cleared ────────────────────────────────────────────
   $: if (!result) { scrollTop = 0; scrollLeft = 0; sel = null; }
@@ -457,11 +458,18 @@
   function onCanvasMouseDown(e: MouseEvent) {
     if (e.button !== 0) return;
     const hit = getCellFromMouse(e);
-    if (!hit) { sel = null; scheduleRender(); return; }
+    if (!hit) {
+      sel = null;
+      lastSelectedCell = null;
+      scheduleRender();
+      return;
+    }
 
+    const anchor = e.shiftKey && lastSelectedCell ? lastSelectedCell : hit;
     isSelecting = true;
-    selAnchor   = hit;
-    sel         = { r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col };
+    selAnchor   = anchor;
+    sel         = { r0: anchor.row, c0: anchor.col, r1: hit.row, c1: hit.col };
+    lastSelectedCell = hit;
     scheduleRender();
 
     // mouseup may occur outside the canvas during a fast drag
@@ -495,6 +503,9 @@
   }
 
   function onWindowSelectionMouseUp() {
+    if (sel) {
+      lastSelectedCell = { row: sel.r1, col: sel.c1 };
+    }
     isSelecting = false;
     selAnchor   = null;
     window.removeEventListener('mouseup', onWindowSelectionMouseUp);
@@ -514,6 +525,7 @@
     navigator.clipboard.writeText(text).catch(() => {});
 
     sel = { r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col };
+    lastSelectedCell = hit;
     scheduleRender();
   }
 
@@ -529,11 +541,13 @@
       if (sel !== null && rows.length > 0 && result?.columns?.length) {
         e.preventDefault();
         sel = { r0: 0, c0: 0, r1: totalRows - 1, c1: result.columns.length - 1 };
+        lastSelectedCell = { row: totalRows - 1, col: result.columns.length - 1 };
         scheduleRender();
       }
     }
     if (e.key === 'Escape') {
       sel = null;
+      lastSelectedCell = null;
       scheduleRender();
     }
   }
@@ -629,6 +643,7 @@
       scrollLeft = 0;
     }
     sel = null;
+    lastSelectedCell = null;
     if (tabId) tabs.updateTab(tabId, { sortCol: -1, sortDirection: 'asc' });
   }
 
@@ -637,6 +652,7 @@
     if (sel === null) return;
     if (gridWrap && !gridWrap.contains(e.target as Node)) {
       sel = null;
+      lastSelectedCell = null;
       scheduleRender();
     }
   }
