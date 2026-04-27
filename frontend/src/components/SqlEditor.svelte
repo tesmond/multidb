@@ -4,6 +4,7 @@
   import { ExecuteQueryStreamed, CancelQuery } from '../../wailsjs/go/main/App';
   import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
   import { get } from 'svelte/store';
+  import SaveQueryDialog from './SaveQueryDialog.svelte';
 
   // CodeMirror 6
   import { EditorView, keymap, placeholder } from '@codemirror/view';
@@ -28,6 +29,7 @@
   let editorEl: HTMLDivElement;
   let view: EditorView | null = null;
   let sqlCompartment = new Compartment();
+  let saveQueryDialog: SaveQueryDialog;
 
   // Convert the active-connection schema into the DbSchema shape used by
   // the smart completion engine.
@@ -251,6 +253,37 @@
     statusMessage.set('Query cancelled');
   }
 
+  async function saveQuery() {
+    if (!tab) return;
+    const sql = tab.sql.trim();
+    if (!sql) {
+      statusMessage.set('Cannot save empty query');
+      return;
+    }
+
+    const connId = tab.connId || get(selectedConnId);
+    if (!connId) {
+      statusMessage.set('No connection selected. Please select a connection first.');
+      return;
+    }
+
+    const title = await saveQueryDialog.open();
+    if (!title) {
+      // User cancelled
+      return;
+    }
+
+    try {
+      const app = await import('../../wailsjs/go/main/App') as any;
+      await app.SaveQuery(connId, title, sql);
+      statusMessage.set(`Query saved as "${title}"`);
+      // Dispatch an event to refresh the saved queries list
+      window.dispatchEvent(new Event('saved-query-added'));
+    } catch (e: any) {
+      statusMessage.set(`Error saving query: ${e}`);
+    }
+  }
+
   onMount(() => {
     const initialConnId = get(tabs).find(t => t.id === tabId)?.connId ?? '';
 
@@ -353,11 +386,21 @@
       <button class="btn-stop" on:click={cancelQuery} title="Cancel query (Ctrl+.)">⏹ Stop</button>
     {:else}
       <button class="btn-run" on:click={runQuery} title="Run query (Ctrl+Enter)">▶ Run</button>
+      <button
+        class="btn-save"
+        on:click={saveQuery}
+        disabled={!tab.sql.trim()}
+        title="Save query"
+      >
+        💾 Save
+      </button>
     {/if}
   </div>
 
   <div class="cm-host" bind:this={editorEl} aria-label="SQL editor"></div>
 </div>
+
+<SaveQueryDialog bind:this={saveQueryDialog} />
 {/if}
 
 <style>
@@ -387,6 +430,9 @@
   .btn-run:hover { background: var(--accent-hover); }
   .btn-stop { background: var(--error); color: #fff; border-color: var(--error); }
   .btn-stop:hover { opacity: 0.85; }
+  .btn-save { background: var(--accent-secondary, #48a868); color: #fff; border-color: var(--accent-secondary, #48a868); padding: 5px 14px; border-radius: 4px; font-size: 12px; cursor: pointer; border: 1px solid transparent; font-weight: 500; }
+  .btn-save:hover:not(:disabled) { opacity: 0.9; }
+  .btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .cm-host {
     flex: 1;

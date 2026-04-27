@@ -23,6 +23,15 @@ type QueryRecord struct {
 	CreatedAt   string `json:"createdAt"`
 }
 
+// SavedQuery is a manually saved query entry.
+type SavedQuery struct {
+	ID        int64  `json:"id"`
+	ConnID    string `json:"connId"`
+	Title     string `json:"title"`
+	Query     string `json:"query"`
+	CreatedAt string `json:"createdAt"`
+}
+
 // Store persists query history and saved connections in a local SQLite DB.
 type Store struct {
 	db *sql.DB
@@ -72,6 +81,13 @@ func (s *Store) migrate() error {
 			schema_json       TEXT NOT NULL,
 			last_refreshed_at TEXT NOT NULL,
 			hash              TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS saved_queries (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			conn_id    TEXT    NOT NULL,
+			title      TEXT    NOT NULL,
+			query      TEXT    NOT NULL,
+			created_at TEXT    NOT NULL
 		);
 	`)
 	if err != nil {
@@ -239,4 +255,51 @@ func (s *Store) DeleteSchema(ctx context.Context, connID string) error {
 // Close closes the underlying database.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// SaveQuery inserts a new saved query.
+func (s *Store) SaveQuery(ctx context.Context, rec SavedQuery) error {
+	if rec.CreatedAt == "" {
+		rec.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO saved_queries (conn_id, title, query, created_at)
+		VALUES (?, ?, ?, ?)`,
+		rec.ConnID, rec.Title, rec.Query, rec.CreatedAt)
+	return err
+}
+
+// GetSavedQueries returns all saved queries for a connection.
+func (s *Store) GetSavedQueries(ctx context.Context, connID string) ([]SavedQuery, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, conn_id, title, query, created_at
+		FROM saved_queries
+		WHERE conn_id = ?
+		ORDER BY id DESC`, connID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var queries []SavedQuery
+	for rows.Next() {
+		var q SavedQuery
+		if err := rows.Scan(&q.ID, &q.ConnID, &q.Title, &q.Query, &q.CreatedAt); err != nil {
+			return nil, err
+		}
+		queries = append(queries, q)
+	}
+	return queries, rows.Err()
+}
+
+// DeleteSavedQuery removes a saved query by ID.
+func (s *Store) DeleteSavedQuery(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM saved_queries WHERE id = ?", id)
+	return err
+}
+
+// UpdateSavedQueryTitle updates the title of a saved query.
+func (s *Store) UpdateSavedQueryTitle(ctx context.Context, id int64, newTitle string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE saved_queries SET title = ? WHERE id = ?", newTitle, id)
+	return err
 }

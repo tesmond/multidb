@@ -1344,3 +1344,71 @@ func (a *App) ClearQueryHistoryByConnID(connID string) error {
 	}
 	return a.store.ClearQueryHistoryByConnID(a.ctx, connID)
 }
+
+// -----------------------------------------------------------------------
+// Saved Queries API
+// -----------------------------------------------------------------------
+
+// SaveQuery saves a new query for a connection.
+func (a *App) SaveQuery(connID, title, query string) (history.SavedQuery, error) {
+	if a.store == nil {
+		return history.SavedQuery{}, fmt.Errorf("store not initialised")
+	}
+	if connID == "" {
+		return history.SavedQuery{}, fmt.Errorf("connection ID is required")
+	}
+	if query == "" {
+		return history.SavedQuery{}, fmt.Errorf("query text is required")
+	}
+	if title == "" {
+		return history.SavedQuery{}, fmt.Errorf("title is required")
+	}
+
+	rec := history.SavedQuery{
+		ConnID: connID,
+		Title:  title,
+		Query:  query,
+	}
+	err := a.store.SaveQuery(a.ctx, rec)
+	if err != nil {
+		return history.SavedQuery{}, err
+	}
+
+	// Return the saved query with populated fields
+	// Note: The database will auto-increment the ID and set CreatedAt
+	// so we need to fetch it back
+	saved, err := a.store.GetSavedQueries(a.ctx, connID)
+	if err == nil && len(saved) > 0 {
+		// Return the most recently saved one (first in DESC order)
+		return saved[0], nil
+	}
+
+	return rec, nil
+}
+
+// GetSavedQueries returns all saved queries for a connection.
+func (a *App) GetSavedQueries(connID string) ([]history.SavedQuery, error) {
+	if a.store == nil {
+		return nil, fmt.Errorf("store not initialised")
+	}
+	return a.store.GetSavedQueries(a.ctx, connID)
+}
+
+// DeleteSavedQuery deletes a saved query by ID.
+func (a *App) DeleteSavedQuery(id int64) error {
+	if a.store == nil {
+		return fmt.Errorf("store not initialised")
+	}
+	return a.store.DeleteSavedQuery(a.ctx, id)
+}
+
+// UpdateSavedQueryTitle updates the title of a saved query.
+func (a *App) UpdateSavedQueryTitle(id int64, newTitle string) error {
+	if a.store == nil {
+		return fmt.Errorf("store not initialised")
+	}
+	if newTitle == "" {
+		return fmt.Errorf("title cannot be empty")
+	}
+	return a.store.UpdateSavedQueryTitle(a.ctx, id, newTitle)
+}

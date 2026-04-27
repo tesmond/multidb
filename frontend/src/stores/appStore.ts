@@ -14,6 +14,7 @@ import { LoadSchema, SaveSchema } from "../../wailsjs/go/main/App";
 export type ConnectionConfig = connections.ConnectionConfig;
 export type SchemaTree = schema.SchemaTree;
 export type QueryRecord = history.QueryRecord;
+export type SavedQuery = history.SavedQuery;
 export type ExecuteResult = main.ExecuteResult;
 
 export interface ActiveConnection {
@@ -159,7 +160,7 @@ export const editingConnection = writable<ConnectionConfig | null>(null);
 export const showImportDialog = writable(false);
 export const importDialogConnId = writable<string>("");
 
-export const outputTab = writable<"results" | "messages" | "history">(
+export const outputTab = writable<"results" | "messages" | "history" | "saved">(
   "results",
 );
 

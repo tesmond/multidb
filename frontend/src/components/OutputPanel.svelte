@@ -5,20 +5,23 @@
   // Derive connection ID from the active tab
   $: activeTabConnId = $activeTab?.connId ?? '';
   import ResultsGrid from './ResultsGrid.svelte';
+  import EditSavedQueryTitleDialog from './EditSavedQueryTitleDialog.svelte';
   import { GetQueryHistoryByConnID, SaveAndConnect, ClearQueryHistoryByConnID, ClearQueryHistory } from '../../wailsjs/go/main/App';
   import { get } from 'svelte/store';
 
-  let contextMenu: { x: number; y: number } | null = null;
+  let contextMenu: { x: number; y: number; type: 'history' | 'saved'; itemId?: number; itemTitle?: string } | null = null;
+  let editTitleDialog: EditSavedQueryTitleDialog;
 
-  function openContextMenu(e: MouseEvent) {
-    contextMenu = { x: e.clientX, y: e.clientY };
+  function openContextMenu(e: MouseEvent, type: 'history' | 'saved', itemId?: number, itemTitle?: string) {
+    contextMenu = { x: e.clientX, y: e.clientY, type, itemId, itemTitle };
   }
 
   function closeContextMenu() {
     contextMenu = null;
   }
 
-  async function clearConnectionHistory() {
+  async function clearConnectionHistory(e?: Event) {
+    if (e) e.stopPropagation();
     closeContextMenu();
     const connId = $activeTab?.connId ?? get(selectedConnId);
     if (connId) {
@@ -29,19 +32,23 @@
     connectionHistory = [];
   }
 
-  async function clearAllHistory() {
+  async function clearAllHistory(e?: Event) {
+    if (e) e.stopPropagation();
     closeContextMenu();
     await ClearQueryHistory();
     connectionHistory = [];
   }
 
-  const outputTabs: Array<['results' | 'messages' | 'history', string]> = [
+  let hasSavedQueries = false;
+  
+  let outputTabs: Array<['results' | 'messages' | 'history' | 'saved', string]> = [
     ['results', 'Results'],
     ['messages', 'Messages'],
     ['history', 'History'],
   ];
 
   let connectionHistory: import('../stores/appStore').QueryRecord[] = [];
+  let connectionSavedQueries: import('../stores/appStore').SavedQuery[] = [];
 
   // Load history for the current connection
   async function loadConnectionHistory() {
@@ -59,14 +66,42 @@
     }
   }
 
+  // Load saved queries for the current connection
+  async function loadSavedQueries() {
+    const connId = $activeTab?.connId ?? get(selectedConnId);
+    if (connId) {
+      try {
+        const app = await import('../../wailsjs/go/main/App') as any;
+        const saved = await app.GetSavedQueries(connId);
+        connectionSavedQueries = saved || [];
+        hasSavedQueries = (saved?.length ?? 0) > 0;
+        // Update the tabs list if needed
+        if (hasSavedQueries && !outputTabs.find(t => t[0] === 'saved')) {
+          outputTabs = [...outputTabs, ['saved', 'Saved']];
+        } else if (!hasSavedQueries && outputTabs.find(t => t[0] === 'saved') && $outputTab !== 'saved') {
+          outputTabs = outputTabs.filter(t => t[0] !== 'saved');
+        }
+      } catch (e) {
+        console.error('Failed to load saved queries:', e);
+        connectionSavedQueries = [];
+      }
+    } else {
+      connectionSavedQueries = [];
+    }
+  }
+
   // Reload history when active tab's connection changes or history tab is selected
   $: if (activeTabConnId && $outputTab === 'history') loadConnectionHistory();
+  $: if (activeTabConnId && $outputTab === 'saved') loadSavedQueries();
+  $: if (activeTabConnId && ($outputTab === 'results' || $outputTab === 'messages')) loadSavedQueries();
 
   // Also load history when switching to history tab
-  function handleTabClick(tab: 'results' | 'messages' | 'history') {
+  function handleTabClick(tab: 'results' | 'messages' | 'history' | 'saved') {
     outputTab.set(tab);
     if (tab === 'history') {
       loadConnectionHistory();
+    } else if (tab === 'saved') {
+      loadSavedQueries();
     }
   }
 
@@ -74,8 +109,55 @@
     // Load history initially if we're on the history tab
     if (get(outputTab) === 'history') {
       loadConnectionHistory();
+    } else if (get(outputTab) === 'saved') {
+      loadSavedQueries();
+    } else {
+      loadSavedQueries();
     }
+
+    // Listen for saved-query-added event
+    const handleSavedQueryAdded = () => {
+      loadSavedQueries();
+    };
+    window.addEventListener('saved-query-added', handleSavedQueryAdded);
+    return () => {
+      window.removeEventListener('saved-query-added', handleSavedQueryAdded);
+    };
   });
+
+  async function useSavedQuery(query: string, connId: string) {
+    // Check if connection is already active
+    const activeConns = get(activeConnections);
+    const isActive = activeConns.some(conn => conn.config.id === connId);
+
+    if (!isActive) {
+      try {
+        const { ListSavedConnections } = await import('../../wailsjs/go/main/App');
+        const savedConns = await ListSavedConnections();
+        const savedConn = savedConns.find(c => c.id === connId);
+
+        if (savedConn) {
+          await SaveAndConnect(savedConn);
+          activeConnections.update(conns =>
+            [...conns, { config: savedConn, schema: null, schemaLoading: false, schemaError: null }]
+          );
+        } else {
+          console.error('Saved connection not found');
+          return;
+        }
+      } catch (e) {
+        console.error('Failed to connect to database:', e);
+        return;
+      }
+    }
+
+    selectedConnId.set(connId);
+    tabs.add(connId);
+    const allTabs = get(tabs);
+    const newTab = allTabs[allTabs.length - 1];
+    tabs.updateTab(newTab.id, { sql: query });
+    activeTabId.set(newTab.id);
+  }
 
   async function useHistoryQuery(query: string, connId: string) {
     // Check if connection is already active
@@ -118,6 +200,38 @@
     tabs.updateTab(newTab.id, { sql: query });
     activeTabId.set(newTab.id);
   }
+
+  async function deleteSavedQuery(e?: Event) {
+    if (e) e.stopPropagation();
+    if (!contextMenu || contextMenu.type !== 'saved' || !contextMenu.itemId) return;
+    try {
+      const app = await import('../../wailsjs/go/main/App') as any;
+      await app.DeleteSavedQuery(contextMenu.itemId);
+      await loadSavedQueries();
+    } catch (err) {
+      console.error('Failed to delete saved query:', err);
+    }
+    closeContextMenu();
+  }
+
+  async function editSavedQueryTitle(e?: Event) {
+    if (e) e.stopPropagation();
+    if (!contextMenu || contextMenu.type !== 'saved' || !contextMenu.itemId) return;
+    const savedId = contextMenu.itemId;
+    const currentTitle = contextMenu.itemTitle ?? '';
+    closeContextMenu();
+
+    const newTitle = await editTitleDialog.open(currentTitle);
+    if (!newTitle || newTitle === currentTitle) return;
+
+    try {
+      const app = await import('../../wailsjs/go/main/App') as any;
+      await app.UpdateSavedQueryTitle(savedId, newTitle);
+      await loadSavedQueries();
+    } catch (e) {
+      console.error('Failed to update saved query title:', e);
+    }
+  }
 </script>
 
 <div class="output-panel">
@@ -153,7 +267,7 @@
       </div>
 
     {:else if $outputTab === 'history'}
-      <div class="history-list" on:contextmenu|preventDefault on:mousedown={e => e.button === 2 && openContextMenu(e)} role="list">
+      <div class="history-list" on:contextmenu|preventDefault on:mousedown={e => e.button === 2 && openContextMenu(e, 'history')} role="list">
         {#each connectionHistory as rec (rec.id)}
           <div class="history-item">
             <div class="history-query" on:click={() => useHistoryQuery(rec.query, rec.connId)} role="button" tabindex="0" on:keydown={e => e.key === 'Enter' && useHistoryQuery(rec.query, rec.connId)}>
@@ -171,16 +285,48 @@
           <div class="msg muted">No query history for this connection yet.</div>
         {/if}
       </div>
+
+    {:else if $outputTab === 'saved'}
+      <div class="saved-list" role="list">
+        {#each connectionSavedQueries as saved (saved.id)}
+          <div class="saved-item" on:contextmenu|preventDefault={(e) => openContextMenu(e, 'saved', saved.id, saved.title)}>
+            <div
+              class="saved-title"
+              on:click={() => useSavedQuery(saved.query, saved.connId)}
+              role="button"
+              tabindex="0"
+              on:keydown={(e) => e.key === 'Enter' && useSavedQuery(saved.query, saved.connId)}
+            >
+              {saved.title}
+            </div>
+            <div class="saved-meta">
+              <span title={saved.query}>{saved.query.length > 100 ? saved.query.slice(0, 100) + '…' : saved.query}</span>
+              <span>{new Date(saved.createdAt).toLocaleString()}</span>
+            </div>
+          </div>
+        {/each}
+        {#if connectionSavedQueries.length === 0}
+          <div class="msg muted">No saved queries for this connection yet.</div>
+        {/if}
+      </div>
     {/if}
   </div>
 </div>
 
+<EditSavedQueryTitleDialog bind:this={editTitleDialog} />
+
 {#if contextMenu}
   <!-- svelte-ignore a11y-click-events-have-key-events -->
   <div class="ctx-backdrop" on:click={closeContextMenu} role="presentation"></div>
-  <div class="ctx-menu" style="left:{contextMenu.x}px; top:{contextMenu.y}px">
-    <button on:click={clearConnectionHistory}>Clear connection history</button>
-    <button on:click={clearAllHistory}>Clear all history</button>
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <div class="ctx-menu" style="left:{contextMenu.x}px; top:{contextMenu.y}px" on:click={(e) => e.stopPropagation()}>
+    {#if contextMenu.type === 'history'}
+      <button on:click={(e) => clearConnectionHistory(e)}>Clear connection history</button>
+      <button on:click={(e) => clearAllHistory(e)}>Clear all history</button>
+    {:else if contextMenu.type === 'saved'}
+      <button on:click={(e) => editSavedQueryTitle(e)}>Edit title</button>
+      <button on:click={(e) => deleteSavedQuery(e)}>Delete</button>
+    {/if}
   </div>
 {/if}
 
@@ -201,7 +347,7 @@
   .output-tab.active { color: var(--text); border-bottom-color: var(--accent); }
   .output-content { flex: 1; overflow: hidden; }
 
-  .messages, .history-list { height: 100%; overflow-y: auto; padding: 8px 12px; }
+  .messages, .history-list, .saved-list { height: 100%; overflow-y: auto; padding: 8px 12px; }
   .msg { font-size: 12px; padding: 6px 10px; border-radius: 4px; }
   .msg.error { color: var(--error); background: rgba(255,80,80,0.08); }
   .msg.success { color: var(--success); }
@@ -224,6 +370,22 @@
     margin-top: 2px;
   }
   .err-badge { color: var(--error); font-weight: 600; }
+
+  .saved-item {
+    padding: 8px; border-bottom: 1px solid var(--border-subtle);
+    cursor: default;
+  }
+  .saved-title {
+    cursor: pointer; color: var(--text); font-weight: 500; font-size: 12px;
+  }
+  .saved-title:hover { color: var(--accent); }
+  .saved-meta {
+    display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--text-muted);
+    margin-top: 4px;
+  }
+  .saved-meta span {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
 
   .ctx-backdrop {
     position: fixed; inset: 0; z-index: 99;
