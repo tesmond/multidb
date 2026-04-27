@@ -20,11 +20,12 @@ import (
 	"time"
 
 	"multidb/backend/connections"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5"
 	"multidb/backend/history"
 	"multidb/backend/queries"
 	"multidb/backend/schema"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
