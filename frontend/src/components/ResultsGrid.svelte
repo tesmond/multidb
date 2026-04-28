@@ -429,6 +429,98 @@
     scrollLeft = el.scrollLeft;
   }
 
+  function clamp(n: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function getPageRowStep(): number {
+    return Math.max(1, Math.floor(containerHeight / ROW_HEIGHT));
+  }
+
+  function setViewportStartRow(start: number) {
+    if (!scrollContainer) return;
+    const visibleRows = Math.max(1, Math.floor(containerHeight / ROW_HEIGHT));
+    const maxStart = Math.max(0, totalRows - visibleRows);
+    const clampedStart = clamp(start, 0, maxStart);
+
+    if (useScaledScroll) {
+      const maxScroll = Math.max(0, virtualHeight - containerHeight);
+      const ratio = maxStart > 0 ? clampedStart / maxStart : 0;
+      scrollContainer.scrollTop = ratio * maxScroll;
+    } else {
+      scrollContainer.scrollTop = clampedStart * ROW_HEIGHT;
+    }
+    scrollTop = scrollContainer.scrollTop;
+  }
+
+  function ensureRowVisible(row: number) {
+    if (!scrollContainer) return;
+    const visibleRows = Math.max(1, Math.floor(containerHeight / ROW_HEIGHT));
+    const top = startRow;
+    const bottom = startRow + visibleRows - 1;
+    if (row < top) {
+      setViewportStartRow(row);
+    } else if (row > bottom) {
+      setViewportStartRow(row - visibleRows + 1);
+    }
+  }
+
+  function getColLeft(col: number): number {
+    let left = 0;
+    for (let i = 0; i < col; i++) left += colWidths[i] ?? 0;
+    return left;
+  }
+
+  function ensureColVisible(col: number) {
+    if (!scrollContainer) return;
+    const colLeft = getColLeft(col);
+    const colRight = colLeft + (colWidths[col] ?? 0);
+    const dataViewportWidth = Math.max(1, containerWidth - rowNumWidth);
+
+    let next = scrollLeft;
+    if (colLeft < scrollLeft) {
+      next = colLeft;
+    } else if (colRight > scrollLeft + dataViewportWidth) {
+      next = colRight - dataViewportWidth;
+    }
+
+    const maxScrollLeft = Math.max(0, totalContentWidth - containerWidth);
+    next = clamp(next, 0, maxScrollLeft);
+    if (next !== scrollLeft) {
+      scrollContainer.scrollLeft = next;
+      scrollLeft = next;
+    }
+  }
+
+  function moveSelectionBy(dr: number, dc: number, extend: boolean) {
+    if (!result?.columns?.length || totalRows <= 0) return;
+    const maxRow = totalRows - 1;
+    const maxCol = result.columns.length - 1;
+
+    const current = sel
+      ? { row: sel.r1, col: sel.c1 }
+      : (lastSelectedCell ?? { row: 0, col: 0 });
+
+    const next = {
+      row: clamp(current.row + dr, 0, maxRow),
+      col: clamp(current.col + dc, 0, maxCol),
+    };
+
+    if (extend) {
+      const anchor = sel
+        ? { row: sel.r0, col: sel.c0 }
+        : (lastSelectedCell ?? current);
+      sel = { r0: anchor.row, c0: anchor.col, r1: next.row, c1: next.col };
+    } else {
+      sel = { r0: next.row, c0: next.col, r1: next.row, c1: next.col };
+      lastSelectedCell = next;
+    }
+
+    ensureRowVisible(next.row);
+    ensureColVisible(next.col);
+    scheduleRender();
+  }
+
   // ─── Hit-testing ─────────────────────────────────────────────────────────────
   function getCellFromMouse(e: MouseEvent): { row: number; col: number } | null {
     if (!canvas) return null;
@@ -457,6 +549,7 @@
   // ─── Canvas mouse: selection ──────────────────────────────────────────────────
   function onCanvasMouseDown(e: MouseEvent) {
     if (e.button !== 0) return;
+    gridWrap?.focus();
     const hit = getCellFromMouse(e);
     if (!hit) {
       sel = null;
@@ -531,6 +624,41 @@
 
   // ─── Keyboard: copy selection / clear / select-all ───────────────────────────
   function onGridKeyDown(e: KeyboardEvent) {
+    if (!result?.columns?.length || totalRows <= 0) return;
+
+    const extend = e.shiftKey;
+    const pageRows = getPageRowStep();
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveSelectionBy(-1, 0, extend);
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      moveSelectionBy(1, 0, extend);
+      return;
+    }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      moveSelectionBy(0, -1, extend);
+      return;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      moveSelectionBy(0, 1, extend);
+      return;
+    }
+    if (e.key === 'PageUp') {
+      e.preventDefault();
+      moveSelectionBy(-pageRows, 0, extend);
+      return;
+    }
+    if (e.key === 'PageDown') {
+      e.preventDefault();
+      moveSelectionBy(pageRows, 0, extend);
+      return;
+    }
+
     if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
       e.preventDefault();
       copySelection();

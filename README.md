@@ -1,5 +1,8 @@
 # multidb
 
+![image](build/icon.png)
+
+
 `multidb` is a desktop SQL client built with Wails (Go backend + Svelte frontend).
 It is designed for working across multiple database engines with one UI for querying,
 schema browsing, table backup/import workflows, and query history.
