@@ -844,7 +844,28 @@
     color: var(--text-muted);
   }
 
-  .grid-body { flex: 1; overflow: auto; }
+  .grid-body {
+    flex: 1;
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(236, 240, 248, 0.52) rgba(255, 255, 255, 0.1);
+  }
+  /* Keep result-grid scrollbars readable on newer macOS overlay styles. */
+  .grid-body::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  .grid-body::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .grid-body::-webkit-scrollbar-thumb {
+    background: rgba(236, 240, 248, 0.52);
+    border: 3px solid rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+  }
+  .grid-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(246, 249, 255, 0.68);
+  }
   /* Cell cursor to hint that data is selectable */
   .grid-body canvas { cursor: cell; display: block; }
 
