@@ -170,6 +170,22 @@
         editingTitle = "";
     }
 
+    function getConnectionConfig(connId: string) {
+        return $activeConnections.find((c) => c.config.id === connId)?.config;
+    }
+
+    function hasCustomTabColor(connId: string) {
+        const cfg = getConnectionConfig(connId);
+        return !!cfg?.tabColor;
+    }
+
+    function getTabCustomStyle(connId: string) {
+        const cfg = getConnectionConfig(connId);
+        if (!cfg?.tabColor) return "";
+        const textColor = cfg.tabTextBlack ? "#000000" : "var(--text)";
+        return `--tab-custom-bg: ${cfg.tabColor}; --tab-custom-text: ${textColor};`;
+    }
+
     // Pane sizes
     let navWidth = 240;
     let editorRatio = 0.55; // fraction of main area for SQL editor
@@ -292,7 +308,9 @@
                         class="tab"
                         class:active={$activeTabId === tab.id}
                         class:dragging={draggedTabIndex === i}
+                        class:has-custom-color={hasCustomTabColor(tab.connId)}
                         data-tab-id={tab.id}
+                        style={getTabCustomStyle(tab.connId)}
                         on:click={() => {
                             if (editingTabId !== tab.id)
                                 activeTabId.set(tab.id);
@@ -546,6 +564,20 @@
         border-bottom-color: var(--accent);
         background: var(--bg-surface);
     }
+    .tab.has-custom-color {
+        background: var(--tab-custom-bg);
+        color: var(--tab-custom-text);
+    }
+    .tab.has-custom-color:hover {
+        background: var(--tab-custom-bg);
+        color: var(--tab-custom-text);
+        filter: brightness(1.03);
+    }
+    .tab.has-custom-color.active {
+        background: var(--tab-custom-bg);
+        color: var(--tab-custom-text);
+        border-bottom-color: var(--tab-custom-text);
+    }
     .tab-title {
         flex: 1;
     }
@@ -567,6 +599,9 @@
         padding: 0 2px;
         border-radius: 2px;
     }
+    .tab.has-custom-color .tab-close {
+        color: inherit;
+    }
     .tab:hover .tab-close {
         opacity: 0.7;
     }
@@ -574,6 +609,10 @@
         opacity: 1 !important;
         color: var(--text);
         background: var(--bg-hover);
+    }
+    .tab.has-custom-color .tab-close:hover {
+        color: inherit;
+        background: rgba(0, 0, 0, 0.12);
     }
     .tab-spinner {
         animation: spin 1s linear infinite;

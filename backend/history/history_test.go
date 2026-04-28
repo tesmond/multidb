@@ -69,10 +69,12 @@ func TestSaveAndListConnections(t *testing.T) {
 	ctx := context.Background()
 
 	cfg := connections.ConnectionConfig{
-		ID:       "conn-1",
-		Name:     "Test DB",
-		Driver:   "sqlite",
-		Database: ":memory:",
+		ID:           "conn-1",
+		Name:         "Test DB",
+		Driver:       "sqlite",
+		TabColor:     "#ffcc00",
+		TabTextBlack: true,
+		Database:     ":memory:",
 	}
 	if err := store.SaveConnection(ctx, cfg); err != nil {
 		t.Fatalf("SaveConnection: %v", err)
@@ -87,6 +89,12 @@ func TestSaveAndListConnections(t *testing.T) {
 	}
 	if cfgs[0].Name != "Test DB" {
 		t.Errorf("unexpected name: %q", cfgs[0].Name)
+	}
+	if cfgs[0].TabColor != "#ffcc00" {
+		t.Errorf("unexpected tab color: %q", cfgs[0].TabColor)
+	}
+	if !cfgs[0].TabTextBlack {
+		t.Error("expected TabTextBlack=true")
 	}
 }
 

@@ -47,6 +47,11 @@
     showConnectionDialog.set(true);
   }
 
+  function getConnectionColorSwatch(tabColor: string | undefined): string {
+    if (typeof tabColor !== 'string') return 'transparent';
+    return /^#[0-9a-fA-F]{6}$/.test(tabColor.trim()) ? tabColor.trim().toLowerCase() : 'transparent';
+  }
+
   async function disconnectConn(id: string) {
     try {
       await Disconnect(id);
@@ -246,6 +251,13 @@
         >
           <span class="chevron">{expanded[conn.config.id] ? '▾' : '▸'}</span>
           <span class="conn-icon">🔌</span>
+          <span
+            class="conn-color-swatch"
+            class:active={!!conn.config.tabColor}
+            style="background:{getConnectionColorSwatch(conn.config.tabColor)}"
+            title={conn.config.tabColor ? `Tab colour: ${conn.config.tabColor}` : 'No tab colour set'}
+            aria-label="Connection colour"
+          ></span>
           <span class="conn-name">{conn.config.name}</span>
           <span class="driver-badge">{conn.config.driver}</span>
           <div class="conn-actions">
@@ -561,6 +573,17 @@
   .conn-actions { display: none; gap: 2px; align-items: center; }
   .conn-label:hover .conn-actions { display: flex; }
   .conn-icon, .table-icon { flex-shrink: 0; }
+  .conn-color-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    border: 1px solid var(--border);
+    background: transparent;
+    flex-shrink: 0;
+  }
+  .conn-color-swatch.active {
+    border-color: rgba(255, 255, 255, 0.35);
+  }
 
   .conn-children { padding-left: 16px; }
   .schema-section { margin: 2px 0; }

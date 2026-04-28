@@ -19,12 +19,15 @@ type ConnectionConfig struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Driver   string `json:"driver"` // mysql | postgres | sqlite
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Database string `json:"database"`
-	DSN      string `json:"dsn"` // optional override
+	TabColor string `json:"tabColor"`
+	// TabTextBlack forces black text when a custom tab color is used.
+	TabTextBlack bool   `json:"tabTextBlack"`
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	Database     string `json:"database"`
+	DSN          string `json:"dsn"` // optional override
 
 	// Kubernetes port-forwarding
 	UseKubePortForward bool   `json:"useKubePortForward"`

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { showConnectionDialog, editingConnection, activeConnections, selectedConnId, statusMessage } from '../stores/appStore';
+  import { showConnectionDialog, editingConnection, activeConnections, selectedConnId, statusMessage, tabs } from '../stores/appStore';
   import type { ConnectionConfig } from '../stores/appStore';
   import { SaveAndConnect, TestConnection } from '../../wailsjs/go/main/App';
 
@@ -8,15 +8,48 @@
   let saving = false;
   let testResult = '';
   let testError = '';
+  const DEFAULT_TAB_COLOR = '#6366f1';
 
   $: if ($showConnectionDialog) {
-    form = $editingConnection ? { ...$editingConnection } : emptyForm();
+    form = $editingConnection
+      ? {
+          ...emptyForm(),
+          ...$editingConnection,
+          tabColor: $editingConnection.tabColor ?? '',
+          tabTextBlack: !!$editingConnection.tabTextBlack,
+        }
+      : emptyForm();
     testResult = '';
     testError = '';
   }
 
+  function isValidHexColor(value: string): boolean {
+    return /^#[0-9a-fA-F]{6}$/.test(value);
+  }
+
+  function normalizeHexColor(value: string): string {
+    return isValidHexColor(value) ? value.toLowerCase() : '';
+  }
+
+  function getPickerColor(): string {
+    const normalized = normalizeHexColor(form.tabColor ?? '');
+    return normalized || DEFAULT_TAB_COLOR;
+  }
+
   function emptyForm(): ConnectionConfig {
-    return { id: crypto.randomUUID(), name: '', driver: 'mysql', host: 'localhost', port: 3306, username: '', password: '', database: '', dsn: '', useKubePortForward: false, kubeContext: '', kubeNamespace: '', kubeResource: '', kubeLocalPort: 0, kubeRemotePort: 0 };
+    return { id: crypto.randomUUID(), name: '', driver: 'mysql', tabColor: '', tabTextBlack: false, host: 'localhost', port: 3306, username: '', password: '', database: '', dsn: '', useKubePortForward: false, kubeContext: '', kubeNamespace: '', kubeResource: '', kubeLocalPort: 0, kubeRemotePort: 0 };
+  }
+
+  function onTabColorPick() {
+    form.tabColor = (form.tabColor ?? '').trim();
+  }
+
+  function onPickerInput(e: Event) {
+    form.tabColor = (e.target as HTMLInputElement).value;
+  }
+
+  function clearTabColor() {
+    form.tabColor = '';
   }
 
   function driverDefaultPort(driver: string): number {
@@ -63,6 +96,8 @@
         }
         return [...conns, { config: { ...form }, schema: null, schemaLoading: false, schemaError: null }];
       });
+      // Force re-render of tabs for this connection so custom tab styling updates immediately.
+      tabs.set($tabs.map(t => t.connId === form.id ? { ...t } : t));
       if (!$selectedConnId) selectedConnId.set(form.id);
       statusMessage.set(`Connected to ${form.name}`);
       showConnectionDialog.set(false);
@@ -91,6 +126,31 @@
       <div class="form-row">
         <label>Connection Name
           <input type="text" bind:value={form.name} placeholder="My Database" />
+        </label>
+      </div>
+      <div class="form-row tab-color-row">
+        <label class="tab-color-label">Tab Colour
+          <div class="tab-color-inputs">
+            <input
+              type="text"
+              bind:value={form.tabColor}
+              placeholder="Default"
+              spellcheck="false"
+            />
+            <input
+              class="tab-color-picker"
+              type="color"
+              value={getPickerColor()}
+              on:input={onPickerInput}
+              on:change={onPickerInput}
+              aria-label="Pick tab colour"
+            />
+            <button type="button" class="btn-clear-color" on:click={clearTabColor}>Clear</button>
+          </div>
+        </label>
+        <label class="checkbox-label tab-black-text-label">
+          <input type="checkbox" bind:checked={form.tabTextBlack} />
+          Black text
         </label>
       </div>
       <div class="form-row">
@@ -215,9 +275,32 @@
   .close-btn:hover { color: var(--text); }
   .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
   .form-row { display: flex; flex-direction: column; gap: 4px; }
+  .tab-color-row { gap: 8px; }
   .form-row.two-col { flex-direction: row; gap: 12px; }
   .form-row.two-col label { flex: 1; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); }
+  .tab-color-label { gap: 6px; }
+  .tab-color-inputs { display: flex; align-items: center; gap: 8px; }
+  .tab-color-picker {
+    width: 36px;
+    min-width: 36px;
+    height: 32px;
+    padding: 0;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .btn-clear-color {
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn-clear-color:hover { border-color: var(--accent); }
+  .tab-black-text-label { width: fit-content; }
   input, select {
     background: var(--bg-input); border: 1px solid var(--border);
     color: var(--text); padding: 7px 10px; border-radius: 4px;
