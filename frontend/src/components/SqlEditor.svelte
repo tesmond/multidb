@@ -157,6 +157,7 @@
     // frames (separate macrotasks) that can arrive in either order.
     let pendingTotalRows = -1;  // -1 = done not yet received
     let pendingDuration = 0;
+    let pendingRowsAffected = 0;
     let pendingError = '';
 
     function tryFinalize() {
@@ -172,7 +173,7 @@
           columnTypes: streamColTypes,
           rows: streamRows,
           _rowCount: streamRows.length,
-          rowsAffected: 0,
+          rowsAffected: pendingRowsAffected,
           duration: pendingDuration,
           error: pendingError,
         } as any,
@@ -181,7 +182,11 @@
         statusMessage.set(`Error: ${pendingError}`);
         outputTab.set('messages');
       } else {
-        statusMessage.set(`${streamRows.length} rows · ${pendingDuration}ms`);
+        if (pendingRowsAffected > 0 && streamRows.length === 0) {
+          statusMessage.set(`${pendingRowsAffected} row(s) affected · ${pendingDuration}ms`);
+        } else {
+          statusMessage.set(`${streamRows.length} rows · ${pendingDuration}ms`);
+        }
         // Automatically refresh the schema tree when a DDL statement
         // succeeds (CREATE TABLE, DROP TABLE, ALTER TABLE, etc.)
         if (isDDL(sql)) {
@@ -220,9 +225,10 @@
       tryFinalize(); // handle case: done arrived before this last chunk
     });
 
-    const offDone = EventsOn('query:done', (done: { queryId: string; totalRows: number; duration: number; error?: string }) => {
+    const offDone = EventsOn('query:done', (done: { queryId: string; totalRows: number; rowsAffected?: number; duration: number; error?: string }) => {
       if (done.queryId !== queryId) return;
       pendingTotalRows = done.totalRows;
+      pendingRowsAffected = done.rowsAffected ?? 0;
       pendingDuration = done.duration;
       pendingError = done.error ?? '';
       tryFinalize(); // handle case: all chunks already arrived

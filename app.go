@@ -229,10 +229,11 @@ type queryStreamChunk struct {
 }
 
 type queryStreamDone struct {
-	QueryID   string `json:"queryId"`
-	TotalRows int    `json:"totalRows"`
-	Duration  int64  `json:"duration"`
-	Error     string `json:"error,omitempty"`
+	QueryID      string `json:"queryId"`
+	TotalRows    int    `json:"totalRows"`
+	RowsAffected int64  `json:"rowsAffected"`
+	Duration     int64  `json:"duration"`
+	Error        string `json:"error,omitempty"`
 }
 
 // ExecuteQueryStreamed runs a SQL query and pushes results to the frontend via
@@ -268,6 +269,27 @@ func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
 	}()
 
 	start := time.Now()
+
+	if !queries.LooksLikeRowReturningQuery(query) {
+		qr := a.executor.ExecuteNonQuery(ctx, db, query)
+		if a.store != nil {
+			_ = a.store.AddQueryHistory(a.ctx, history.QueryRecord{
+				ConnID:      connID,
+				Query:       query,
+				Duration:    qr.Duration,
+				ResultCount: 0,
+				Error:       qr.Error,
+			})
+		}
+		runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
+			QueryID:      queryID,
+			TotalRows:    0,
+			RowsAffected: qr.RowsAffected,
+			Duration:     qr.Duration,
+			Error:        qr.Error,
+		})
+		return
+	}
 
 	dbRows, err := db.QueryContext(ctx, query)
 	if err != nil {
@@ -332,10 +354,11 @@ func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
 		case <-ctx.Done():
 			flush()
 			runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
-				QueryID:   queryID,
-				TotalRows: total,
-				Duration:  time.Since(start).Milliseconds(),
-				Error:     "query cancelled",
+				QueryID:      queryID,
+				TotalRows:    total,
+				RowsAffected: 0,
+				Duration:     time.Since(start).Milliseconds(),
+				Error:        "query cancelled",
 			})
 			return
 		default:
@@ -349,10 +372,11 @@ func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
 		if err := dbRows.Scan(ptrs...); err != nil {
 			flush()
 			runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
-				QueryID:   queryID,
-				TotalRows: total,
-				Duration:  time.Since(start).Milliseconds(),
-				Error:     fmt.Sprintf("scan: %v", err),
+				QueryID:      queryID,
+				TotalRows:    total,
+				RowsAffected: 0,
+				Duration:     time.Since(start).Milliseconds(),
+				Error:        fmt.Sprintf("scan: %v", err),
 			})
 			return
 		}
@@ -381,10 +405,11 @@ func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
 
 	if err := dbRows.Err(); err != nil {
 		runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
-			QueryID:   queryID,
-			TotalRows: total,
-			Duration:  time.Since(start).Milliseconds(),
-			Error:     err.Error(),
+			QueryID:      queryID,
+			TotalRows:    total,
+			RowsAffected: 0,
+			Duration:     time.Since(start).Milliseconds(),
+			Error:        err.Error(),
 		})
 		return
 	}
@@ -399,15 +424,25 @@ func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
 	}
 
 	runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{
-		QueryID:   queryID,
-		TotalRows: total,
-		Duration:  time.Since(start).Milliseconds(),
+		QueryID:      queryID,
+		TotalRows:    total,
+		RowsAffected: 0,
+		Duration:     time.Since(start).Milliseconds(),
 	})
 }
 
 // -----------------------------------------------------------------------
 // Schema API
 // -----------------------------------------------------------------------
+
+// GetTablePrimaryKeys returns the primary key column names for a table.
+func (a *App) GetTablePrimaryKeys(connID, driver, schemaName, tableName string) ([]string, error) {
+	db, err := a.connMgr.Get(connID)
+	if err != nil {
+		return nil, err
+	}
+	return a.inspector.GetPrimaryKeys(a.ctx, db, driver, schemaName, tableName)
+}
 
 // GetSchema returns the schema tree for a connection.
 func (a *App) GetSchema(connID string) (schema.SchemaTree, error) {

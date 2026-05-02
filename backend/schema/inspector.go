@@ -365,3 +365,101 @@ func (i *Inspector) sqliteColumns(ctx context.Context, db *sql.DB, table string)
 	}
 	return cols, rows.Err()
 }
+
+// GetPrimaryKeys returns the primary key column names for a given table.
+func (i *Inspector) GetPrimaryKeys(ctx context.Context, db *sql.DB, driver, schemaName, tableName string) ([]string, error) {
+	switch driver {
+	case "mysql":
+		return i.mysqlPrimaryKeys(ctx, db, schemaName, tableName)
+	case "postgres":
+		return i.postgresPrimaryKeys(ctx, db, schemaName, tableName)
+	case "sqlite":
+		return i.sqlitePrimaryKeys(ctx, db, tableName)
+	default:
+		return nil, fmt.Errorf("unsupported driver: %s", driver)
+	}
+}
+
+func (i *Inspector) mysqlPrimaryKeys(ctx context.Context, db *sql.DB, dbName, tableName string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT COLUMN_NAME FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY = 'PRI'
+		ORDER BY ORDINAL_POSITION`, dbName, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pks []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			return nil, err
+		}
+		pks = append(pks, col)
+	}
+	return pks, rows.Err()
+}
+
+func (i *Inspector) postgresPrimaryKeys(ctx context.Context, db *sql.DB, schemaName, tableName string) ([]string, error) {
+	if schemaName == "" {
+		schemaName = "public"
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_name = kcu.constraint_name
+		 AND tc.table_schema = kcu.table_schema
+		 AND tc.table_name = kcu.table_name
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+		  AND tc.table_schema = $1
+		  AND tc.table_name = $2
+		ORDER BY kcu.ordinal_position`, schemaName, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pks []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			return nil, err
+		}
+		pks = append(pks, col)
+	}
+	return pks, rows.Err()
+}
+
+func (i *Inspector) sqlitePrimaryKeys(ctx context.Context, db *sql.DB, tableName string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%q)", tableName))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type pkEntry struct {
+		name string
+		pkn  int
+	}
+	var entries []pkEntry
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return nil, err
+		}
+		if pk > 0 {
+			entries = append(entries, pkEntry{name, pk})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	pks := make([]string, len(entries))
+	for idx, e := range entries {
+		pks[idx] = e.name
+	}
+	return pks, nil
+}

@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { ExecuteResult } from '../stores/appStore';
+  import type { ExecuteResult, TabEditInfo } from '../stores/appStore';
   import { tabs } from '../stores/appStore';
 
   export let result: ExecuteResult | null = null;
   export let tabId: string = '';
+  export let editInfo: TabEditInfo | null = null;
 
   // --- Constants ---
   const ROW_HEIGHT = 28;
@@ -34,9 +35,11 @@
     bgRowAlt: 'rgba(255,255,255,0.02)',
     bgHover: 'rgba(255,255,255,0.04)',
     bgSel: 'rgba(70,130,255,0.28)',
+    bgDirty: 'rgba(255,200,50,0.15)',
     border: '#2e2e40',
     borderSubtle: '#1e1e2d',
     borderSel: 'rgba(80,140,255,0.85)',
+    borderDirty: 'rgba(255,200,50,0.7)',
     text: '#e2e2f0',
     textMuted: '#888898',
   };
@@ -185,6 +188,13 @@
   // ─── Hover state ──────────────────────────────────────────────────────────────
   let hoveredRow = -1;
 
+  // ─── Pending edits (from store) ───────────────────────────────────────────────
+  $: pendingEdits = $tabs.find(t => t.id === tabId)?.pendingEdits ?? {};
+
+  // ─── Cell edit overlay ────────────────────────────────────────────────────────
+  let editOverlay: { row: number; col: number; rowDataIdx: number; value: string; x: number; y: number; w: number } | null = null;
+  let editInput: HTMLInputElement;
+
   // ─── Column header tooltip ────────────────────────────────────────────────────
   let tooltipCol: number | null = null;
   let tooltipX = 0;
@@ -216,7 +226,7 @@
   // updates immediately without waiting for the next scroll/hover change.
   $: if (canvas && result) {
     void (startRow, visibleCount, yOffset, scrollLeft, containerWidth, containerHeight,
-          colWidths, sortIndex, hoveredRow, totalRows, rowNumWidth, sel);
+          colWidths, sortIndex, hoveredRow, totalRows, rowNumWidth, sel, pendingEdits, editOverlay);
     scheduleRender();
   }
 
@@ -229,9 +239,11 @@
       bgRowAlt:    g('--bg-row-alt')  || 'rgba(255,255,255,0.02)',
       bgHover:     g('--bg-hover')    || 'rgba(255,255,255,0.04)',
       bgSel:       'rgba(70,130,255,0.28)',
+      bgDirty:     'rgba(255,200,50,0.15)',
       border:      g('--border')      || '#2e2e40',
       borderSubtle:g('--border-subtle')|| '#1e1e2d',
       borderSel:   'rgba(80,140,255,0.85)',
+      borderDirty: 'rgba(255,200,50,0.7)',
       text:        g('--text')        || '#e2e2f0',
       textMuted:   g('--text-muted')  || '#888898',
     };
@@ -268,6 +280,8 @@
     const _vc     = visibleCount;
     const _hr     = hoveredRow;
     const _sel    = sel;
+    const _pe     = pendingEdits;
+    const _eo     = editOverlay;
     const numCols = _cw.length;
 
     // Pre-compute column x positions (content-space, before scroll)
@@ -363,19 +377,48 @@
         const textMaxW = cw - CELL_PAD_X * 2;
         if (textMaxW <= 0) continue;
 
+        // If this cell is currently open in the edit overlay, blank it out so
+        // the canvas text doesn't show through the input element.
+        if (_eo && rowDataIdx === _eo.rowDataIdx && c === _eo.col) {
+          ctx.fillStyle = colors.bgPanel;
+          ctx.fillRect(x + 1, y, cw - 2, ROW_HEIGHT - 1);
+          continue;
+        }
+
+        // Check for a pending edit for this cell
+        const dirtyVal = _pe[String(rowDataIdx)]?.[String(c)];
+        const isDirty = dirtyVal !== undefined;
+
+        // Draw dirty cell background (on top of row / selection backgrounds)
+        if (isDirty) {
+          ctx.fillStyle = colors.bgDirty;
+          ctx.fillRect(x, y, cw - 1, ROW_HEIGHT - 1);
+          // Left indicator line
+          ctx.fillStyle = colors.borderDirty;
+          ctx.fillRect(x, y, 2, ROW_HEIGHT - 1);
+        }
+
         ctx.save();
         ctx.beginPath();
         ctx.rect(x + 1, y, cw - 2, ROW_HEIGHT);
         ctx.clip();
 
-        const cell = row[c];
-        if (cell === null) {
-          ctx.fillStyle   = colors.textMuted;
-          ctx.globalAlpha = 0.6;
-          ctx.font        = FONT_NULL;
-          ctx.fillText('NULL', x + CELL_PAD_X, y + ROW_HEIGHT / 2);
-          ctx.globalAlpha = 1;
-          ctx.font        = FONT;
+        const cell = isDirty ? dirtyVal : row[c];
+        if (cell === null || cell === '') {
+          if (!isDirty) {
+            // Only show NULL for actual null, not empty strings from edits
+            if (row[c] === null) {
+              ctx.fillStyle   = colors.textMuted;
+              ctx.globalAlpha = 0.6;
+              ctx.font        = FONT_NULL;
+              ctx.fillText('NULL', x + CELL_PAD_X, y + ROW_HEIGHT / 2);
+              ctx.globalAlpha = 1;
+              ctx.font        = FONT;
+            }
+          } else {
+            ctx.fillStyle = colors.text;
+            ctx.fillText(String(cell), x + CELL_PAD_X, y + ROW_HEIGHT / 2);
+          }
         } else {
           ctx.fillStyle = colors.text;
           ctx.fillText(String(cell), x + CELL_PAD_X, y + ROW_HEIGHT / 2);
@@ -604,7 +647,7 @@
     window.removeEventListener('mouseup', onWindowSelectionMouseUp);
   }
 
-  // Double-click: copy single cell value and collapse selection to that cell
+  // Double-click: open edit overlay if editable, otherwise copy single cell value
   function onCanvasDblClick(e: MouseEvent) {
     const hit = getCellFromMouse(e);
     if (!hit) return;
@@ -613,6 +656,38 @@
     const row        = rows[rowDataIdx];
     if (!row) return;
 
+    // Edit mode: open inline editor
+    if (editInfo && editInfo.primaryKeyCols.length > 0 && canvas) {
+      const existingEdit = pendingEdits[String(rowDataIdx)]?.[String(hit.col)];
+      const originalVal = row[hit.col];
+      const currentVal = existingEdit !== undefined ? existingEdit : originalVal;
+      const valStr = currentVal === null ? '' : String(currentVal);
+
+      const rect = canvas.getBoundingClientRect();
+      let cx = rowNumWidth - scrollLeft;
+      for (let i = 0; i < hit.col; i++) cx += colWidths[i] ?? 0;
+      const cy = yOffset + (hit.row - startRow) * ROW_HEIGHT;
+      const cw = colWidths[hit.col] ?? 100;
+
+      editOverlay = {
+        row: hit.row,
+        col: hit.col,
+        rowDataIdx,
+        value: valStr,
+        x: rect.left + cx,
+        y: rect.top + cy,
+        w: cw,
+      };
+
+      sel = { r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col };
+      lastSelectedCell = hit;
+      scheduleRender();
+
+      setTimeout(() => editInput?.focus(), 0);
+      return;
+    }
+
+    // Default: copy cell value to clipboard
     const val  = row[hit.col];
     const text = val === null ? 'NULL' : String(val);
     navigator.clipboard.writeText(text).catch(() => {});
@@ -620,6 +695,54 @@
     sel = { r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col };
     lastSelectedCell = hit;
     scheduleRender();
+  }
+
+  function commitEdit() {
+    if (!editOverlay) return;
+    const { rowDataIdx, col, value } = editOverlay;
+    editOverlay = null;
+
+    const tab = $tabs.find(t => t.id === tabId);
+    const currentPending = tab?.pendingEdits ?? {};
+    const originalVal = rows[rowDataIdx]?.[col] ?? null;
+    const originalStr = originalVal === null ? '' : String(originalVal);
+
+    const existingRowEdits = currentPending[String(rowDataIdx)] ?? {};
+
+    if (value === originalStr) {
+      // Value unchanged — remove any existing edit for this cell
+      const { [String(col)]: _removed, ...restCols } = existingRowEdits;
+      const newPending = { ...currentPending };
+      if (Object.keys(restCols).length === 0) {
+        const { [String(rowDataIdx)]: _removedRow, ...restRows } = newPending;
+        tabs.updateTab(tabId, { pendingEdits: restRows });
+      } else {
+        tabs.updateTab(tabId, { pendingEdits: { ...newPending, [String(rowDataIdx)]: restCols } });
+      }
+    } else {
+      tabs.updateTab(tabId, {
+        pendingEdits: {
+          ...currentPending,
+          [String(rowDataIdx)]: { ...existingRowEdits, [String(col)]: value },
+        },
+      });
+    }
+
+    scheduleRender();
+  }
+
+  function onEditKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitEdit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      editOverlay = null;
+      scheduleRender();
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      commitEdit();
+    }
   }
 
   // ─── Keyboard: copy selection / clear / select-all ───────────────────────────
@@ -772,7 +895,8 @@
     }
     sel = null;
     lastSelectedCell = null;
-    if (tabId) tabs.updateTab(tabId, { sortCol: -1, sortDirection: 'asc' });
+    editOverlay = null;
+    if (tabId) tabs.updateTab(tabId, { sortCol: -1, sortDirection: 'asc', pendingEdits: {} });
   }
 
   // ─── Click-outside: clear selection ──────────────────────────────────────────
@@ -897,6 +1021,19 @@
       <span class="col-tooltip-len">max length: {colMaxTextLen[tooltipCol] ?? 0}</span>
     </div>
   {/if}
+
+  {#if editOverlay}
+    <!-- svelte-ignore a11y-autofocus -->
+    <input
+      bind:this={editInput}
+      type="text"
+      class="cell-edit-input"
+      style="left:{editOverlay.x}px; top:{editOverlay.y}px; width:{editOverlay.w}px; height:{ROW_HEIGHT}px;"
+      bind:value={editOverlay.value}
+      on:keydown={onEditKeyDown}
+      on:blur={commitEdit}
+    />
+  {/if}
 {/if}
 
 <style>
@@ -996,6 +1133,23 @@
   }
   /* Cell cursor to hint that data is selectable */
   .grid-body canvas { cursor: cell; display: block; }
+
+  .cell-edit-input {
+    position: fixed;
+    z-index: 200;
+    box-sizing: border-box;
+    padding: 0 10px;
+    background: var(--bg-panel, #1a1a24);
+    color: var(--text, #e2e2f0);
+    border: 2px solid rgba(255,200,50,0.9);
+    border-radius: 0;
+    font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    outline: none;
+  }
+  .cell-edit-input:focus {
+    border-color: rgba(255,200,50,1);
+    background: rgba(255,200,50,0.06);
+  }
 
   .sr-only {
     position: absolute; width: 1px; height: 1px;

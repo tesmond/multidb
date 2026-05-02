@@ -97,3 +97,22 @@ func TestExecuteNonQuery(t *testing.T) {
 		t.Fatalf("expected 1 row affected, got %d", result.RowsAffected)
 	}
 }
+
+func TestExecute_MultiStatementNonQueryRowsAffected(t *testing.T) {
+	db := openSQLite(t)
+	defer db.Close()
+
+	exec := queries.NewExecutor()
+	result := exec.Execute(context.Background(), db, `
+		UPDATE users SET name = 'Alice_1' WHERE id = 1;
+		UPDATE users SET name = 'Bob_2' WHERE id = 2;
+		UPDATE users SET name = 'Charlie_3' WHERE id = 3;
+	`, 0)
+
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.RowsAffected != 3 {
+		t.Fatalf("expected 3 rows affected, got %d", result.RowsAffected)
+	}
+}

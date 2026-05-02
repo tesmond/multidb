@@ -6,8 +6,126 @@
   $: activeTabConnId = $activeTab?.connId ?? '';
   import ResultsGrid from './ResultsGrid.svelte';
   import EditSavedQueryTitleDialog from './EditSavedQueryTitleDialog.svelte';
-  import { GetQueryHistoryByConnID, SaveAndConnect, ClearQueryHistoryByConnID, ClearQueryHistory } from '../../wailsjs/go/main/App';
+  import { GetQueryHistoryByConnID, SaveAndConnect, ClearQueryHistoryByConnID, ClearQueryHistory, GetTablePrimaryKeys } from '../../wailsjs/go/main/App';
   import { get } from 'svelte/store';
+
+  // ─── Simple SELECT detection ──────────────────────────────────────────────────
+  function parseSimpleSelect(sql: string): { tableName: string; schemaName: string } | null {
+    const s = sql.replace(/\s+/g, ' ').trim();
+    if (!/^SELECT\b/i.test(s)) return null;
+    if (/\bJOIN\b/i.test(s)) return null;
+    if (/\bFROM\s*\(/i.test(s)) return null;
+    // Match: FROM [schema.]table  (handles backtick, double-quote, bracket, or plain)
+    const m = /\bFROM\s+(?:([`"\w[\]]+)\s*\.\s*)?([`"\w[\]]+)/i.exec(s);
+    if (!m) return null;
+    const clean = (t: string) => t.replace(/[`"[\]]/g, '');
+    return {
+      schemaName: m[2] ? clean(m[1] ?? '') : '',
+      tableName:  m[2] ? clean(m[2]) : clean(m[1] ?? ''),
+    };
+  }
+
+  function quoteIdent(name: string, driver: string): string {
+    if (driver === 'mysql') return '`' + name.replace(/`/g, '``') + '`';
+    return '"' + name.replace(/"/g, '""') + '"';
+  }
+
+  function quoteValue(val: any): string {
+    if (val === null || val === undefined) return 'NULL';
+    if (typeof val === 'number') return String(val);
+    return "'" + String(val).replace(/'/g, "''") + "'";
+  }
+
+  function generateUpdateSQL(): string {
+    const tab = $activeTab;
+    if (!tab?.editInfo || !tab.result) return '';
+    const { editInfo, pendingEdits, result, connId } = tab;
+    const conn = $activeConnections.find(c => c.config.id === connId);
+    const driver = conn?.config.driver ?? 'postgres';
+    const { tableName, schemaName, primaryKeyCols } = editInfo;
+    const qi = (n: string) => quoteIdent(n, driver);
+    const fullTable = schemaName ? `${qi(schemaName)}.${qi(tableName)}` : qi(tableName);
+
+    const lines: string[] = [];
+    for (const [rowIdxStr, colEdits] of Object.entries(pendingEdits)) {
+      const rowIdx = parseInt(rowIdxStr, 10);
+      const row = result.rows[rowIdx];
+      if (!row) continue;
+
+      const setClauses = Object.entries(colEdits).map(([colIdxStr, newVal]) => {
+        const colIdx = parseInt(colIdxStr, 10);
+        const colName = result.columns[colIdx];
+        return `${qi(colName)} = ${quoteValue(newVal)}`;
+      });
+
+      const whereClauses = primaryKeyCols.map(pkCol => {
+        const colIdx = result.columns.indexOf(pkCol);
+        const val = colIdx >= 0 ? row[colIdx] : null;
+        return `${qi(pkCol)} = ${quoteValue(val)}`;
+      });
+
+      if (setClauses.length > 0 && whereClauses.length > 0) {
+        lines.push(`UPDATE ${fullTable}\nSET ${setClauses.join(',\n    ')}\nWHERE ${whereClauses.join(' AND ')};`);
+      }
+    }
+    return lines.join('\n\n');
+  }
+
+  function saveEdits() {
+    const tab = $activeTab;
+    if (!tab) return;
+    const sql = generateUpdateSQL();
+    if (!sql) return;
+    tabs.add(tab.connId);
+    const allTabs = get(tabs);
+    const newTab = allTabs[allTabs.length - 1];
+    tabs.updateTab(newTab.id, { sql });
+    activeTabId.set(newTab.id);
+  }
+
+  // ─── Editability detection ─────────────────────────────────────────────────────
+  let _lastEditCheckKey = '';
+
+  $: {
+    const tab = $activeTab;
+    // Re-run when result or SQL changes
+    const key = tab ? `${tab.id}:${tab.result?.columns?.join(',') ?? ''}:${tab.sql}` : '';
+    if (key !== _lastEditCheckKey) {
+      _lastEditCheckKey = key;
+      if (tab && tab.result && !tab.result.error && tab.sql) {
+        checkForEditability(tab.id, tab.sql, tab.connId);
+      } else if (tab) {
+        tabs.updateTab(tab.id, { editInfo: null });
+      }
+    }
+  }
+
+  async function checkForEditability(tabId: string, sql: string, connId: string) {
+    const parsed = parseSimpleSelect(sql);
+    if (!parsed) {
+      tabs.updateTab(tabId, { editInfo: null });
+      return;
+    }
+    const conn = $activeConnections.find(c => c.config.id === connId);
+    if (!conn) {
+      tabs.updateTab(tabId, { editInfo: null });
+      return;
+    }
+    try {
+      const pkCols = await GetTablePrimaryKeys(connId, conn.config.driver, parsed.schemaName, parsed.tableName);
+      if (pkCols && pkCols.length > 0) {
+        tabs.updateTab(tabId, {
+          editInfo: { tableName: parsed.tableName, schemaName: parsed.schemaName, primaryKeyCols: pkCols },
+        });
+      } else {
+        tabs.updateTab(tabId, { editInfo: null });
+      }
+    } catch (e) {
+      tabs.updateTab(tabId, { editInfo: null });
+    }
+  }
+
+  $: hasPendingEdits = Object.keys($activeTab?.pendingEdits ?? {}).length > 0;
 
   let contextMenu: { x: number; y: number; type: 'history' | 'saved'; itemId?: number; itemTitle?: string } | null = null;
   let editTitleDialog: EditSavedQueryTitleDialog;
@@ -245,11 +363,16 @@
         aria-selected={$outputTab === key}
       >{label}</button>
     {/each}
+    {#if $outputTab === 'results' && hasPendingEdits}
+      <button class="save-edits-btn" on:click={saveEdits} title="Generate UPDATE statements in a new tab">
+        Save Changes ({Object.keys($activeTab?.pendingEdits ?? {}).length})
+      </button>
+    {/if}
   </div>
 
   <div class="output-content">
     {#if $outputTab === 'results'}
-      <ResultsGrid result={$activeTab?.result ?? null} tabId={$activeTab?.id ?? ''} />
+      <ResultsGrid result={$activeTab?.result ?? null} tabId={$activeTab?.id ?? ''} editInfo={$activeTab?.editInfo ?? null} />
 
     {:else if $outputTab === 'messages'}
       <div class="messages">
@@ -333,7 +456,7 @@
 <style>
   .output-panel { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
   .output-tabs {
-    display: flex; gap: 0;
+    display: flex; gap: 0; align-items: center;
     border-bottom: 1px solid var(--border);
     background: var(--bg-panel);
     flex-shrink: 0;
@@ -346,6 +469,25 @@
   .output-tab:hover { color: var(--text); }
   .output-tab.active { color: var(--text); border-bottom-color: var(--accent); }
   .output-content { flex: 1; overflow: hidden; }
+
+  .save-edits-btn {
+    margin-left: auto;
+    margin-right: 8px;
+    align-self: center;
+    padding: 3px 12px;
+    background: rgba(255,200,50,0.15);
+    border: 1px solid rgba(255,200,50,0.6);
+    border-radius: 4px;
+    color: rgba(255,200,50,1);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .save-edits-btn:hover {
+    background: rgba(255,200,50,0.25);
+    border-color: rgba(255,200,50,0.9);
+  }
 
   .messages, .history-list, .saved-list { height: 100%; overflow-y: auto; padding: 8px 12px; }
   .msg { font-size: 12px; padding: 6px 10px; border-radius: 4px; }

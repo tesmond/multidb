@@ -31,6 +31,12 @@ export const selectedConnId = writable<string>("");
 // Tab / editor state
 // -----------------------------------------------------------------------
 
+export interface TabEditInfo {
+  tableName: string;
+  schemaName: string;
+  primaryKeyCols: string[];
+}
+
 export interface Tab {
   id: string;
   title: string;
@@ -42,6 +48,8 @@ export interface Tab {
   sortCol: number;
   sortDirection: "asc" | "desc";
   manuallyRenamed: boolean;
+  editInfo: TabEditInfo | null;
+  pendingEdits: Record<string, Record<string, any>>;
 }
 
 function makeTab(connId = ""): Tab {
@@ -57,6 +65,8 @@ function makeTab(connId = ""): Tab {
     sortCol: -1,
     sortDirection: "asc",
     manuallyRenamed: false,
+    editInfo: null,
+    pendingEdits: {},
   };
 }
 

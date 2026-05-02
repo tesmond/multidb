@@ -71,7 +71,7 @@ func buildDSN(cfg ConnectionConfig) (string, string) {
 			User:     url.UserPassword(cfg.Username, cfg.Password),
 			Host:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 			Path:     "/" + cfg.Database,
-			RawQuery: "sslmode=prefer",
+			RawQuery: "sslmode=prefer&default_query_exec_mode=simple_protocol",
 		}
 		return "pgx", u.String()
 	case "sqlite":

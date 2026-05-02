@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -25,11 +26,34 @@ func NewExecutor() *Executor {
 	return &Executor{}
 }
 
+// LooksLikeRowReturningQuery returns true when a statement is likely to return
+// rows. Non-row statements should be executed via ExecContext so we can report
+// affected row counts.
+func LooksLikeRowReturningQuery(query string) bool {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return false
+	}
+	up := strings.ToUpper(q)
+	return strings.HasPrefix(up, "SELECT") ||
+		strings.HasPrefix(up, "WITH") ||
+		strings.HasPrefix(up, "SHOW") ||
+		strings.HasPrefix(up, "DESCRIBE") ||
+		strings.HasPrefix(up, "DESC ") ||
+		strings.HasPrefix(up, "EXPLAIN") ||
+		strings.HasPrefix(up, "PRAGMA") ||
+		strings.HasPrefix(up, "VALUES")
+}
+
 // Execute runs a query and returns up to maxRows rows.
 // Pass maxRows <= 0 to use the default limit of 1000.
 func (e *Executor) Execute(ctx context.Context, db *sql.DB, query string, maxRows int) QueryResult {
 	if maxRows <= 0 {
 		maxRows = 1000000
+	}
+
+	if !LooksLikeRowReturningQuery(query) {
+		return e.ExecuteNonQuery(ctx, db, query)
 	}
 
 	start := time.Now()
@@ -109,20 +133,41 @@ func (e *Executor) Execute(ctx context.Context, db *sql.DB, query string, maxRow
 // ExecuteNonQuery runs a non-SELECT statement (INSERT, UPDATE, DELETE, DDL).
 func (e *Executor) ExecuteNonQuery(ctx context.Context, db *sql.DB, query string) QueryResult {
 	start := time.Now()
-
-	res, err := db.ExecContext(ctx, query)
-	if err != nil {
-		return QueryResult{
-			Duration: time.Since(start).Milliseconds(),
-			Error:    err.Error(),
+	statements := splitStatements(query)
+	var affected int64
+	for _, stmt := range statements {
+		res, err := db.ExecContext(ctx, stmt)
+		if err != nil {
+			return QueryResult{
+				Duration: time.Since(start).Milliseconds(),
+				Error:    err.Error(),
+			}
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			affected += n
 		}
 	}
 
-	affected, _ := res.RowsAffected()
 	return QueryResult{
 		Duration:     time.Since(start).Milliseconds(),
 		RowsAffected: affected,
 		Columns:      []string{},
 		Rows:         [][]any{},
 	}
+}
+
+func splitStatements(query string) []string {
+	raw := strings.Split(query, ";")
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		t := strings.TrimSpace(s)
+		if t == "" {
+			continue
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return []string{strings.TrimSpace(query)}
+	}
+	return out
 }
