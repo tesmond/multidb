@@ -56,6 +56,12 @@ export interface DbSchema {
   views?:   TableInfo[];
 }
 
+export interface SqlSemanticDiagnostic {
+  from: number;
+  to: number;
+  message: string;
+}
+
 // ─── Namespace builder ────────────────────────────────────────────────────────
 
 /**
@@ -223,6 +229,214 @@ function tableCompletion(t: TableInfo): Completion {
 
 function schemaCompletion(name: string): Completion {
   return { label: name, type: 'namespace', boost: 5 };
+}
+
+type TableRef = {
+  schema: string;
+  table: string;
+  columns: Set<string>;
+  from: number;
+  to: number;
+};
+
+function normalizeIdent(id: string): string {
+  return id.replace(/^["'`\[]+|["'`\]]+$/g, '').toLowerCase();
+}
+
+function flattenDbSchema(db: DbSchema): {
+  schemas: Set<string>;
+  schemaTables: Map<string, Set<string>>;
+  tableColumns: Map<string, Set<string>>;
+} {
+  const schemas = new Set<string>();
+  const schemaTables = new Map<string, Set<string>>();
+  const tableColumns = new Map<string, Set<string>>();
+
+  if (db.schemas?.length) {
+    for (const s of db.schemas) {
+      const schemaName = s.name.toLowerCase();
+      schemas.add(schemaName);
+      if (!schemaTables.has(schemaName)) schemaTables.set(schemaName, new Set<string>());
+      const tableSet = schemaTables.get(schemaName)!;
+
+      for (const t of s.tables) {
+        const tableName = t.name.toLowerCase();
+        tableSet.add(tableName);
+        if (!tableColumns.has(tableName)) {
+          tableColumns.set(tableName, new Set(t.columns.map(c => c.name.toLowerCase())));
+        }
+      }
+    }
+  } else {
+    for (const t of [...(db.tables ?? []), ...(db.views ?? [])]) {
+      const tableName = t.name.toLowerCase();
+      tableColumns.set(tableName, new Set(t.columns.map(c => c.name.toLowerCase())));
+    }
+  }
+
+  return { schemas, schemaTables, tableColumns };
+}
+
+function splitSelectExpressions(selectText: string): Array<{ text: string; from: number; to: number }> {
+  const parts: Array<{ text: string; from: number; to: number }> = [];
+  let start = 0;
+  let depth = 0;
+  let quote: 'single' | 'double' | 'backtick' | null = null;
+
+  for (let i = 0; i < selectText.length; i++) {
+    const ch = selectText[i];
+
+    if (quote) {
+      if (
+        (quote === 'single' && ch === "'") ||
+        (quote === 'double' && ch === '"') ||
+        (quote === 'backtick' && ch === '`')
+      ) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (ch === "'") quote = 'single';
+    else if (ch === '"') quote = 'double';
+    else if (ch === '`') quote = 'backtick';
+    else if (ch === '(') depth++;
+    else if (ch === ')' && depth > 0) depth--;
+    else if (ch === ',' && depth === 0) {
+      const text = selectText.slice(start, i).trim();
+      if (text) {
+        const leading = selectText.slice(start, i).search(/\S/);
+        const from = start + (leading >= 0 ? leading : 0);
+        parts.push({ text, from, to: i });
+      }
+      start = i + 1;
+    }
+  }
+
+  const tailRaw = selectText.slice(start);
+  const tail = tailRaw.trim();
+  if (tail) {
+    const leading = tailRaw.search(/\S/);
+    const from = start + (leading >= 0 ? leading : 0);
+    parts.push({ text: tail, from, to: selectText.length });
+  }
+
+  return parts;
+}
+
+function resolveTableReferences(sqlText: string, db: DbSchema, diagnostics: SqlSemanticDiagnostic[]): TableRef[] {
+  const refs: TableRef[] = [];
+  const { schemas, schemaTables, tableColumns } = flattenDbSchema(db);
+  const tableRefRe = /\b(?:FROM|JOIN)\s+([A-Za-z_][\w$]*)(?:\s*\.\s*([A-Za-z_][\w$]*))?/gi;
+
+  let m: RegExpExecArray | null;
+  while ((m = tableRefRe.exec(sqlText)) !== null) {
+    const first = m[1];
+    const second = m[2];
+    const firstLower = normalizeIdent(first);
+    const secondLower = second ? normalizeIdent(second) : '';
+
+    const rawMatch = m[0];
+    const firstOffsetInMatch = rawMatch.search(/[A-Za-z_][\w$]*/);
+    const from = (m.index ?? 0) + Math.max(0, firstOffsetInMatch);
+    const to = second
+      ? from + first.length + rawMatch.slice(firstOffsetInMatch + first.length).search(/[A-Za-z_][\w$]*/) + second.length
+      : from + first.length;
+
+    if (second) {
+      const hasSchema = schemas.has(firstLower);
+      const tablesInSchema = schemaTables.get(firstLower);
+      const hasTableInSchema = !!tablesInSchema?.has(secondLower);
+
+      if (!hasSchema || !hasTableInSchema) {
+        diagnostics.push({ from, to, message: `Unknown table ${first}.${second}` });
+        continue;
+      }
+
+      const cols = tableColumns.get(secondLower) ?? new Set<string>();
+      refs.push({ schema: firstLower, table: secondLower, columns: cols, from, to });
+      continue;
+    }
+
+    const cols = tableColumns.get(firstLower);
+    if (!cols) {
+      diagnostics.push({ from, to, message: `Unknown table ${first}` });
+      continue;
+    }
+
+    refs.push({ schema: '', table: firstLower, columns: cols, from, to });
+  }
+
+  return refs;
+}
+
+export function findSqlSemanticDiagnostics(sqlText: string, db: DbSchema): SqlSemanticDiagnostic[] {
+  const diagnostics: SqlSemanticDiagnostic[] = [];
+  const refs = resolveTableReferences(sqlText, db, diagnostics);
+
+  const selectMatch = /\bSELECT\b([\s\S]*?)\bFROM\b/i.exec(sqlText);
+  if (!selectMatch) return diagnostics;
+
+  const selectBody = selectMatch[1];
+  if (!selectBody) return diagnostics;
+
+  const selectStart = (selectMatch.index ?? 0) + selectMatch[0].indexOf(selectBody);
+  const exprs = splitSelectExpressions(selectBody);
+
+  const refByTable = new Map<string, TableRef>();
+  for (const r of refs) refByTable.set(r.table, r);
+
+  for (const expr of exprs) {
+    const trimmed = expr.text.trim();
+    if (!trimmed || trimmed === '*' || /\bDISTINCT\b\s*\*?/i.test(trimmed)) continue;
+
+    const aliasRemoved = trimmed
+      .replace(/\s+AS\s+[A-Za-z_][\w$]*$/i, '')
+      .replace(/\s+[A-Za-z_][\w$]*$/, '');
+
+    const qualified = /([A-Za-z_][\w$]*)\s*\.\s*([A-Za-z_][\w$]*)$/.exec(aliasRemoved);
+    if (qualified) {
+      const tableToken = normalizeIdent(qualified[1]);
+      const colToken = normalizeIdent(qualified[2]);
+      const ref = refByTable.get(tableToken);
+
+      if (ref && !ref.columns.has(colToken)) {
+        const colIdx = aliasRemoved.lastIndexOf(qualified[2]);
+        const from = selectStart + expr.from + colIdx;
+        diagnostics.push({
+          from,
+          to: from + qualified[2].length,
+          message: `Unknown column ${qualified[2]}`,
+        });
+      }
+      continue;
+    }
+
+    const bareCol = /[A-Za-z_][\w$]*/.exec(aliasRemoved);
+    if (!bareCol) continue;
+
+    const token = normalizeIdent(bareCol[0]);
+    if (RESERVED.has(token.toUpperCase())) continue;
+
+    let foundInAny = false;
+    for (const r of refs) {
+      if (r.columns.has(token)) {
+        foundInAny = true;
+        break;
+      }
+    }
+
+    if (!foundInAny && refs.length > 0) {
+      const from = selectStart + expr.from + bareCol.index;
+      diagnostics.push({
+        from,
+        to: from + bareCol[0].length,
+        message: `Unknown column ${bareCol[0]}`,
+      });
+    }
+  }
+
+  return diagnostics;
 }
 
 // ─── Smart completion source ──────────────────────────────────────────────────

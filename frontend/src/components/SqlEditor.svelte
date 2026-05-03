@@ -12,11 +12,12 @@
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { sql, MySQL, PostgreSQL, SQLite } from '@codemirror/lang-sql';
   import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
-  import { buildSqlNamespace, makeSmartCompletionSource, type DbSchema } from '../lib/sqlComplete';
+  import { buildSqlNamespace, makeSmartCompletionSource, findSqlSemanticDiagnostics, type DbSchema } from '../lib/sqlComplete';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { lineNumbers, highlightActiveLineGutter, highlightActiveLine } from '@codemirror/view';
-  import { bracketMatching, indentOnInput } from '@codemirror/language';
+  import { bracketMatching, indentOnInput, syntaxTree } from '@codemirror/language';
   import { highlightSelectionMatches, searchKeymap } from '@codemirror/search';
+  import { linter, lintGutter, type Diagnostic } from '@codemirror/lint';
 
   export let tabId: string;
 
@@ -29,6 +30,44 @@
   let editorEl: HTMLDivElement;
   let view: EditorView | null = null;
   let sqlCompartment = new Compartment();
+
+  // Combined linter: parser errors + schema-aware semantic identifier checks.
+  const sqlLinter = linter((editorView) => {
+    const docText = editorView.state.doc.toString();
+    const diagnostics: Diagnostic[] = [];
+
+    const activeTab = get(tabs).find(t => t.id === tabId);
+    const connId = activeTab?.connId || get(selectedConnId) || '';
+    const dbSchema = getConnectionDbSchema(connId);
+
+    if (dbSchema) {
+      const semantic = findSqlSemanticDiagnostics(docText, dbSchema);
+      for (const d of semantic) {
+        diagnostics.push({
+          from: d.from,
+          to: d.to,
+          severity: 'error',
+          message: d.message,
+        });
+      }
+    }
+
+    const tree = syntaxTree(editorView.state);
+    tree.cursor().iterate(node => {
+      if (node.type.isError) {
+        // Expand zero-length error ranges by one char so the underline is visible.
+        const from = node.from;
+        const to   = node.to > node.from ? node.to : Math.min(node.from + 1, editorView.state.doc.length);
+        diagnostics.push({
+          from,
+          to,
+          severity: 'error',
+          message: 'SQL syntax error',
+        });
+      }
+    });
+    return diagnostics;
+  }, { delay: 100 });
   let saveQueryDialog: SaveQueryDialog;
 
   // Convert the active-connection schema into the DbSchema shape used by
@@ -312,6 +351,8 @@
             maxRenderedOptions: 50,
             defaultKeymap: true,
           }),
+          lintGutter(),
+          sqlLinter,
           sqlCompartment.of(makeSqlExtension(initialConnId)),
           keymap.of([
             { key: 'Ctrl-Enter', mac: 'Cmd-Enter', run: () => { runQuery(); return true; } },
@@ -452,5 +493,11 @@
 
   .cm-host :global(.cm-editor.cm-focused) {
     outline: none;
+  }
+
+  /* Don't let the syntax highlighter colour error/invalid tokens red —
+     the squiggly underline from the linter is enough. */
+  .cm-host :global(.cm-invalid) {
+    color: inherit !important;
   }
 </style>
