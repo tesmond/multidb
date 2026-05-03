@@ -12,7 +12,7 @@
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { sql, MySQL, PostgreSQL, SQLite } from '@codemirror/lang-sql';
   import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
-  import { buildSqlNamespace, makeSmartCompletionSource, findSqlSemanticDiagnostics, type DbSchema } from '../lib/sqlComplete';
+  import { buildSqlNamespace, makeSmartCompletionSource, findSqlSemanticDiagnostics, findSqlCommonSyntaxDiagnostics, type DbSchema } from '../lib/sqlComplete';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { lineNumbers, highlightActiveLineGutter, highlightActiveLine } from '@codemirror/view';
   import { bracketMatching, indentOnInput, syntaxTree } from '@codemirror/language';
@@ -35,6 +35,16 @@
   const sqlLinter = linter((editorView) => {
     const docText = editorView.state.doc.toString();
     const diagnostics: Diagnostic[] = [];
+
+    const syntax = findSqlCommonSyntaxDiagnostics(docText);
+    for (const d of syntax) {
+      diagnostics.push({
+        from: d.from,
+        to: d.to,
+        severity: 'error',
+        message: d.message,
+      });
+    }
 
     const activeTab = get(tabs).find(t => t.id === tabId);
     const connId = activeTab?.connId || get(selectedConnId) || '';

@@ -62,6 +62,12 @@ export interface SqlSemanticDiagnostic {
   message: string;
 }
 
+export interface SqlSyntaxDiagnostic {
+  from: number;
+  to: number;
+  message: string;
+}
+
 // ─── Namespace builder ────────────────────────────────────────────────────────
 
 /**
@@ -322,6 +328,66 @@ function splitSelectExpressions(selectText: string): Array<{ text: string; from:
   }
 
   return parts;
+}
+
+export function findSqlCommonSyntaxDiagnostics(sqlText: string): SqlSyntaxDiagnostic[] {
+  const diagnostics: SqlSyntaxDiagnostic[] = [];
+
+  // Detect: SELECT ..., FROM ... (trailing comma before FROM)
+  const selectMatch = /\bSELECT\b([\s\S]*?)\bFROM\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = selectMatch.exec(sqlText)) !== null) {
+    const selectBody = m[1] ?? '';
+    const selectBodyStart = (m.index ?? 0) + m[0].indexOf(selectBody);
+
+    let depth = 0;
+    let quote: 'single' | 'double' | 'backtick' | null = null;
+
+    for (let i = 0; i < selectBody.length; i++) {
+      const ch = selectBody[i];
+
+      if (quote) {
+        if (
+          (quote === 'single' && ch === "'") ||
+          (quote === 'double' && ch === '"') ||
+          (quote === 'backtick' && ch === '`')
+        ) {
+          quote = null;
+        }
+        continue;
+      }
+
+      if (ch === "'") quote = 'single';
+      else if (ch === '"') quote = 'double';
+      else if (ch === '`') quote = 'backtick';
+      else if (ch === '(') depth++;
+      else if (ch === ')' && depth > 0) depth--;
+      else if (ch === ',' && depth === 0) {
+        const tail = selectBody.slice(i + 1);
+        if (!/\S/.test(tail)) {
+          diagnostics.push({
+            from: selectBodyStart + i,
+            to: selectBodyStart + i + 1,
+            message: 'Trailing comma in SELECT list',
+          });
+          continue;
+        }
+
+        const nextToken = /\S+/.exec(tail);
+        if (!nextToken) continue;
+        const token = nextToken[0].toUpperCase();
+        if (token === 'FROM') {
+          diagnostics.push({
+            from: selectBodyStart + i,
+            to: selectBodyStart + i + 1,
+            message: 'Trailing comma in SELECT list',
+          });
+        }
+      }
+    }
+  }
+
+  return diagnostics;
 }
 
 function resolveTableReferences(sqlText: string, db: DbSchema, diagnostics: SqlSemanticDiagnostic[]): TableRef[] {
