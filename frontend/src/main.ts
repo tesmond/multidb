@@ -1,5 +1,6 @@
 import './style.css'
 import App from './App.svelte'
+import { mount } from 'svelte'
 
 document.addEventListener('contextmenu', e => {
   if (!import.meta.env.DEV) {
@@ -16,8 +17,14 @@ document.addEventListener('contextmenu', e => {
   }
 })
 
-const app = new App({
-  target: document.getElementById('app')
+const target = document.getElementById('app')
+
+if (!target) {
+  throw new Error('App root element #app was not found')
+}
+
+const app = mount(App, {
+  target
 })
 
 export default app

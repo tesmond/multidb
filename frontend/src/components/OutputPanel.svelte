@@ -390,7 +390,7 @@
       </div>
 
     {:else if $outputTab === 'history'}
-      <div class="history-list" on:contextmenu|preventDefault on:mousedown={e => e.button === 2 && openContextMenu(e, 'history')} role="list">
+      <div class="history-list" on:contextmenu|preventDefault={(e) => openContextMenu(e, 'history')} role="list">
         {#each connectionHistory as rec (rec.id)}
           <div class="history-item">
             <div class="history-query" on:click={() => useHistoryQuery(rec.query, rec.connId)} role="button" tabindex="0" on:keydown={e => e.key === 'Enter' && useHistoryQuery(rec.query, rec.connId)}>
@@ -412,7 +412,7 @@
     {:else if $outputTab === 'saved'}
       <div class="saved-list" role="list">
         {#each connectionSavedQueries as saved (saved.id)}
-          <div class="saved-item" on:contextmenu|preventDefault={(e) => openContextMenu(e, 'saved', saved.id, saved.title)}>
+          <div class="saved-item" role="listitem" on:contextmenu|preventDefault={(e) => openContextMenu(e, 'saved', saved.id, saved.title)}>
             <div
               class="saved-title"
               on:click={() => useSavedQuery(saved.query, saved.connId)}
@@ -442,7 +442,7 @@
   <!-- svelte-ignore a11y-click-events-have-key-events -->
   <div class="ctx-backdrop" on:click={closeContextMenu} role="presentation"></div>
   <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <div class="ctx-menu" style="left:{contextMenu.x}px; top:{contextMenu.y}px" on:click={(e) => e.stopPropagation()}>
+  <div class="ctx-menu" role="menu" tabindex="-1" style="left:{contextMenu.x}px; top:{contextMenu.y}px" on:click={(e) => e.stopPropagation()}>
     {#if contextMenu.type === 'history'}
       <button on:click={(e) => clearConnectionHistory(e)}>Clear connection history</button>
       <button on:click={(e) => clearAllHistory(e)}>Clear all history</button>

@@ -274,13 +274,12 @@
         </div>
 
         <!-- Drag handle for nav -->
-        <div
+        <button
             class="drag-handle-v"
             on:mousedown={startNavDrag}
-            role="separator"
-            aria-orientation="vertical"
+            type="button"
             aria-label="Resize navigator"
-        ></div>
+        ></button>
 
         <!-- Main content area -->
         <div class="main-area" id="main-area">
@@ -382,13 +381,12 @@
                 </div>
 
                 <!-- Horizontal drag handle -->
-                <div
+                <button
                     class="drag-handle-h"
                     on:mousedown={startPaneDrag}
-                    role="separator"
-                    aria-orientation="horizontal"
+                    type="button"
                     aria-label="Resize output panel"
-                ></div>
+                ></button>
 
                 <div
                     class="output-pane"
@@ -499,6 +497,10 @@
         flex-shrink: 0;
         background: var(--border);
         transition: background 0.15s;
+        border: none;
+        padding: 0;
+        appearance: none;
+        display: block;
     }
     .drag-handle-v:hover {
         background: var(--accent);
@@ -509,6 +511,10 @@
         flex-shrink: 0;
         background: var(--border);
         transition: background 0.15s;
+        border: none;
+        padding: 0;
+        appearance: none;
+        display: block;
     }
     .drag-handle-h:hover {
         background: var(--accent);

@@ -48,7 +48,7 @@
 </script>
 
 {#if $showImportDialog}
-<div class="modal-overlay" on:click|self={close} on:keydown={e => e.key === 'Escape' && close()} role="dialog" aria-modal="true" aria-label="Import Table">
+<div class="modal-overlay" on:click|self={close} on:keydown={e => e.key === 'Escape' && close()} role="dialog" tabindex="-1" aria-modal="true" aria-label="Import Table">
   <div class="modal">
     <div class="modal-header">
       <h2>Import Table</h2>
