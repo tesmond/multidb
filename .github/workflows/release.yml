@@ -41,10 +41,11 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install frontend dependencies (lockfile)
+      - name: Install frontend dependencies (prefer npm ci)
         if: ${{ hashFiles('frontend/package-lock.json') != '' }}
         working-directory: frontend
-        run: npm ci
+        run: |
+          npm ci || npm install
 
       - name: Install frontend dependencies (no lockfile)
         if: ${{ hashFiles('frontend/package-lock.json') == '' }}
