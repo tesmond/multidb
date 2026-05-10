@@ -18,10 +18,15 @@
   import { bracketMatching, indentOnInput, syntaxTree } from '@codemirror/language';
   import { highlightSelectionMatches, searchKeymap } from '@codemirror/search';
   import { linter, lintGutter, type Diagnostic } from '@codemirror/lint';
+  import ConnectionSelect from './ConnectionSelect.svelte';
 
   export let tabId: string;
 
   $: tab = $tabs.find(t => t.id === tabId);
+  $: connectionOptions = [
+    { value: '', label: '— select connection —' },
+    ...$activeConnections.map((conn) => ({ value: conn.config.id, label: conn.config.name })),
+  ];
 
   // Cleanup function for the active streaming query's event listeners.
   // Replaced on each new query; called on cancel, destroy, and query start.
@@ -428,16 +433,11 @@
 {#if tab}
 <div class="editor-wrap">
   <div class="editor-toolbar">
-    <select
-      class="conn-select"
+    <ConnectionSelect
       bind:value={tab.connId}
-      on:change={() => tabs.updateTab(tabId, { connId: tab?.connId ?? '' })}
-    >
-      <option value="">— select connection —</option>
-      {#each $activeConnections as conn}
-        <option value={conn.config.id}>{conn.config.name}</option>
-      {/each}
-    </select>
+      options={connectionOptions}
+      onchange={(connId) => tabs.updateTab(tabId, { connId })}
+    />
 
     {#if tab.running}
       <button class="btn-stop" on:click={cancelQuery} title="Cancel query (Ctrl+.)">⏹ Stop</button>
@@ -472,12 +472,6 @@
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
-  .conn-select {
-    background: var(--bg-input); border: 1px solid var(--border);
-    color: var(--text); padding: 5px 8px; border-radius: 4px;
-    font-size: 12px; min-width: 160px;
-  }
-  .conn-select:focus { outline: none; border-color: var(--accent); }
 
   .btn-run, .btn-stop {
     padding: 5px 14px; border-radius: 4px; font-size: 12px;
