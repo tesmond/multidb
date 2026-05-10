@@ -1045,7 +1045,7 @@
 
   .grid-wrap {
     display: flex; flex-direction: column;
-    height: 100%; overflow: hidden;
+    height: 100%; min-height: 0; overflow: hidden;
     outline: none; /* suppress browser focus ring on the container */
   }
 
@@ -1111,6 +1111,7 @@
 
   .grid-body {
     flex: 1;
+    min-height: 0;
     overflow: auto;
     scrollbar-width: thin;
     scrollbar-color: rgba(236, 240, 248, 0.52) rgba(255, 255, 255, 0.1);

@@ -468,7 +468,11 @@
   }
   .output-tab:hover { color: var(--text); }
   .output-tab.active { color: var(--text); border-bottom-color: var(--accent); }
-  .output-content { flex: 1; overflow: hidden; }
+  .output-content {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
 
   .save-edits-btn {
     margin-left: auto;
