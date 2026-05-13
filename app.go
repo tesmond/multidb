@@ -154,6 +154,62 @@ func (a *App) ListSavedConnections() ([]connections.ConnectionConfig, error) {
 	return a.store.ListSavedConnections(a.ctx)
 }
 
+func isConnectionNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection") && strings.Contains(msg, "not found")
+}
+
+func (a *App) reconnectConnection(connID string) error {
+	if a.store == nil {
+		return fmt.Errorf("store not initialised")
+	}
+
+	cfgs, err := a.store.ListSavedConnections(a.ctx)
+	if err != nil {
+		return fmt.Errorf("load saved connections: %w", err)
+	}
+
+	var cfg *connections.ConnectionConfig
+	for i := range cfgs {
+		if cfgs[i].ID == connID {
+			cfg = &cfgs[i]
+			break
+		}
+	}
+	if cfg == nil {
+		return fmt.Errorf("connection %q not found", connID)
+	}
+
+	_ = a.connMgr.Disconnect(connID)
+	if err := a.connMgr.Connect(*cfg); err != nil {
+		return fmt.Errorf("reconnect: %w", err)
+	}
+	return nil
+}
+
+func (a *App) getDB(connID string) (*sql.DB, error) {
+	db, err := a.connMgr.Get(connID)
+	if err == nil {
+		return db, nil
+	}
+	if !isConnectionNotFoundError(err) {
+		return nil, err
+	}
+
+	if recErr := a.reconnectConnection(connID); recErr != nil {
+		return nil, fmt.Errorf("%v; reconnect failed: %w", err, recErr)
+	}
+
+	db, err = a.connMgr.Get(connID)
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
 // -----------------------------------------------------------------------
 // Query API
 // -----------------------------------------------------------------------
@@ -171,7 +227,7 @@ type ExecuteResult struct {
 // ExecuteQuery runs a SQL query on the given connection ID.
 // queryID allows cancellation via CancelQuery.
 func (a *App) ExecuteQuery(connID, queryID, query string, maxRows int) ExecuteResult {
-	db, err := a.connMgr.Get(connID)
+	db, err := a.getDB(connID)
 	if err != nil {
 		return ExecuteResult{Error: err.Error()}
 	}
@@ -246,7 +302,7 @@ type queryStreamDone struct {
 //	"query:chunk" – once per batch of rows (first batch ≈500 rows, then ≈50 000)
 //	"query:done"  – once, with the final row count, duration and any error
 func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
-	db, err := a.connMgr.Get(connID)
+	db, err := a.getDB(connID)
 	if err != nil {
 		runtime.EventsEmit(a.ctx, "query:done", queryStreamDone{QueryID: queryID, Error: err.Error()})
 		return
@@ -437,7 +493,7 @@ func (a *App) ExecuteQueryStreamed(connID, queryID, query string, maxRows int) {
 
 // GetTablePrimaryKeys returns the primary key column names for a table.
 func (a *App) GetTablePrimaryKeys(connID, driver, schemaName, tableName string) ([]string, error) {
-	db, err := a.connMgr.Get(connID)
+	db, err := a.getDB(connID)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +502,7 @@ func (a *App) GetTablePrimaryKeys(connID, driver, schemaName, tableName string) 
 
 // GetSchema returns the schema tree for a connection.
 func (a *App) GetSchema(connID string) (schema.SchemaTree, error) {
-	db, err := a.connMgr.Get(connID)
+	db, err := a.getDB(connID)
 	if err != nil {
 		return schema.SchemaTree{}, err
 	}
@@ -486,7 +542,7 @@ func (a *App) SaveSchema(connID string, schemaJson string, hash string) error {
 // -----------------------------------------------------------------------
 
 func (a *App) BackupTable(connID, tableName, schemaName string) error {
-	db, err := a.connMgr.Get(connID)
+	db, err := a.getDB(connID)
 	if err != nil {
 		return err
 	}
@@ -558,7 +614,7 @@ func (a *App) DropTable(connID, tableName, schemaName string) error {
 		return fmt.Errorf("table name is required")
 	}
 
-	db, err := a.connMgr.Get(connID)
+	db, err := a.getDB(connID)
 	if err != nil {
 		return err
 	}
@@ -605,7 +661,7 @@ func (a *App) SelectImportFile(importType string) (string, error) {
 }
 
 func (a *App) ImportTable(connID, importType, sourcePath string) error {
-	db, err := a.connMgr.Get(connID)
+	db, err := a.getDB(connID)
 	if err != nil {
 		return err
 	}

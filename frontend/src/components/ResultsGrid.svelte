@@ -16,6 +16,8 @@
   const FONT_NULL = 'italic 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
   // Average character width at 12px sans-serif — used for content-width estimation
   const AVG_CHAR_W = 5.6;
+  const EDGE_ZONE = 50;       // px from scroll edge to start auto-scrolling
+  const MAX_EDGE_SPEED = 15;  // max px per frame during edge auto-scroll
 
   // --- DOM refs ---
   let canvas: HTMLCanvasElement;
@@ -35,6 +37,8 @@
     bgRowAlt: 'rgba(255,255,255,0.02)',
     bgHover: 'rgba(255,255,255,0.04)',
     bgSel: 'rgba(70,130,255,0.28)',
+    bgRowSel: 'rgba(70,130,255,0.13)',
+    bgRowNumSel: 'rgba(70,130,255,0.45)',
     bgDirty: 'rgba(255,200,50,0.15)',
     border: '#2e2e40',
     borderSubtle: '#1e1e2d',
@@ -140,9 +144,21 @@
   let isSelecting = false;
   let selAnchor: { row: number; col: number } | null = null;
   let lastSelectedCell: { row: number; col: number } | null = null;
+  let selectedRows = new Set<number>();
+  let rowSelectionAnchor: number | null = null;
+
+  // ─── Edge-scroll (drag auto-scroll) ──────────────────────────────────────────
+  let edgeScrollRaf = 0;
+  let lastDragMouseEvent: MouseEvent | null = null;
 
   // ─── Reset when result is cleared ────────────────────────────────────────────
-  $: if (!result) { scrollTop = 0; scrollLeft = 0; sel = null; }
+  $: if (!result) {
+    scrollTop = 0;
+    scrollLeft = 0;
+    sel = null;
+    selectedRows = new Set();
+    rowSelectionAnchor = null;
+  }
 
   $: rows = result?.rows ?? [];
   $: totalRows = (result as any)?._rowCount ?? rows.length;
@@ -226,7 +242,7 @@
   // updates immediately without waiting for the next scroll/hover change.
   $: if (canvas && result) {
     void (startRow, visibleCount, yOffset, scrollLeft, containerWidth, containerHeight,
-          colWidths, sortIndex, hoveredRow, totalRows, rowNumWidth, sel, pendingEdits, editOverlay);
+          colWidths, sortIndex, hoveredRow, totalRows, rowNumWidth, sel, selectedRows, pendingEdits, editOverlay);
     scheduleRender();
   }
 
@@ -239,6 +255,8 @@
       bgRowAlt:    g('--bg-row-alt')  || 'rgba(255,255,255,0.02)',
       bgHover:     g('--bg-hover')    || 'rgba(255,255,255,0.04)',
       bgSel:       'rgba(70,130,255,0.28)',
+      bgRowSel:    'rgba(70,130,255,0.13)',
+      bgRowNumSel: 'rgba(70,130,255,0.45)',
       bgDirty:     'rgba(255,200,50,0.15)',
       border:      g('--border')      || '#2e2e40',
       borderSubtle:g('--border-subtle')|| '#1e1e2d',
@@ -280,6 +298,7 @@
     const _vc     = visibleCount;
     const _hr     = hoveredRow;
     const _sel    = sel;
+    const _selectedRows = selectedRows;
     const _pe     = pendingEdits;
     const _eo     = editOverlay;
     const numCols = _cw.length;
@@ -334,7 +353,8 @@
       const y = _yo + i * ROW_HEIGHT;
       if (y + ROW_HEIGHT < 0 || y > h) continue;
 
-      const inRowSel = _sel !== null && absRow >= selR0 && absRow <= selR1;
+      const inCellSel   = _sel !== null && absRow >= selR0 && absRow <= selR1;
+      const inRowSelSet = _selectedRows.has(absRow);
 
       // Row background (painted before per-cell selection overlay)
       if (absRow === _hr) {
@@ -343,6 +363,11 @@
       } else if (absRow % 2 === 1) {
         ctx.fillStyle = colors.bgRowAlt;
         ctx.fillRect(_rnw, y, w - _rnw, ROW_HEIGHT);
+      }
+
+      if (inRowSelSet) {
+        ctx.fillStyle = colors.bgRowSel;
+        ctx.fillRect(_rnw, y, w - _rnw, ROW_HEIGHT - 1);
       }
 
       // Row bottom border
@@ -360,16 +385,16 @@
         ctx.fillRect(x + cw - 1, y, 1, ROW_HEIGHT);
 
         // Selection / hover highlight per cell
-        if (inRowSel && c >= selC0 && c <= selC1) {
+        if (inCellSel && c >= selC0 && c <= selC1) {
           // Cell is inside the selection rectangle
           ctx.fillStyle = colors.bgSel;
           ctx.fillRect(x, y, cw - 1, ROW_HEIGHT - 1);
-        } else if (inRowSel) {
+        } else if (inCellSel) {
           // Row is selected but this column is outside the selection —
           // repaint with the normal row background to "un-highlight" it
           ctx.fillStyle =
-            absRow === _hr  ? colors.bgHover   :
-            absRow % 2 === 1 ? colors.bgRowAlt : colors.bg;
+            absRow === _hr   ? colors.bgHover   :
+            absRow % 2 === 1 ? colors.bgRowAlt  : colors.bg;
           ctx.fillRect(x, y, cw - 1, ROW_HEIGHT - 1);
         }
 
@@ -427,7 +452,7 @@
       }
 
       // Row-number column (painted on top so it's sticky / always visible)
-      ctx.fillStyle = colors.bgPanel;
+      ctx.fillStyle = inRowSelSet ? colors.bgRowNumSel : colors.bgPanel;
       ctx.fillRect(0, y, _rnw, ROW_HEIGHT);
       ctx.fillStyle = colors.border;
       ctx.fillRect(_rnw - 1, y, 1, ROW_HEIGHT);
@@ -589,13 +614,149 @@
     return null;
   }
 
+  // ─── Row-number hit testing ────────────────────────────────────────────────────
+  function getRowFromMouse(e: MouseEvent): number {
+    if (!canvas) return -1;
+    const rect = canvas.getBoundingClientRect();
+    const mx   = e.clientX - rect.left;
+    const my   = e.clientY - rect.top;
+    if (mx >= rowNumWidth) return -1;
+    const rowInView = Math.floor((my - yOffset) / ROW_HEIGHT);
+    const absRow    = startRow + rowInView;
+    return absRow >= 0 && absRow < totalRows ? absRow : -1;
+  }
+
+  function handleRowNumberClick(row: number, e: MouseEvent) {
+    if (!result?.columns?.length) return;
+
+    const isToggle = e.ctrlKey || e.metaKey;
+    const isRange = e.shiftKey;
+    const nextRows = new Set(selectedRows);
+
+    if (isRange) {
+      const anchor = rowSelectionAnchor ?? lastSelectedCell?.row ?? row;
+      const lo = Math.min(anchor, row);
+      const hi = Math.max(anchor, row);
+      if (!isToggle) nextRows.clear();
+      for (let r = lo; r <= hi; r++) nextRows.add(r);
+      rowSelectionAnchor = anchor;
+    } else if (isToggle) {
+      if (nextRows.has(row)) nextRows.delete(row);
+      else nextRows.add(row);
+      rowSelectionAnchor = row;
+    } else {
+      nextRows.clear();
+      nextRows.add(row);
+      rowSelectionAnchor = row;
+    }
+
+    selectedRows = nextRows;
+    sel = null;
+    const lastCol = result.columns.length - 1;
+    lastSelectedCell = { row, col: lastCol };
+    scheduleRender();
+  }
+
+  // ─── Edge-scroll helpers ──────────────────────────────────────────────────────
+  function getEdgeScrollSpeed(pos: number, size: number): number {
+    if (pos < EDGE_ZONE) return -(1 - pos / EDGE_ZONE) * MAX_EDGE_SPEED;
+    if (pos > size - EDGE_ZONE) return (1 - (size - pos) / EDGE_ZONE) * MAX_EDGE_SPEED;
+    return 0;
+  }
+
+  function edgeScrollLoop() {
+    if (!isSelecting || !scrollContainer || !lastDragMouseEvent || !canvas || !selAnchor) {
+      edgeScrollRaf = 0;
+      return;
+    }
+    const contRect   = scrollContainer.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    const mx = lastDragMouseEvent.clientX - contRect.left;
+    const my = lastDragMouseEvent.clientY - contRect.top;
+    const vx = getEdgeScrollSpeed(mx, contRect.width);
+    const vy = getEdgeScrollSpeed(my, contRect.height);
+
+    if (vx !== 0 || vy !== 0) {
+      const newSL = clamp(scrollContainer.scrollLeft + vx, 0, Math.max(0, totalContentWidth - containerWidth));
+      const newST = clamp(scrollContainer.scrollTop  + vy, 0, Math.max(0, virtualHeight   - containerHeight));
+      scrollContainer.scrollLeft = newSL;
+      scrollContainer.scrollTop  = newST;
+      scrollLeft = newSL;
+      scrollTop  = newST;
+
+      // Recompute virtual row position at new scrollTop (mirrors the reactive block)
+      let curSR: number, curYO: number;
+      if (useScaledScroll) {
+        const maxSc = Math.max(0, virtualHeight - containerHeight);
+        if (maxSc > 0) {
+          const ratio    = newST / maxSc;
+          const maxStart = Math.max(0, totalRows - containerHeight / ROW_HEIGHT);
+          const exactRow = ratio * maxStart;
+          curSR = Math.floor(exactRow);
+          curYO = -((exactRow - curSR) * ROW_HEIGHT);
+        } else { curSR = 0; curYO = 0; }
+      } else {
+        curSR = Math.floor(newST / ROW_HEIGHT);
+        curYO = -(newST % ROW_HEIGHT);
+      }
+
+      const canvasX = lastDragMouseEvent.clientX - canvasRect.left;
+      const canvasY = lastDragMouseEvent.clientY - canvasRect.top;
+      if (canvasX >= rowNumWidth) {
+        const rowInView = Math.floor((canvasY - curYO) / ROW_HEIGHT);
+        const absRow    = curSR + rowInView;
+        if (absRow >= 0 && absRow < totalRows) {
+          const xInContent = canvasX - rowNumWidth + newSL;
+          if (xInContent >= 0) {
+            let cumW = 0;
+            for (let c = 0; c < colWidths.length; c++) {
+              cumW += colWidths[c];
+              if (xInContent < cumW) {
+                if (!sel || absRow !== sel.r1 || c !== sel.c1) {
+                  sel = { r0: selAnchor.row, c0: selAnchor.col, r1: absRow, c1: c };
+                }
+                break;
+              }
+            }
+          }
+        }
+      }
+      scheduleRender();
+    }
+    edgeScrollRaf = requestAnimationFrame(edgeScrollLoop);
+  }
+
+  function onWindowSelectionMouseMove(e: MouseEvent) {
+    if (!isSelecting) return;
+    lastDragMouseEvent = e;
+    if (selAnchor) {
+      const hit = getCellFromMouse(e);
+      if (hit && sel && (hit.row !== sel.r1 || hit.col !== sel.c1)) {
+        sel = { r0: selAnchor.row, c0: selAnchor.col, r1: hit.row, c1: hit.col };
+        scheduleRender();
+      }
+    }
+    if (!edgeScrollRaf) {
+      edgeScrollRaf = requestAnimationFrame(edgeScrollLoop);
+    }
+  }
+
   // ─── Canvas mouse: selection ──────────────────────────────────────────────────
   function onCanvasMouseDown(e: MouseEvent) {
     if (e.button !== 0) return;
     gridWrap?.focus();
+
+    const rowHit = getRowFromMouse(e);
+    if (rowHit >= 0) {
+      handleRowNumberClick(rowHit, e);
+      return;
+    }
+
     const hit = getCellFromMouse(e);
     if (!hit) {
       sel = null;
+      selectedRows = new Set();
+      rowSelectionAnchor = null;
       lastSelectedCell = null;
       scheduleRender();
       return;
@@ -605,37 +766,30 @@
     isSelecting = true;
     selAnchor   = anchor;
     sel         = { r0: anchor.row, c0: anchor.col, r1: hit.row, c1: hit.col };
+    selectedRows = new Set();
+    rowSelectionAnchor = null;
     lastSelectedCell = hit;
     scheduleRender();
 
-    // mouseup may occur outside the canvas during a fast drag
-    window.addEventListener('mouseup', onWindowSelectionMouseUp);
+    window.addEventListener('mouseup',   onWindowSelectionMouseUp);
+    window.addEventListener('mousemove', onWindowSelectionMouseMove);
   }
 
   function onCanvasMouseMove(e: MouseEvent) {
-    // Hover tracking
-    if (canvas) {
-      const rect      = canvas.getBoundingClientRect();
-      const my        = e.clientY - rect.top;
-      const rowInView = Math.floor((my - yOffset) / ROW_HEIGHT);
-      const absRow    = startRow + rowInView;
-      const next      = absRow >= 0 && absRow < totalRows ? absRow : -1;
-      if (next !== hoveredRow) hoveredRow = next;
-    }
-
-    // Extend selection while the primary button is held
-    if (isSelecting && selAnchor) {
-      const hit = getCellFromMouse(e);
-      if (hit && sel && (hit.row !== sel.r1 || hit.col !== sel.c1)) {
-        sel = { r0: selAnchor.row, c0: selAnchor.col, r1: hit.row, c1: hit.col };
-        scheduleRender();
-      }
-    }
+    if (!canvas) return;
+    const rect      = canvas.getBoundingClientRect();
+    const mx        = e.clientX - rect.left;
+    const my        = e.clientY - rect.top;
+    const rowInView = Math.floor((my - yOffset) / ROW_HEIGHT);
+    const absRow    = startRow + rowInView;
+    const next      = absRow >= 0 && absRow < totalRows ? absRow : -1;
+    if (next !== hoveredRow) hoveredRow = next;
+    canvas.style.cursor = mx < rowNumWidth ? 'pointer' : 'cell';
   }
 
   function onCanvasMouseLeave() {
     if (hoveredRow !== -1) hoveredRow = -1;
-    // Do not cancel selection — the user may still be dragging
+    if (canvas) canvas.style.cursor = '';
   }
 
   function onWindowSelectionMouseUp() {
@@ -644,7 +798,13 @@
     }
     isSelecting = false;
     selAnchor   = null;
-    window.removeEventListener('mouseup', onWindowSelectionMouseUp);
+    lastDragMouseEvent = null;
+    if (edgeScrollRaf) {
+      cancelAnimationFrame(edgeScrollRaf);
+      edgeScrollRaf = 0;
+    }
+    window.removeEventListener('mouseup',   onWindowSelectionMouseUp);
+    window.removeEventListener('mousemove', onWindowSelectionMouseMove);
   }
 
   // Double-click: open edit overlay if editable, otherwise copy single cell value
@@ -789,22 +949,48 @@
     if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
       // Only activate select-all when the grid already has a selection, so we
       // don't steal Ctrl/Cmd+A from other contexts (SQL editor, etc.).
-      if (sel !== null && rows.length > 0 && result?.columns?.length) {
+      if ((sel !== null || selectedRows.size > 0) && rows.length > 0 && result?.columns?.length) {
         e.preventDefault();
         sel = { r0: 0, c0: 0, r1: totalRows - 1, c1: result.columns.length - 1 };
+        selectedRows = new Set();
+        rowSelectionAnchor = 0;
         lastSelectedCell = { row: totalRows - 1, col: result.columns.length - 1 };
         scheduleRender();
       }
     }
     if (e.key === 'Escape') {
       sel = null;
+      selectedRows = new Set();
+      rowSelectionAnchor = null;
       lastSelectedCell = null;
       scheduleRender();
     }
   }
 
   function copySelection() {
-    if (!sel || !result) return;
+    if (!result) return;
+
+    if (selectedRows.size > 0) {
+      const lines: string[] = [];
+      const sortedRows = Array.from(selectedRows).sort((a, b) => a - b);
+      for (const r of sortedRows) {
+        const rowDataIdx = sortIndex && r < sortIndex.length ? sortIndex[r] : r;
+        const row = rows[rowDataIdx];
+        if (!row) continue;
+        const cells: string[] = [];
+        for (let c = 0; c < result.columns.length; c++) {
+          const v = c < row.length ? row[c] : null;
+          cells.push(v === null ? '' : String(v));
+        }
+        lines.push(cells.join('\t'));
+      }
+      if (lines.length > 0) {
+        navigator.clipboard.writeText(lines.join('\n')).catch(() => {});
+      }
+      return;
+    }
+
+    if (!sel) return;
 
     const r0 = Math.min(sel.r0, sel.r1);
     const r1 = Math.max(sel.r0, sel.r1);
@@ -894,6 +1080,8 @@
       scrollLeft = 0;
     }
     sel = null;
+    selectedRows = new Set();
+    rowSelectionAnchor = null;
     lastSelectedCell = null;
     editOverlay = null;
     if (tabId) tabs.updateTab(tabId, { sortCol: -1, sortDirection: 'asc', pendingEdits: {} });
@@ -901,9 +1089,11 @@
 
   // ─── Click-outside: clear selection ──────────────────────────────────────────
   function onDocumentMouseDown(e: MouseEvent) {
-    if (sel === null) return;
+    if (sel === null && selectedRows.size === 0) return;
     if (gridWrap && !gridWrap.contains(e.target as Node)) {
       sel = null;
+      selectedRows = new Set();
+      rowSelectionAnchor = null;
       lastSelectedCell = null;
       scheduleRender();
     }
@@ -918,7 +1108,9 @@
 
   onDestroy(() => {
     if (rafId) cancelAnimationFrame(rafId);
+    if (edgeScrollRaf) cancelAnimationFrame(edgeScrollRaf);
     window.removeEventListener('mouseup',   onWindowSelectionMouseUp);
+    window.removeEventListener('mousemove', onWindowSelectionMouseMove);
     window.removeEventListener('mousemove', onResize);
     window.removeEventListener('mouseup',   stopResize);
     document.removeEventListener('mousedown', onDocumentMouseDown);
