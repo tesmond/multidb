@@ -1306,7 +1306,7 @@
     min-height: 0;
     overflow: auto;
     scrollbar-width: thin;
-    scrollbar-color: rgba(236, 240, 248, 0.52) rgba(255, 255, 255, 0.1);
+    scrollbar-color: rgba(236, 240, 248, 0.35) rgba(255, 255, 255, 0.2);
   }
   /* Keep result-grid scrollbars readable on newer macOS overlay styles. */
   .grid-body::-webkit-scrollbar {
@@ -1314,11 +1314,11 @@
     height: 12px;
   }
   .grid-body::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.2);
   }
   .grid-body::-webkit-scrollbar-thumb {
-    background: rgba(236, 240, 248, 0.52);
-    border: 3px solid rgba(255, 255, 255, 0.1);
+    background: rgba(236, 240, 248, 0.35);
+    border: 3px solid rgba(255, 255, 255, 0.2);
     border-radius: 999px;
   }
   .grid-body::-webkit-scrollbar-thumb:hover {
