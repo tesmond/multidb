@@ -1,6 +1,6 @@
 # multidb
 
-![image](build/icon.png)
+![image](mascot.png)
 
 
 `multidb` is a desktop SQL client. It is designed for working across multiple database engines with one UI for querying,
@@ -9,6 +9,11 @@ schema browsing, table backup/import workflows, and query history.
 I used pgadmin and MySQL Workbench for years, they both randomly crashed, or if I had to reset my VPN all the DB connections were broken and I would need to restart the app. Each load time took tens of seconds, when all I needed was to run a quick SQL query to validate data or debug an issue. Not only were they slow to load and took up lots of memory they also started moving away from my use case of running SQL queries and exporting data for quick reports or debugging. Even exploring the space I struggled to find any useful alternative. DBeaver is probably the best, but it still is sluggish to load and with all its functionality the query window is a little less intuitive to access.
 
 So I thought I would finally roll my own. This is a simple SQL explorer, massively paired down compared to pgamin, DBeaver or MySQL Workbench, but it loads fast, uses little memory and can handle displaying large tables quickly.
+
+## Screenshot
+
+![image](screenshot.png)
+
 
 ## Features
 
