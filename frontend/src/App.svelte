@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from "svelte";
+    import { onMount, tick } from "svelte";
     import TopToolbar from "./components/TopToolbar.svelte";
     import Navigator from "./components/Navigator.svelte";
     import SqlEditor from "./components/SqlEditor.svelte";
@@ -36,6 +36,11 @@
     let tabBarEl: HTMLDivElement;
     // X coordinate for indicator inside tab-bar (px)
     let indicatorX = 0;
+
+    // Tab overflow scroll controls
+    let tabsOverflowing = false;
+    let canScrollTabsLeft = false;
+    let canScrollTabsRight = false;
 
     // Tab context menu handlers
     function openTabContextMenu(e: MouseEvent, tabId: string) {
@@ -157,6 +162,26 @@
         indicatorX = 0;
     }
 
+    function updateTabOverflowState() {
+        if (!tabBarEl) return;
+        const maxScrollLeft = Math.max(0, tabBarEl.scrollWidth - tabBarEl.clientWidth);
+        tabsOverflowing = maxScrollLeft > 1;
+        canScrollTabsLeft = tabBarEl.scrollLeft > 1;
+        canScrollTabsRight = tabBarEl.scrollLeft < maxScrollLeft - 1;
+    }
+
+    function onTabBarScroll() {
+        updateTabOverflowState();
+    }
+
+    function scrollTabs(direction: -1 | 1) {
+        if (!tabBarEl) return;
+        const step = Math.max(180, Math.floor(tabBarEl.clientWidth * 0.65));
+        tabBarEl.scrollBy({ left: direction * step, behavior: "smooth" });
+        // Keep button state responsive even while smooth scrolling is ongoing.
+        requestAnimationFrame(updateTabOverflowState);
+    }
+
     function saveTabTitle() {
         if (editingTabId && editingTitle.trim()) {
             tabs.renameTab(editingTabId, editingTitle.trim());
@@ -252,7 +277,24 @@
             const hist = await GetQueryHistory(200);
             if (hist) queryHistoryStore.set(hist);
         } catch (_) {}
+
+        const onResize = () => updateTabOverflowState();
+        window.addEventListener("resize", onResize);
+
+        await tick();
+        updateTabOverflowState();
+
+        return () => {
+            window.removeEventListener("resize", onResize);
+        };
     });
+
+    $: {
+        // Recalculate whenever tab list or title-edit mode changes widths.
+        $tabs;
+        editingTabId;
+        tick().then(updateTabOverflowState);
+    }
 </script>
 
 <svelte:window
@@ -284,84 +326,111 @@
         <!-- Main content area -->
         <div class="main-area" id="main-area">
             <!-- Tab bar -->
-            <div
-                class="tab-bar"
-                role="tablist"
-                tabindex="0"
-                bind:this={tabBarEl}
-                on:dragover={onTabBarDragOver}
-                on:drop={onTabBarDrop}
-            >
-                <!-- insertion indicator -->
+            <div class="tab-bar">
                 <div
-                    class="insertion-indicator"
-                    style="left:{indicatorX}px; display:{dropTargetIndex !==
-                    null
-                        ? 'block'
-                        : 'none'}"
-                    aria-hidden="true"
-                ></div>
-
-                {#each $tabs as tab, i (tab.id)}
-                    <button
-                        class="tab"
-                        class:active={$activeTabId === tab.id}
-                        class:dragging={draggedTabIndex === i}
-                        class:has-custom-color={hasCustomTabColor(tab.connId)}
-                        data-tab-id={tab.id}
-                        style={getTabCustomStyle(tab.connId)}
-                        on:click={() => {
-                            if (editingTabId !== tab.id)
-                                activeTabId.set(tab.id);
-                        }}
-                        on:contextmenu={(e) => openTabContextMenu(e, tab.id)}
-                        draggable="true"
-                        on:dragstart={(e) => onTabDragStart(e, i)}
-                        on:dragend={onTabDragEnd}
-                        role="tab"
-                        aria-selected={$activeTabId === tab.id}
-                    >
-                        {#if editingTabId === tab.id}
-                            <input
-                                class="tab-title-input"
-                                bind:value={editingTitle}
-                                on:keydown={(e) => {
-                                    if (e.key === "Enter") {
-                                        saveTabTitle();
-                                    } else if (e.key === "Escape") {
-                                        cancelTabEdit();
-                                    }
-                                }}
-                                on:blur={saveTabTitle}
-                                on:click|stopPropagation
-                            />
-                        {:else}
-                            <span class="tab-title">{tab.title}</span>
-                        {/if}
-                        {#if tab.running}
-                            <span class="tab-spinner">⟳</span>
-                        {/if}
-                        <span
-                            class="tab-close"
-                            on:click|stopPropagation={() => tabs.remove(tab.id)}
-                            role="button"
-                            tabindex="0"
-                            on:keydown={(e) =>
-                                e.key === "Enter" && tabs.remove(tab.id)}
-                            aria-label="Close tab">✕</span
-                        >
-                    </button>
-                {/each}
-                <button
-                    class="tab-add"
-                    on:click={() => {
-                        tabs.add(get(selectedConnId));
-                        const t = get(tabs);
-                        activeTabId.set(t[t.length - 1].id);
-                    }}
-                    title="New query tab"
-                    aria-label="Add tab">+</button
+                    class="tab-scroll"
+                    role="tablist"
+                    tabindex="0"
+                    bind:this={tabBarEl}
+                    on:scroll={onTabBarScroll}
+                    on:dragover={onTabBarDragOver}
+                    on:drop={onTabBarDrop}
                 >
+                    <!-- insertion indicator -->
+                    <div
+                        class="insertion-indicator"
+                        style="left:{indicatorX}px; display:{dropTargetIndex !==
+                        null
+                            ? 'block'
+                            : 'none'}"
+                        aria-hidden="true"
+                    ></div>
+
+                    {#each $tabs as tab, i (tab.id)}
+                        <button
+                            class="tab"
+                            class:active={$activeTabId === tab.id}
+                            class:dragging={draggedTabIndex === i}
+                            class:has-custom-color={hasCustomTabColor(tab.connId)}
+                            data-tab-id={tab.id}
+                            style={getTabCustomStyle(tab.connId)}
+                            on:click={() => {
+                                if (editingTabId !== tab.id)
+                                    activeTabId.set(tab.id);
+                            }}
+                            on:contextmenu={(e) => openTabContextMenu(e, tab.id)}
+                            draggable="true"
+                            on:dragstart={(e) => onTabDragStart(e, i)}
+                            on:dragend={onTabDragEnd}
+                            role="tab"
+                            aria-selected={$activeTabId === tab.id}
+                        >
+                            {#if editingTabId === tab.id}
+                                <input
+                                    class="tab-title-input"
+                                    bind:value={editingTitle}
+                                    on:keydown={(e) => {
+                                        if (e.key === "Enter") {
+                                            saveTabTitle();
+                                        } else if (e.key === "Escape") {
+                                            cancelTabEdit();
+                                        }
+                                    }}
+                                    on:blur={saveTabTitle}
+                                    on:click|stopPropagation
+                                />
+                            {:else}
+                                <span class="tab-title">{tab.title}</span>
+                            {/if}
+                            {#if tab.running}
+                                <span class="tab-spinner">⟳</span>
+                            {/if}
+                            <span
+                                class="tab-close"
+                                on:click|stopPropagation={() => tabs.remove(tab.id)}
+                                role="button"
+                                tabindex="0"
+                                on:keydown={(e) =>
+                                    e.key === "Enter" && tabs.remove(tab.id)}
+                                aria-label="Close tab">✕</span
+                            >
+                        </button>
+                    {/each}
+                </div>
+
+                <div class="tab-controls">
+                    {#if tabsOverflowing}
+                        <button
+                            class="tab-scroll-btn"
+                            on:click={() => scrollTabs(-1)}
+                            disabled={!canScrollTabsLeft}
+                            aria-label="Scroll tabs left"
+                            title="Scroll tabs left"
+                        >
+                            ◀
+                        </button>
+                        <button
+                            class="tab-scroll-btn"
+                            on:click={() => scrollTabs(1)}
+                            disabled={!canScrollTabsRight}
+                            aria-label="Scroll tabs right"
+                            title="Scroll tabs right"
+                        >
+                            ▶
+                        </button>
+                    {/if}
+
+                    <button
+                        class="tab-add"
+                        on:click={() => {
+                            tabs.add(get(selectedConnId));
+                            const t = get(tabs);
+                            activeTabId.set(t[t.length - 1].id);
+                        }}
+                        title="New query tab"
+                        aria-label="Add tab">+</button
+                    >
+                </div>
             </div>
 
             <!-- Editor + Output split -->
@@ -525,12 +594,21 @@
         align-items: center;
         background: var(--bg-toolbar);
         border-bottom: 1px solid var(--border);
-        overflow-x: auto;
+        overflow: hidden;
         flex-shrink: 0;
+        min-width: 0;
+    }
+    .tab-scroll {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        overflow-x: auto;
+        overflow-y: hidden;
         scrollbar-width: none;
         position: relative; /* needed for insertion indicator positioning */
     }
-    .tab-bar::-webkit-scrollbar {
+    .tab-scroll::-webkit-scrollbar {
         display: none;
     }
 
@@ -643,6 +721,34 @@
     }
     .tab-add:hover {
         color: var(--text);
+    }
+    .tab-controls {
+        display: flex;
+        align-items: center;
+        flex-shrink: 0;
+        border-left: 1px solid var(--border-subtle);
+        background: var(--bg-toolbar);
+    }
+    .tab-scroll-btn {
+        width: 26px;
+        height: 26px;
+        margin-left: 4px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--bg-surface);
+        color: var(--text);
+        cursor: pointer;
+        line-height: 1;
+        font-size: 11px;
+        flex-shrink: 0;
+    }
+    .tab-scroll-btn:hover:not(:disabled) {
+        border-color: var(--accent);
+        color: var(--accent-hover);
+    }
+    .tab-scroll-btn:disabled {
+        opacity: 0.45;
+        cursor: default;
     }
 
     .editor-output-split {
