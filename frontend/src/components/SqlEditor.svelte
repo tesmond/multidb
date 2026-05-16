@@ -236,9 +236,11 @@
         statusMessage.set(`Error: ${pendingError}`);
         outputTab.set('messages');
       } else {
-        if (pendingRowsAffected > 0 && streamRows.length === 0) {
+        if (streamCols.length === 0) {
+          // Non-query statement (INSERT, UPDATE, DELETE, DDL) - show rows affected
           statusMessage.set(`${pendingRowsAffected} row(s) affected · ${pendingDuration}ms`);
         } else {
+          // Query statement (SELECT, etc.) - show rows returned
           statusMessage.set(`${streamRows.length} rows · ${pendingDuration}ms`);
         }
         // Automatically refresh the schema tree when a DDL statement
