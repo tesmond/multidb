@@ -8,6 +8,7 @@ vi.mock('../../wailsjs/go/models', () => ({
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
+import type { Tab } from './appStore';
 
 // Dynamically import to allow mocks to apply first
 let tabs: any;
@@ -30,7 +31,7 @@ beforeEach(async () => {
 
 describe('tabs store', () => {
   it('starts with one empty tab', () => {
-    const $tabs = get(tabs);
+    const $tabs = get(tabs) as Tab[];
     expect($tabs).toHaveLength(1);
     expect($tabs[0].sql).toBe('');
     expect($tabs[0].title).toBe('Query');
@@ -38,25 +39,26 @@ describe('tabs store', () => {
 
   it('add() creates a new tab', () => {
     tabs.add('conn-1');
-    expect(get(tabs)).toHaveLength(2);
-    expect(get(tabs)[1].connId).toBe('conn-1');
+    const $tabs = get(tabs) as Tab[];
+    expect($tabs).toHaveLength(2);
+    expect($tabs[1].connId).toBe('conn-1');
   });
 
   it('remove() removes the given tab', () => {
     tabs.add('conn-a');
-    const id = get(tabs)[0].id;
+    const id = (get(tabs) as Tab[])[0].id;
     tabs.remove(id);
     expect(get(tabs)).not.toContain(expect.objectContaining({ id }));
   });
 
   it('remove() keeps at least one tab', () => {
-    const only = get(tabs)[0].id;
+    const only = (get(tabs) as Tab[])[0].id;
     tabs.remove(only);
     expect(get(tabs)).toHaveLength(1);
   });
 
   it('updateTab() patches a single tab', () => {
-    const id = get(tabs)[0].id;
+    const id = (get(tabs) as Tab[])[0].id;
     tabs.updateTab(id, { sql: 'SELECT 1', running: true });
     const tab = (get(tabs) as any[]).find((t: any) => t.id === id);
     expect(tab?.sql).toBe('SELECT 1');
@@ -66,14 +68,14 @@ describe('tabs store', () => {
 
 describe('activeTabId store', () => {
   it('is set to the first tab id automatically', () => {
-    const firstId = get(tabs)[0].id;
+    const firstId = (get(tabs) as Tab[])[0].id;
     expect(get(activeTabId)).toBe(firstId);
   });
 });
 
 describe('activeTab derived store', () => {
   it('returns the active tab', () => {
-    const firstId = get(tabs)[0].id;
+    const firstId = (get(tabs) as Tab[])[0].id;
     activeTabId.set(firstId);
     expect((get(activeTab) as any)?.id).toBe(firstId);
   });

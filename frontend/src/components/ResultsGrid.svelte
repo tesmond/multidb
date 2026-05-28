@@ -1,21 +1,19 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import type { ExecuteResult, TabEditInfo } from '../stores/appStore';
-  import { tabs } from '../stores/appStore';
+  import { fontScalePercent, tabs } from '../stores/appStore';
 
   export let result: ExecuteResult | null = null;
   export let tabId: string = '';
   export let editInfo: TabEditInfo | null = null;
 
   // --- Constants ---
-  const ROW_HEIGHT = 28;
+  const BASE_ROW_HEIGHT = 28;
   const MAX_SCROLL_HEIGHT = 10_000_000;
-  const CELL_PAD_X = 10;
-  const FONT = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-  const FONT_SMALL = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-  const FONT_NULL = 'italic 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  const BASE_CELL_PAD_X = 10;
   // Average character width at 12px sans-serif — used for content-width estimation
-  const AVG_CHAR_W = 5.6;
+  const BASE_AVG_CHAR_W = 5.6;
+  const FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
   const EDGE_ZONE = 50;       // px from scroll edge to start auto-scrolling
   const MAX_EDGE_SPEED = 15;  // max px per frame during edge auto-scroll
 
@@ -25,6 +23,13 @@
   let gridWrap: HTMLDivElement;
   let containerWidth = 0;
   let containerHeight = 0;
+  $: fontScale = $fontScalePercent / 100;
+  $: rowHeight = BASE_ROW_HEIGHT * fontScale;
+  $: cellPadX = BASE_CELL_PAD_X * fontScale;
+  $: avgCharW = BASE_AVG_CHAR_W * fontScale;
+  $: font = `${12 * fontScale}px ${FONT_FAMILY}`;
+  $: fontSmall = `${11 * fontScale}px ${FONT_FAMILY}`;
+  $: fontNull = `italic ${12 * fontScale}px ${FONT_FAMILY}`;
 
   // --- Scroll state ---
   let scrollTop = 0;
@@ -54,6 +59,7 @@
   // We guard with a string key so widths only reset when column names truly change.
   let colWidths: number[] = [];
   let _colWidthsKey = '';
+  let _colWidthsFontScale = 1;
   // Maximum cell text length (chars) per column — updated incrementally on every
   // rows change so it stays correct across streaming chunks.
   let colMaxTextLen: number[] = [];
@@ -66,13 +72,20 @@
       _colWidthsKey = key;
       if (result?.columns) {
         colMaxTextLen = result.columns.map(c => c.length);
-        colWidths = result.columns.map(c => Math.max(c.length * AVG_CHAR_W + CELL_PAD_X * 2 + 16, 100));
+        colWidths = result.columns.map(c => Math.max(c.length * avgCharW + cellPadX * 2 + 16 * fontScale, 100 * fontScale));
+        _colWidthsFontScale = fontScale;
       } else {
         colMaxTextLen = [];
         colWidths = [];
       }
       _colMaxTextLenRowCount = 0;
     }
+  }
+
+  $: if (result?.columns && colWidths.length > 0 && fontScale !== _colWidthsFontScale) {
+    const ratio = fontScale / _colWidthsFontScale;
+    colWidths = colWidths.map(width => Math.max(50 * fontScale, width * ratio));
+    _colWidthsFontScale = fontScale;
   }
 
   // Incrementally scan only newly-arrived rows so streaming chunks don't cause
@@ -99,14 +112,14 @@
   }
 
   // ─── Column max widths (for auto-fit on resize-handle double-click) ───────────
-  // Derived instantly from colMaxTextLen using AVG_CHAR_W — no canvas scan needed.
+  // Derived instantly from colMaxTextLen using avgCharW — no canvas scan needed.
   function ensureColMaxWidths() {
     // colMaxTextLen is already up to date from the reactive block above; nothing to do.
   }
 
   // Convert a max text length to a clamped pixel width.
   function textLenToWidth(len: number): number {
-    return Math.min(Math.max(len * AVG_CHAR_W + CELL_PAD_X * 2 + 4, 50), 800);
+    return Math.min(Math.max(len * avgCharW + cellPadX * 2 + 4 * fontScale, 50 * fontScale), 800 * fontScale);
   }
 
   // ─── Resize drag state ────────────────────────────────────────────────────────
@@ -162,10 +175,10 @@
 
   $: rows = result?.rows ?? [];
   $: totalRows = (result as any)?._rowCount ?? rows.length;
-  $: rowNumWidth = Math.max(40, String(totalRows).length * 8 + 16);
+  $: rowNumWidth = Math.max(40 * fontScale, String(totalRows).length * 8 * fontScale + 16 * fontScale);
 
   // ─── Virtual scroll ───────────────────────────────────────────────────────────
-  $: realTotalHeight = totalRows * ROW_HEIGHT;
+  $: realTotalHeight = totalRows * rowHeight;
   $: useScaledScroll = realTotalHeight > MAX_SCROLL_HEIGHT;
   $: virtualHeight = useScaledScroll ? MAX_SCROLL_HEIGHT : realTotalHeight;
   $: totalContentWidth = rowNumWidth + colWidths.reduce((a, b) => a + b, 0);
@@ -180,23 +193,23 @@
     const _tr = totalRows;
     const _scaled = useScaledScroll;
     const _vh = virtualHeight;
-    const vc = Math.ceil(_ch / ROW_HEIGHT) + 2;
+    const vc = Math.ceil(_ch / rowHeight) + 2;
 
     if (_scaled) {
       const maxScroll = _vh - _ch;
       if (maxScroll > 0) {
         const ratio = _st / maxScroll;
-        const maxStart = Math.max(0, _tr - _ch / ROW_HEIGHT);
+        const maxStart = Math.max(0, _tr - _ch / rowHeight);
         const exactRow = ratio * maxStart;
         startRow = Math.floor(exactRow);
-        yOffset = -((exactRow - startRow) * ROW_HEIGHT);
+        yOffset = -((exactRow - startRow) * rowHeight);
       } else {
         startRow = 0;
         yOffset = 0;
       }
     } else {
-      startRow = Math.floor(_st / ROW_HEIGHT);
-      yOffset = -(_st % ROW_HEIGHT);
+      startRow = Math.floor(_st / rowHeight);
+      yOffset = -(_st % rowHeight);
     }
     visibleCount = vc;
   }
@@ -242,7 +255,8 @@
   // updates immediately without waiting for the next scroll/hover change.
   $: if (canvas && result) {
     void (startRow, visibleCount, yOffset, scrollLeft, containerWidth, containerHeight,
-          colWidths, sortIndex, hoveredRow, totalRows, rowNumWidth, sel, selectedRows, pendingEdits, editOverlay);
+          colWidths, sortIndex, hoveredRow, totalRows, rowNumWidth, sel, selectedRows, pendingEdits, editOverlay,
+          rowHeight, cellPadX, font, fontSmall, fontNull);
     scheduleRender();
   }
 
@@ -350,8 +364,8 @@
       const row = _rows[rowDataIdx];
       if (!row) continue;
 
-      const y = _yo + i * ROW_HEIGHT;
-      if (y + ROW_HEIGHT < 0 || y > h) continue;
+      const y = _yo + i * rowHeight;
+      if (y + rowHeight < 0 || y > h) continue;
 
       const inCellSel   = _sel !== null && absRow >= selR0 && absRow <= selR1;
       const inRowSelSet = _selectedRows.has(absRow);
@@ -359,54 +373,54 @@
       // Row background (painted before per-cell selection overlay)
       if (absRow === _hr) {
         ctx.fillStyle = colors.bgHover;
-        ctx.fillRect(_rnw, y, w - _rnw, ROW_HEIGHT);
+        ctx.fillRect(_rnw, y, w - _rnw, rowHeight);
       } else if (absRow % 2 === 1) {
         ctx.fillStyle = colors.bgRowAlt;
-        ctx.fillRect(_rnw, y, w - _rnw, ROW_HEIGHT);
+        ctx.fillRect(_rnw, y, w - _rnw, rowHeight);
       }
 
       if (inRowSelSet) {
         ctx.fillStyle = colors.bgRowSel;
-        ctx.fillRect(_rnw, y, w - _rnw, ROW_HEIGHT - 1);
+        ctx.fillRect(_rnw, y, w - _rnw, rowHeight - 1);
       }
 
       // Row bottom border
       ctx.fillStyle = colors.borderSubtle;
-      ctx.fillRect(0, y + ROW_HEIGHT - 1, w, 1);
+      ctx.fillRect(0, y + rowHeight - 1, w, 1);
 
       // Cells
-      ctx.font = FONT;
+      ctx.font = font;
       for (let c = colStart; c < colEnd; c++) {
         const cw = _cw[c];
         const x  = colX[c] - _sl;
 
         // Column right border
         ctx.fillStyle = colors.borderSubtle;
-        ctx.fillRect(x + cw - 1, y, 1, ROW_HEIGHT);
+        ctx.fillRect(x + cw - 1, y, 1, rowHeight);
 
         // Selection / hover highlight per cell
         if (inCellSel && c >= selC0 && c <= selC1) {
           // Cell is inside the selection rectangle
           ctx.fillStyle = colors.bgSel;
-          ctx.fillRect(x, y, cw - 1, ROW_HEIGHT - 1);
+          ctx.fillRect(x, y, cw - 1, rowHeight - 1);
         } else if (inCellSel) {
           // Row is selected but this column is outside the selection —
           // repaint with the normal row background to "un-highlight" it
           ctx.fillStyle =
             absRow === _hr   ? colors.bgHover   :
             absRow % 2 === 1 ? colors.bgRowAlt  : colors.bg;
-          ctx.fillRect(x, y, cw - 1, ROW_HEIGHT - 1);
+          ctx.fillRect(x, y, cw - 1, rowHeight - 1);
         }
 
         // Cell text (clipped to column bounds)
-        const textMaxW = cw - CELL_PAD_X * 2;
+        const textMaxW = cw - cellPadX * 2;
         if (textMaxW <= 0) continue;
 
         // If this cell is currently open in the edit overlay, blank it out so
         // the canvas text doesn't show through the input element.
         if (_eo && rowDataIdx === _eo.rowDataIdx && c === _eo.col) {
           ctx.fillStyle = colors.bgPanel;
-          ctx.fillRect(x + 1, y, cw - 2, ROW_HEIGHT - 1);
+          ctx.fillRect(x + 1, y, cw - 2, rowHeight - 1);
           continue;
         }
 
@@ -417,15 +431,15 @@
         // Draw dirty cell background (on top of row / selection backgrounds)
         if (isDirty) {
           ctx.fillStyle = colors.bgDirty;
-          ctx.fillRect(x, y, cw - 1, ROW_HEIGHT - 1);
+          ctx.fillRect(x, y, cw - 1, rowHeight - 1);
           // Left indicator line
           ctx.fillStyle = colors.borderDirty;
-          ctx.fillRect(x, y, 2, ROW_HEIGHT - 1);
+          ctx.fillRect(x, y, 2, rowHeight - 1);
         }
 
         ctx.save();
         ctx.beginPath();
-        ctx.rect(x + 1, y, cw - 2, ROW_HEIGHT);
+        ctx.rect(x + 1, y, cw - 2, rowHeight);
         ctx.clip();
 
         const cell = isDirty ? dirtyVal : row[c];
@@ -435,34 +449,34 @@
             if (row[c] === null) {
               ctx.fillStyle   = colors.textMuted;
               ctx.globalAlpha = 0.6;
-              ctx.font        = FONT_NULL;
-              ctx.fillText('NULL', x + CELL_PAD_X, y + ROW_HEIGHT / 2);
+              ctx.font        = fontNull;
+              ctx.fillText('NULL', x + cellPadX, y + rowHeight / 2);
               ctx.globalAlpha = 1;
-              ctx.font        = FONT;
+              ctx.font        = font;
             }
           } else {
             ctx.fillStyle = colors.text;
-            ctx.fillText(String(cell), x + CELL_PAD_X, y + ROW_HEIGHT / 2);
+            ctx.fillText(String(cell), x + cellPadX, y + rowHeight / 2);
           }
         } else {
           ctx.fillStyle = colors.text;
-          ctx.fillText(String(cell), x + CELL_PAD_X, y + ROW_HEIGHT / 2);
+          ctx.fillText(String(cell), x + cellPadX, y + rowHeight / 2);
         }
         ctx.restore();
       }
 
       // Row-number column (painted on top so it's sticky / always visible)
       ctx.fillStyle = inRowSelSet ? colors.bgRowNumSel : colors.bgPanel;
-      ctx.fillRect(0, y, _rnw, ROW_HEIGHT);
+      ctx.fillRect(0, y, _rnw, rowHeight);
       ctx.fillStyle = colors.border;
-      ctx.fillRect(_rnw - 1, y, 1, ROW_HEIGHT);
+      ctx.fillRect(_rnw - 1, y, 1, rowHeight);
 
       ctx.fillStyle   = colors.textMuted;
-      ctx.font        = FONT_SMALL;
+      ctx.font        = fontSmall;
       ctx.textAlign   = 'right';
-      ctx.fillText(String(absRow + 1), _rnw - 8, y + ROW_HEIGHT / 2);
+      ctx.fillText(String(absRow + 1), _rnw - 8 * fontScale, y + rowHeight / 2);
       ctx.textAlign   = 'left';
-      ctx.font        = FONT;
+      ctx.font        = font;
     }
 
     // ── Selection border ───────────────────────────────────────────────────────
@@ -471,8 +485,8 @@
       const botVisRow = Math.min(selR1, _sr + _vc - 1);
 
       if (topVisRow <= botVisRow) {
-        const yt = _yo + (topVisRow - _sr) * ROW_HEIGHT;
-        const yb = _yo + (botVisRow - _sr + 1) * ROW_HEIGHT - 1;
+        const yt = _yo + (topVisRow - _sr) * rowHeight;
+        const yb = _yo + (botVisRow - _sr + 1) * rowHeight - 1;
         const xl = colX[selC0] - _sl;
         const xr = colX[selC1] - _sl + _cw[selC1] - 1;
 
@@ -502,12 +516,12 @@
   }
 
   function getPageRowStep(): number {
-    return Math.max(1, Math.floor(containerHeight / ROW_HEIGHT));
+    return Math.max(1, Math.floor(containerHeight / rowHeight));
   }
 
   function setViewportStartRow(start: number) {
     if (!scrollContainer) return;
-    const visibleRows = Math.max(1, Math.floor(containerHeight / ROW_HEIGHT));
+    const visibleRows = Math.max(1, Math.floor(containerHeight / rowHeight));
     const maxStart = Math.max(0, totalRows - visibleRows);
     const clampedStart = clamp(start, 0, maxStart);
 
@@ -516,14 +530,14 @@
       const ratio = maxStart > 0 ? clampedStart / maxStart : 0;
       scrollContainer.scrollTop = ratio * maxScroll;
     } else {
-      scrollContainer.scrollTop = clampedStart * ROW_HEIGHT;
+      scrollContainer.scrollTop = clampedStart * rowHeight;
     }
     scrollTop = scrollContainer.scrollTop;
   }
 
   function ensureRowVisible(row: number) {
     if (!scrollContainer) return;
-    const visibleRows = Math.max(1, Math.floor(containerHeight / ROW_HEIGHT));
+    const visibleRows = Math.max(1, Math.floor(containerHeight / rowHeight));
     const top = startRow;
     const bottom = startRow + visibleRows - 1;
     if (row < top) {
@@ -599,7 +613,7 @@
     // Ignore clicks in the row-number column
     if (mx < rowNumWidth) return null;
 
-    const rowInView = Math.floor((my - yOffset) / ROW_HEIGHT);
+    const rowInView = Math.floor((my - yOffset) / rowHeight);
     const absRow    = startRow + rowInView;
     if (absRow < 0 || absRow >= totalRows) return null;
 
@@ -621,7 +635,7 @@
     const mx   = e.clientX - rect.left;
     const my   = e.clientY - rect.top;
     if (mx >= rowNumWidth) return -1;
-    const rowInView = Math.floor((my - yOffset) / ROW_HEIGHT);
+    const rowInView = Math.floor((my - yOffset) / rowHeight);
     const absRow    = startRow + rowInView;
     return absRow >= 0 && absRow < totalRows ? absRow : -1;
   }
@@ -690,20 +704,20 @@
         const maxSc = Math.max(0, virtualHeight - containerHeight);
         if (maxSc > 0) {
           const ratio    = newST / maxSc;
-          const maxStart = Math.max(0, totalRows - containerHeight / ROW_HEIGHT);
+          const maxStart = Math.max(0, totalRows - containerHeight / rowHeight);
           const exactRow = ratio * maxStart;
           curSR = Math.floor(exactRow);
-          curYO = -((exactRow - curSR) * ROW_HEIGHT);
+          curYO = -((exactRow - curSR) * rowHeight);
         } else { curSR = 0; curYO = 0; }
       } else {
-        curSR = Math.floor(newST / ROW_HEIGHT);
-        curYO = -(newST % ROW_HEIGHT);
+        curSR = Math.floor(newST / rowHeight);
+        curYO = -(newST % rowHeight);
       }
 
       const canvasX = lastDragMouseEvent.clientX - canvasRect.left;
       const canvasY = lastDragMouseEvent.clientY - canvasRect.top;
       if (canvasX >= rowNumWidth) {
-        const rowInView = Math.floor((canvasY - curYO) / ROW_HEIGHT);
+        const rowInView = Math.floor((canvasY - curYO) / rowHeight);
         const absRow    = curSR + rowInView;
         if (absRow >= 0 && absRow < totalRows) {
           const xInContent = canvasX - rowNumWidth + newSL;
@@ -780,7 +794,7 @@
     const rect      = canvas.getBoundingClientRect();
     const mx        = e.clientX - rect.left;
     const my        = e.clientY - rect.top;
-    const rowInView = Math.floor((my - yOffset) / ROW_HEIGHT);
+    const rowInView = Math.floor((my - yOffset) / rowHeight);
     const absRow    = startRow + rowInView;
     const next      = absRow >= 0 && absRow < totalRows ? absRow : -1;
     if (next !== hoveredRow) hoveredRow = next;
@@ -826,7 +840,7 @@
       const rect = canvas.getBoundingClientRect();
       let cx = rowNumWidth - scrollLeft;
       for (let i = 0; i < hit.col; i++) cx += colWidths[i] ?? 0;
-      const cy = yOffset + (hit.row - startRow) * ROW_HEIGHT;
+      const cy = yOffset + (hit.row - startRow) * rowHeight;
       const cw = colWidths[hit.col] ?? 100;
 
       editOverlay = {
@@ -1220,7 +1234,7 @@
       bind:this={editInput}
       type="text"
       class="cell-edit-input"
-      style="left:{editOverlay.x}px; top:{editOverlay.y}px; width:{editOverlay.w}px; height:{ROW_HEIGHT}px;"
+      style="left:{editOverlay.x}px; top:{editOverlay.y}px; width:{editOverlay.w}px; height:{rowHeight}px;"
       bind:value={editOverlay.value}
       on:keydown={onEditKeyDown}
       on:blur={commitEdit}
@@ -1231,7 +1245,7 @@
 <style>
   .empty {
     display: flex; align-items: center; justify-content: center;
-    height: 100%; color: var(--text-muted); font-size: 13px;
+    height: 100%; color: var(--text-muted); font-size: calc(13px * var(--app-font-scale));
   }
   .empty.error { color: var(--error); }
 
@@ -1246,12 +1260,12 @@
     background: var(--bg-panel);
     border-bottom: 2px solid var(--border);
     flex-shrink: 0;
-    font-size: 12px; font-weight: 600; color: var(--text-muted);
+    font-size: calc(12px * var(--app-font-scale)); font-weight: 600; color: var(--text-muted);
   }
   .row-num-header {
     flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
-    padding: 6px 8px; font-size: 11px; color: var(--text-muted);
+    padding: 6px 8px; font-size: calc(11px * var(--app-font-scale)); color: var(--text-muted);
     border-right: 1px solid var(--border);
     user-select: none;
   }
@@ -1267,7 +1281,7 @@
   .header-cell:hover { background: var(--bg-hover); color: var(--text); }
 
   .col-label  { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-  .sort-icon  { opacity: 0.7; font-size: 10px; flex-shrink: 0; }
+  .sort-icon  { opacity: 0.7; font-size: calc(10px * var(--app-font-scale)); flex-shrink: 0; }
 
   /* Wider hit-area (6 px) makes double-click easier to land precisely */
   .resize-handle {
@@ -1290,14 +1304,14 @@
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
   }
   .col-tooltip-type {
-    font-size: 11px;
+    font-size: calc(11px * var(--app-font-scale));
     font-weight: 600;
     color: var(--accent, #4682ff);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
   .col-tooltip-len {
-    font-size: 11px;
+    font-size: calc(11px * var(--app-font-scale));
     color: var(--text-muted);
   }
 
@@ -1336,7 +1350,7 @@
     color: var(--text, #e2e2f0);
     border: 2px solid rgba(255,200,50,0.9);
     border-radius: 0;
-    font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font: calc(12px * var(--app-font-scale)) -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     outline: none;
   }
   .cell-edit-input:focus {

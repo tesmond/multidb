@@ -464,7 +464,7 @@
   .output-tab {
     padding: 6px 16px; background: none; border: none;
     border-bottom: 2px solid transparent;
-    color: var(--text-muted); font-size: 12px; cursor: pointer;
+    color: var(--text-muted); font-size: calc(12px * var(--app-font-scale)); cursor: pointer;
   }
   .output-tab:hover { color: var(--text); }
   .output-tab.active { color: var(--text); border-bottom-color: var(--accent); }
@@ -483,7 +483,7 @@
     border: 1px solid rgba(255,200,50,0.6);
     border-radius: 4px;
     color: rgba(255,200,50,1);
-    font-size: 11px;
+    font-size: calc(11px * var(--app-font-scale));
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
@@ -494,7 +494,7 @@
   }
 
   .messages, .history-list, .saved-list { height: 100%; overflow-y: auto; padding: 8px 12px; }
-  .msg { font-size: 12px; padding: 6px 10px; border-radius: 4px; }
+  .msg { font-size: calc(12px * var(--app-font-scale)); padding: 6px 10px; border-radius: 4px; }
   .msg.error { color: var(--error); background: rgba(255,80,80,0.08); }
   .msg.success { color: var(--success); }
   .msg.muted { color: var(--text-muted); }
@@ -509,10 +509,10 @@
   .history-query:hover code { color: var(--accent); }
   .history-query code {
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 11px; white-space: pre-wrap; word-break: break-all;
+    font-size: calc(11px * var(--app-font-scale)); white-space: pre-wrap; word-break: break-all;
   }
   .history-meta {
-    display: flex; gap: 12px; font-size: 10px; color: var(--text-muted);
+    display: flex; gap: 12px; font-size: calc(10px * var(--app-font-scale)); color: var(--text-muted);
     margin-top: 2px;
   }
   .err-badge { color: var(--error); font-weight: 600; }
@@ -522,11 +522,11 @@
     cursor: default;
   }
   .saved-title {
-    cursor: pointer; color: var(--text); font-weight: 500; font-size: 12px;
+    cursor: pointer; color: var(--text); font-weight: 500; font-size: calc(12px * var(--app-font-scale));
   }
   .saved-title:hover { color: var(--accent); }
   .saved-meta {
-    display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--text-muted);
+    display: flex; flex-direction: column; gap: 2px; font-size: calc(10px * var(--app-font-scale)); color: var(--text-muted);
     margin-top: 4px;
   }
   .saved-meta span {
@@ -548,7 +548,7 @@
   .ctx-menu button {
     display: block; width: 100%; text-align: left;
     padding: 7px 14px; background: none; border: none;
-    color: var(--text); font-size: 12px; cursor: pointer;
+    color: var(--text); font-size: calc(12px * var(--app-font-scale)); cursor: pointer;
   }
   .ctx-menu button:hover { background: var(--bg-hover, rgba(255,255,255,0.07)); }
 </style>

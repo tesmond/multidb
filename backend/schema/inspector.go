@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 )
 
 // Column represents a column in a table.
@@ -17,25 +18,28 @@ type Column struct {
 
 // Table represents a table or view.
 type Table struct {
-	Name    string   `json:"name"`
-	Type    string   `json:"type"` // TABLE | VIEW
-	Columns []Column `json:"columns,omitempty"`
+	Name      string   `json:"name"`
+	Type      string   `json:"type"` // TABLE | VIEW
+	SizeBytes int64    `json:"sizeBytes,omitempty"`
+	Columns   []Column `json:"columns,omitempty"`
 }
 
 // Schema represents a named schema containing tables and views (used by Postgres).
 type Schema struct {
-	Name    string   `json:"name"`
-	Tables  []Table  `json:"tables"`
-	Views   []Table  `json:"views"`
-	Indexes []string `json:"indexes"`
+	Name      string   `json:"name"`
+	SizeBytes int64    `json:"sizeBytes,omitempty"`
+	Tables    []Table  `json:"tables"`
+	Views     []Table  `json:"views"`
+	Indexes   []string `json:"indexes"`
 }
 
 // SchemaTree is the full schema metadata for a database.
 type SchemaTree struct {
-	Tables  []Table  `json:"tables"`
-	Views   []Table  `json:"views"`
-	Indexes []string `json:"indexes"`
-	Schemas []Schema `json:"schemas,omitempty"`
+	SizeBytes int64    `json:"sizeBytes,omitempty"`
+	Tables    []Table  `json:"tables"`
+	Views     []Table  `json:"views"`
+	Indexes   []string `json:"indexes"`
+	Schemas   []Schema `json:"schemas,omitempty"`
 }
 
 // Inspector fetches schema metadata from a database.
@@ -62,6 +66,10 @@ func (i *Inspector) GetSchema(ctx context.Context, db *sql.DB, driver string) (S
 
 func (i *Inspector) mysqlSchema(ctx context.Context, db *sql.DB) (SchemaTree, error) {
 	tree := SchemaTree{Tables: []Table{}, Views: []Table{}, Indexes: []string{}}
+	sizes, schemaSizes, err := i.mysqlTableSizes(ctx, db)
+	if err != nil {
+		return tree, err
+	}
 
 	dbRows, err := db.QueryContext(ctx, `
 		SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
@@ -102,7 +110,7 @@ func (i *Inspector) mysqlSchema(ctx context.Context, db *sql.DB) (SchemaTree, er
 				rows.Close()
 				return tree, err
 			}
-			t := Table{Name: name}
+			t := Table{Name: name, SizeBytes: sizes[dbName+"."+name]}
 			if tableType == "VIEW" {
 				t.Type = "VIEW"
 				s.Views = append(s.Views, t)
@@ -139,10 +147,37 @@ func (i *Inspector) mysqlSchema(ctx context.Context, db *sql.DB) (SchemaTree, er
 			idxRows.Close()
 		}
 
+		s.SizeBytes = schemaSizes[dbName]
+		tree.SizeBytes += s.SizeBytes
 		tree.Schemas = append(tree.Schemas, s)
 	}
 
 	return tree, nil
+}
+
+func (i *Inspector) mysqlTableSizes(ctx context.Context, db *sql.DB) (map[string]int64, map[string]int64, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT TABLE_SCHEMA, TABLE_NAME, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)
+		FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql')
+		  AND TABLE_TYPE = 'BASE TABLE'`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("table sizes query: %w", err)
+	}
+	defer rows.Close()
+
+	tableSizes := make(map[string]int64)
+	schemaSizes := make(map[string]int64)
+	for rows.Next() {
+		var schemaName, tableName string
+		var size int64
+		if err := rows.Scan(&schemaName, &tableName, &size); err != nil {
+			return nil, nil, err
+		}
+		tableSizes[schemaName+"."+tableName] = size
+		schemaSizes[schemaName] += size
+	}
+	return tableSizes, schemaSizes, rows.Err()
 }
 
 func (i *Inspector) mysqlColumns(ctx context.Context, db *sql.DB, dbName, table string) ([]Column, error) {
@@ -171,6 +206,10 @@ func (i *Inspector) mysqlColumns(ctx context.Context, db *sql.DB, dbName, table 
 
 func (i *Inspector) postgresSchema(ctx context.Context, db *sql.DB) (SchemaTree, error) {
 	tree := SchemaTree{Tables: []Table{}, Views: []Table{}, Indexes: []string{}}
+	sizes, schemaSizes, err := i.postgresTableSizes(ctx, db)
+	if err != nil {
+		return tree, err
+	}
 
 	schemaRows, err := db.QueryContext(ctx, `
 		SELECT schema_name FROM information_schema.schemata
@@ -212,7 +251,7 @@ func (i *Inspector) postgresSchema(ctx context.Context, db *sql.DB) (SchemaTree,
 				rows.Close()
 				return tree, err
 			}
-			t := Table{Name: name}
+			t := Table{Name: name, SizeBytes: sizes[schemaName+"."+name]}
 			if tableType == "VIEW" {
 				t.Type = "VIEW"
 				s.Views = append(s.Views, t)
@@ -248,10 +287,39 @@ func (i *Inspector) postgresSchema(ctx context.Context, db *sql.DB) (SchemaTree,
 			idxRows.Close()
 		}
 
+		s.SizeBytes = schemaSizes[schemaName]
+		tree.SizeBytes += s.SizeBytes
 		tree.Schemas = append(tree.Schemas, s)
 	}
 
 	return tree, nil
+}
+
+func (i *Inspector) postgresTableSizes(ctx context.Context, db *sql.DB) (map[string]int64, map[string]int64, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT n.nspname, c.relname, pg_total_relation_size(c.oid)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relkind IN ('r', 'p')
+		  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg_%'`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("table sizes query: %w", err)
+	}
+	defer rows.Close()
+
+	tableSizes := make(map[string]int64)
+	schemaSizes := make(map[string]int64)
+	for rows.Next() {
+		var schemaName, tableName string
+		var size int64
+		if err := rows.Scan(&schemaName, &tableName, &size); err != nil {
+			return nil, nil, err
+		}
+		tableSizes[schemaName+"."+tableName] = size
+		schemaSizes[schemaName] += size
+	}
+	return tableSizes, schemaSizes, rows.Err()
 }
 
 func (i *Inspector) postgresColumns(ctx context.Context, db *sql.DB, schemaName, table string) ([]Column, error) {
@@ -280,6 +348,8 @@ func (i *Inspector) postgresColumns(ctx context.Context, db *sql.DB, schemaName,
 
 func (i *Inspector) sqliteSchema(ctx context.Context, db *sql.DB) (SchemaTree, error) {
 	tree := SchemaTree{Tables: []Table{}, Views: []Table{}, Indexes: []string{}}
+	tableSizes := i.sqliteTableSizes(ctx, db)
+	tree.SizeBytes = i.sqliteDatabaseSize(ctx, db)
 
 	rows, err := db.QueryContext(ctx, `
 		SELECT name, type FROM sqlite_master
@@ -295,7 +365,7 @@ func (i *Inspector) sqliteSchema(ctx context.Context, db *sql.DB) (SchemaTree, e
 		if err := rows.Scan(&name, &objType); err != nil {
 			return tree, err
 		}
-		t := Table{Name: name}
+		t := Table{Name: name, SizeBytes: tableSizes[name]}
 		if objType == "view" {
 			t.Type = "VIEW"
 			tree.Views = append(tree.Views, t)
@@ -330,6 +400,47 @@ func (i *Inspector) sqliteSchema(ctx context.Context, db *sql.DB) (SchemaTree, e
 	}
 
 	return tree, nil
+}
+
+func (i *Inspector) sqliteTableSizes(ctx context.Context, db *sql.DB) map[string]int64 {
+	rows, err := db.QueryContext(ctx, `
+		SELECT COALESCE(m.tbl_name, d.name), SUM(d.pgsize)
+		FROM dbstat d
+		LEFT JOIN sqlite_master m
+		  ON m.type = 'index' AND m.name = d.name
+		WHERE d.name NOT LIKE 'sqlite_%'
+		GROUP BY COALESCE(m.tbl_name, d.name)`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	tableSizes := make(map[string]int64)
+	for rows.Next() {
+		var name string
+		var size sql.NullInt64
+		if err := rows.Scan(&name, &size); err == nil && size.Valid {
+			tableSizes[name] = size.Int64
+		}
+	}
+	return tableSizes
+}
+
+func (i *Inspector) sqliteDatabaseSize(ctx context.Context, db *sql.DB) int64 {
+	var pageCount, pageSize int64
+	if err := db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount); err == nil {
+		if err := db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err == nil {
+			return pageCount * pageSize
+		}
+	}
+
+	var path string
+	if err := db.QueryRowContext(ctx, "PRAGMA database_list").Scan(new(int), new(string), &path); err == nil && path != "" {
+		if info, err := os.Stat(path); err == nil {
+			return info.Size()
+		}
+	}
+	return 0
 }
 
 func (i *Inspector) sqliteColumns(ctx context.Context, db *sql.DB, table string) ([]Column, error) {

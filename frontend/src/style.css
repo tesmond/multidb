@@ -3,6 +3,7 @@ html {
     color: #e2e2f0;
     height: 100%;
     overflow: hidden;
+    --app-font-scale: 1;
 }
 
 body {
@@ -17,4 +18,5 @@ body {
 #app {
     height: 100vh;
     overflow: hidden;
+    font-size: calc(13px * var(--app-font-scale));
 }

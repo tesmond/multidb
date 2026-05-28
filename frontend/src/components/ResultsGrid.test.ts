@@ -4,6 +4,7 @@ import ResultsGrid from './ResultsGrid.svelte';
 
 const mockResult = {
   columns: ['id', 'name', 'age'],
+  columnTypes: ['INTEGER', 'TEXT', 'INTEGER'],
   rows: [
     [1, 'Alice', 30],
     [2, 'Bob', 25],

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { showConnectionDialog, editingConnection, activeConnections, selectedConnId, statusMessage, tabs } from '../stores/appStore';
+  import { showConnectionDialog, editingConnection, activeConnections, selectedConnId, statusMessage, tabs, refreshConnectionSchema, activeServerGroupId, addConnectionToGroup } from '../stores/appStore';
   import type { ConnectionConfig } from '../stores/appStore';
   import { SaveAndConnect, TestConnection } from '../../wailsjs/go/main/App';
 
@@ -99,7 +99,11 @@
       // Force re-render of tabs for this connection so custom tab styling updates immediately.
       tabs.set($tabs.map(t => t.connId === form.id ? { ...t } : t));
       if (!$selectedConnId) selectedConnId.set(form.id);
+      if (!$editingConnection && $activeServerGroupId) {
+        addConnectionToGroup(form.id, $activeServerGroupId);
+      }
       statusMessage.set(`Connected to ${form.name}`);
+      void refreshConnectionSchema(form.id);
       showConnectionDialog.set(false);
     } catch (e: any) {
       testError = String(e);
@@ -267,10 +271,10 @@
     padding: 16px 20px;
     border-bottom: 1px solid var(--border);
   }
-  .modal-header h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  .modal-header h2 { margin: 0; font-size: calc(16px * var(--app-font-scale)); font-weight: 600; }
   .close-btn {
     background: none; border: none; color: var(--text-muted);
-    cursor: pointer; font-size: 16px; padding: 4px 8px;
+    cursor: pointer; font-size: calc(16px * var(--app-font-scale)); padding: 4px 8px;
   }
   .close-btn:hover { color: var(--text); }
   .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
@@ -278,7 +282,7 @@
   .tab-color-row { gap: 8px; }
   .form-row.two-col { flex-direction: row; gap: 12px; }
   .form-row.two-col label { flex: 1; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: calc(12px * var(--app-font-scale)); color: var(--text-muted); }
   .tab-color-label { gap: 6px; }
   .tab-color-inputs { display: flex; align-items: center; gap: 8px; }
   .tab-color-picker {
@@ -296,7 +300,7 @@
     border-radius: 4px;
     background: var(--bg-input);
     color: var(--text);
-    font-size: 12px;
+    font-size: calc(12px * var(--app-font-scale));
     cursor: pointer;
   }
   .btn-clear-color:hover { border-color: var(--accent); }
@@ -304,7 +308,7 @@
   input, select {
     background: var(--bg-input); border: 1px solid var(--border);
     color: var(--text); padding: 7px 10px; border-radius: 4px;
-    font-size: 13px; width: 100%; box-sizing: border-box;
+    font-size: calc(13px * var(--app-font-scale)); width: 100%; box-sizing: border-box;
   }
   input:focus, select:focus { outline: none; border-color: var(--accent); }
   .modal-footer {
@@ -312,7 +316,7 @@
     padding: 16px 20px; border-top: 1px solid var(--border);
   }
   .btn-primary, .btn-secondary {
-    padding: 7px 16px; border-radius: 4px; font-size: 13px;
+    padding: 7px 16px; border-radius: 4px; font-size: calc(13px * var(--app-font-scale));
     cursor: pointer; border: 1px solid transparent;
   }
   .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
@@ -321,7 +325,7 @@
   .btn-secondary { background: var(--bg-input); color: var(--text); border-color: var(--border); }
   .btn-secondary:hover { border-color: var(--accent); }
   .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .success { color: var(--success); font-size: 12px; margin: 0; }
+  .success { color: var(--success); font-size: calc(12px * var(--app-font-scale)); margin: 0; }
   .checkbox-label {
     flex-direction: row; align-items: center; gap: 8px; cursor: pointer;
   }
@@ -331,5 +335,5 @@
     padding: 12px; border: 1px solid var(--border);
     border-radius: 4px; background: var(--bg-input);
   }
-  .error { color: var(--error); font-size: 12px; margin: 0; }
+  .error { color: var(--error); font-size: calc(12px * var(--app-font-scale)); margin: 0; }
 </style>

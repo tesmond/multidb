@@ -14,6 +14,7 @@
         queryHistoryStore,
         selectedConnId,
         hydrateCachedSchemas,
+        refreshMissingConnectionSchemas,
     } from "./stores/appStore";
     import {
         ListSavedConnections,
@@ -249,42 +250,48 @@
         draggingPane = false;
     }
 
-    onMount(async () => {
+    onMount(() => {
+        let mounted = true;
+        const onResize = () => updateTabOverflowState();
+        window.addEventListener("resize", onResize);
+
         // Initialize active tab
         const $tabs = get(tabs);
         if ($tabs.length > 0) activeTabId.set($tabs[0].id);
 
-        // Load saved connections
-        try {
-            const saved = await ListSavedConnections();
-            if (saved && saved.length > 0) {
-                activeConnections.set(
-                    saved.map((cfg) => ({
-                        config: cfg,
-                        schema: null,
-                        schemaLoading: false,
-                        schemaError: null,
-                    })),
-                );
-                selectedConnId.set(saved[0].id);
-                // Hydrate cached schemas
-                await hydrateCachedSchemas();
-            }
-        } catch (_) {}
+        void (async () => {
+            // Load saved connections
+            try {
+                const saved = await ListSavedConnections();
+                if (mounted && saved && saved.length > 0) {
+                    activeConnections.set(
+                        saved.map((cfg) => ({
+                            config: cfg,
+                            schema: null,
+                            schemaLoading: false,
+                            schemaError: null,
+                        })),
+                    );
+                    selectedConnId.set(saved[0].id);
+                    // Hydrate cached schemas
+                    await hydrateCachedSchemas();
+                    // Fresh installs or newly-added saved connections collect schema in the background.
+                    await refreshMissingConnectionSchemas();
+                }
+            } catch (_) {}
 
-        // Load query history
-        try {
-            const hist = await GetQueryHistory(200);
-            if (hist) queryHistoryStore.set(hist);
-        } catch (_) {}
+            // Load query history
+            try {
+                const hist = await GetQueryHistory(200);
+                if (mounted && hist) queryHistoryStore.set(hist);
+            } catch (_) {}
 
-        const onResize = () => updateTabOverflowState();
-        window.addEventListener("resize", onResize);
-
-        await tick();
-        updateTabOverflowState();
+            await tick();
+            if (mounted) updateTabOverflowState();
+        })();
 
         return () => {
+            mounted = false;
             window.removeEventListener("resize", onResize);
         };
     });
@@ -510,7 +517,7 @@
         color: var(--text);
         font-family:
             -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        font-size: 13px;
+        font-size: calc(13px * var(--app-font-scale));
     }
     :global(:root) {
         --bg: #12121a;
@@ -634,7 +641,7 @@
         border: none;
         border-bottom: 2px solid transparent;
         color: var(--text-muted);
-        font-size: 12px;
+        font-size: calc(12px * var(--app-font-scale));
         cursor: pointer;
         white-space: nowrap;
         min-width: 80px;
@@ -671,14 +678,14 @@
         border: 1px solid var(--accent);
         border-radius: 2px;
         color: var(--text);
-        font-size: 12px;
+        font-size: calc(12px * var(--app-font-scale));
         padding: 2px 4px;
         outline: none;
         min-width: 0;
     }
     .tab-close {
         color: var(--text-muted);
-        font-size: 11px;
+        font-size: calc(11px * var(--app-font-scale));
         opacity: 0;
         padding: 0 2px;
         border-radius: 2px;
@@ -716,7 +723,7 @@
         border: none;
         color: var(--text-muted);
         cursor: pointer;
-        font-size: 14px;
+        font-size: calc(14px * var(--app-font-scale));
         flex-shrink: 0;
     }
     .tab-add:hover {
@@ -739,7 +746,7 @@
         color: var(--text);
         cursor: pointer;
         line-height: 1;
-        font-size: 11px;
+        font-size: calc(11px * var(--app-font-scale));
         flex-shrink: 0;
     }
     .tab-scroll-btn:hover:not(:disabled) {
@@ -795,7 +802,7 @@
         background: none;
         border: none;
         color: var(--text);
-        font-size: 13px;
+        font-size: calc(13px * var(--app-font-scale));
         cursor: pointer;
     }
     .tab-context-menu button:hover {

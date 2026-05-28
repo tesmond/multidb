@@ -114,7 +114,7 @@
   }
   .modal-header h2 {
     margin: 0;
-    font-size: 16px;
+    font-size: calc(16px * var(--app-font-scale));
     font-weight: 600;
   }
   .close-btn {
@@ -122,7 +122,7 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 16px;
+    font-size: calc(16px * var(--app-font-scale));
     padding: 4px 8px;
   }
   .close-btn:hover {
@@ -143,7 +143,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
+    font-size: calc(12px * var(--app-font-scale));
     color: var(--text-muted);
   }
   input,
@@ -153,7 +153,7 @@
     color: var(--text);
     padding: 7px 10px;
     border-radius: 4px;
-    font-size: 13px;
+    font-size: calc(13px * var(--app-font-scale));
     width: 100%;
     box-sizing: border-box;
   }
@@ -182,7 +182,7 @@
   .btn-secondary {
     padding: 7px 16px;
     border-radius: 4px;
-    font-size: 13px;
+    font-size: calc(13px * var(--app-font-scale));
     cursor: pointer;
     border: 1px solid transparent;
   }
@@ -209,7 +209,7 @@
   }
   .error {
     color: var(--error);
-    font-size: 12px;
+    font-size: calc(12px * var(--app-font-scale));
     margin: 0;
   }
 </style>

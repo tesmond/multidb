@@ -1,37 +1,53 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, saveCachedSchema, deleteCachedSchema } from '../stores/appStore';
-  import type { ActiveConnection } from '../stores/appStore';
-  import { GetSchema, Disconnect, TestConnection, BackupTable, DropTable } from '../../wailsjs/go/main/App';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList } from '../stores/appStore';
+  import type { ActiveConnection, ServerGroup } from '../stores/appStore';
+  import { Disconnect, TestConnection, BackupTable, DropTable } from '../../wailsjs/go/main/App';
   import { get } from 'svelte/store';
 
   // Expandable node state
   let expanded: Record<string, boolean> = {};
   let expandedTables: Record<string, boolean> = {};
+  let expandedGroups: Record<string, boolean> = {};
+  let addMenuOpen = false;
+  let settingsOpen = false;
+  let fontScaleInput = '100';
+  let draggingConnId = '';
 
-  async function loadSchema(conn: ActiveConnection) {
-    if (conn.schemaLoading) return;
-    activeConnections.update(conns =>
-      conns.map(c => c.config.id === conn.config.id ? { ...c, schemaLoading: true, schemaError: null } : c)
-    );
-    try {
-      const tree = await GetSchema(conn.config.id);
-      activeConnections.update(conns =>
-        conns.map(c => c.config.id === conn.config.id ? { ...c, schema: tree, schemaLoading: false } : c)
-      );
-      // Save to cache for persistence
-      const hash = JSON.stringify(tree); // Simple hash for now
-      await saveCachedSchema(conn.config.id, tree, hash);
-    } catch (e: any) {
-      activeConnections.update(conns =>
-        conns.map(c => c.config.id === conn.config.id ? { ...c, schemaLoading: false, schemaError: String(e) } : c)
-      );
+  type NavItem =
+    | { kind: 'group'; group: ServerGroup }
+    | { kind: 'conn'; conn: ActiveConnection; groupId?: string };
+
+  let navItems: NavItem[] = [];
+
+  $: {
+    const connById = new Map($activeConnections.map((conn) => [conn.config.id, conn]));
+    const groupedIds = new Set<string>();
+    const items: NavItem[] = [];
+
+    for (const group of $serverGroups) {
+      items.push({ kind: 'group', group });
+      for (const connId of group.connectionIds) groupedIds.add(connId);
+      if (expandedGroups[group.id]) {
+        for (const connId of group.connectionIds) {
+          const conn = connById.get(connId);
+          if (conn) items.push({ kind: 'conn', conn, groupId: group.id });
+        }
+      }
     }
+
+    for (const conn of $activeConnections) {
+      if (!groupedIds.has(conn.config.id)) items.push({ kind: 'conn', conn });
+    }
+
+    navItems = items;
   }
+
+  $: fontScaleInput = String($fontScalePercent);
 
   function toggleConn(id: string, conn: ActiveConnection) {
     expanded[id] = !expanded[id];
     if (expanded[id] && !conn.schema) {
-      loadSchema(conn);
+      void refreshConnectionSchema(conn.config.id);
     }
     expanded = { ...expanded };
     selectedConnId.set(id);
@@ -40,6 +56,12 @@
   function toggleTable(tableKey: string) {
     expandedTables[tableKey] = !expandedTables[tableKey];
     expandedTables = { ...expandedTables };
+  }
+
+  function toggleGroup(groupId: string) {
+    expandedGroups[groupId] = !expandedGroups[groupId];
+    expandedGroups = { ...expandedGroups };
+    activeServerGroupId.set(expandedGroups[groupId] ? groupId : '');
   }
 
   function editConn(conn: ActiveConnection) {
@@ -52,11 +74,30 @@
     return /^#[0-9a-fA-F]{6}$/.test(tabColor.trim()) ? tabColor.trim().toLowerCase() : 'transparent';
   }
 
+  function formatBytes(bytes: number | undefined | null): string {
+    if (!bytes || bytes <= 0) return '';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    let value = bytes;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+    const precision = value >= 10 || unitIndex === 0 ? 0 : 1;
+    return `${value.toFixed(precision)} ${units[unitIndex]}`;
+  }
+
+  function groupConnectionCount(group: ServerGroup): number {
+    const connIds = new Set($activeConnections.map((conn) => conn.config.id));
+    return group.connectionIds.filter((id) => connIds.has(id)).length;
+  }
+
   async function disconnectConn(id: string) {
     try {
       await Disconnect(id);
       // Clean up frontend state
       activeConnections.update(conns => conns.filter(c => c.config.id !== id));
+      removeConnectionFromGroups(id);
       await deleteCachedSchema(id);
       tabs.closeTabsForConn(id);
       const $sel = get(selectedConnId);
@@ -110,6 +151,79 @@
 
   function copyName(name: string) {
     navigator.clipboard.writeText(name).catch(() => {});
+  }
+
+  function openNewConnection() {
+    editingConnection.set(null);
+    showConnectionDialog.set(true);
+    addMenuOpen = false;
+  }
+
+  function createServerGroup() {
+    const title = window.prompt('Server group title', 'Server Group');
+    if (title === null) return;
+    const groupId = addServerGroup(title);
+    expandedGroups[groupId] = true;
+    expandedGroups = { ...expandedGroups };
+    addMenuOpen = false;
+  }
+
+  function closeFloatingUi() {
+    contextMenu = null;
+    addMenuOpen = false;
+    settingsOpen = false;
+  }
+
+  function adjustFontScale(delta: number) {
+    setFontScalePercent($fontScalePercent + delta);
+  }
+
+  function commitFontScale() {
+    setFontScalePercent(Number(fontScaleInput));
+  }
+
+  function startConnDrag(e: DragEvent, connId: string) {
+    draggingConnId = connId;
+    e.dataTransfer?.setData('text/plain', connId);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+
+  function dropConnOnGroup(e: DragEvent, groupId: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    const connId = e.dataTransfer?.getData('text/plain') || draggingConnId;
+    if (!connId) return;
+    addConnectionToGroup(connId, groupId);
+    expandedGroups[groupId] = true;
+    expandedGroups = { ...expandedGroups };
+    activeServerGroupId.set(groupId);
+    draggingConnId = '';
+  }
+
+  function dropConnOnConnection(e: DragEvent, targetConnId: string, groupId?: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    const connId = e.dataTransfer?.getData('text/plain') || draggingConnId;
+    if (!connId || connId === targetConnId) return;
+
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const placement = e.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
+    moveConnectionInList(connId, targetConnId, placement, groupId);
+    if (groupId) {
+      expandedGroups[groupId] = true;
+      expandedGroups = { ...expandedGroups };
+      activeServerGroupId.set(groupId);
+    }
+    draggingConnId = '';
+  }
+
+  function dropConnUngrouped(e: DragEvent) {
+    const target = e.target as HTMLElement;
+    if (target.closest('.group-label') || target.closest('.conn-label')) return;
+    const connId = e.dataTransfer?.getData('text/plain') || draggingConnId;
+    if (!connId) return;
+    moveConnectionInList(connId, null, 'end');
+    draggingConnId = '';
   }
 
   // Context menu state
@@ -208,15 +322,22 @@
   }
 
   function closeContextMenu() {
-    contextMenu = null;
+    closeFloatingUi();
+  }
+
+  function handleWindowClick(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (target.closest('.nav-header') || target.closest('.header-menu') || target.closest('.context-menu')) {
+      return;
+    }
+    closeFloatingUi();
   }
 
   // ── Schema refresh ─────────────────────────────────────────────────────────
   // Triggered by the context menu "Refresh" action OR by SqlEditor after a DDL
   // statement completes (via the schemaRefreshSignal store).
   async function refreshSchema(connId: string) {
-    const conn = get(activeConnections).find(c => c.config.id === connId);
-    if (conn) await loadSchema(conn);
+    await refreshConnectionSchema(connId);
   }
 
   // Watch the shared signal so any component can request a schema refresh
@@ -228,22 +349,87 @@
   }
 </script>
 
-<svelte:window on:click={closeContextMenu} />
+<svelte:window on:click={handleWindowClick} />
 
 <aside class="navigator">
   <div class="nav-header">
-    <span class="nav-title">Connections</span>
-    <button class="icon-btn" on:click={() => { showConnectionDialog.set(true); editingConnection.set(null); }} title="New Connection">+</button>
+    <div class="nav-title-row">
+      <span class="nav-title">Connections</span>
+      <button class="icon-btn header-icon" on:click={() => { addMenuOpen = !addMenuOpen; settingsOpen = false; }} title="Add">+</button>
+      {#if addMenuOpen}
+        <div class="header-menu add-menu" role="menu" tabindex="-1">
+          <button role="menuitem" on:click={openNewConnection}>New Connection</button>
+          <button role="menuitem" on:click={createServerGroup}>New Server Group</button>
+        </div>
+      {/if}
+    </div>
+    <button class="icon-btn header-icon" on:click={() => { settingsOpen = !settingsOpen; addMenuOpen = false; }} title="Settings">⚙</button>
+    {#if settingsOpen}
+      <div class="header-menu settings-menu" role="dialog" aria-label="Navigator settings" tabindex="-1">
+        <div class="settings-row">
+          <span>Font size</span>
+          <div class="font-controls">
+            <button class="icon-btn scale-btn" on:click={() => adjustFontScale(-10)} title="Decrease font size">−</button>
+            <input
+              type="number"
+              min="50"
+              max="250"
+              step="10"
+              bind:value={fontScaleInput}
+              on:change={commitFontScale}
+              on:keydown={e => e.key === 'Enter' && commitFontScale()}
+              aria-label="Font size percentage"
+            />
+            <span class="percent-mark">%</span>
+            <button class="icon-btn scale-btn" on:click={() => adjustFontScale(10)} title="Increase font size">+</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
 
-  <div class="nav-content">
-    {#each $activeConnections as conn (conn.config.id)}
+  <div
+    class="nav-content"
+    role="tree"
+    tabindex="-1"
+    on:dragover={e => e.preventDefault()}
+    on:drop={dropConnUngrouped}
+  >
+    {#each navItems as item (item.kind === 'group' ? `group-${item.group.id}` : `conn-${item.conn.config.id}-${item.groupId ?? 'root'}`)}
+      {#if item.kind === 'group'}
+        <div class="group-node">
+          <div
+            class="group-label"
+            class:active={$activeServerGroupId === item.group.id}
+            on:click={() => toggleGroup(item.group.id)}
+            on:dragover={e => e.preventDefault()}
+            on:drop={e => dropConnOnGroup(e, item.group.id)}
+            role="treeitem"
+            aria-selected={$activeServerGroupId === item.group.id}
+            aria-expanded={!!expandedGroups[item.group.id]}
+            tabindex="0"
+            on:keydown={e => e.key === 'Enter' && toggleGroup(item.group.id)}
+          >
+            <span class="chevron">{expandedGroups[item.group.id] ? '▾' : '▸'}</span>
+            <span class="table-icon">▣</span>
+            <span class="node-name">{item.group.title}</span>
+            <span class="count">({groupConnectionCount(item.group)})</span>
+          </div>
+        </div>
+      {:else}
+        {@const conn = item.conn}
       <div class="conn-node">
         <div
           class="conn-label"
           class:selected={$selectedConnId === conn.config.id}
+          class:grouped={!!item.groupId}
           on:click={() => toggleConn(conn.config.id, conn)}
           on:contextmenu={e => openDatabaseContextMenu(e, conn.config.id)}
+          draggable="true"
+          on:dragstart={e => startConnDrag(e, conn.config.id)}
+          on:dragover={e => e.preventDefault()}
+          on:drop={e => dropConnOnConnection(e, conn.config.id, item.groupId)}
+          on:dragend={() => (draggingConnId = '')}
           role="treeitem" aria-selected={false}
           aria-expanded={!!expanded[conn.config.id]}
           tabindex="0"
@@ -258,7 +444,12 @@
             title={conn.config.tabColor ? `Tab colour: ${conn.config.tabColor}` : 'No tab colour set'}
             aria-label="Connection colour"
           ></span>
-          <span class="conn-name">{conn.config.name}</span>
+          <span class="conn-name">
+            <span class="node-name">{conn.config.name}</span>
+            {#if formatBytes(conn.schema?.sizeBytes)}
+              <span class="size-label">{formatBytes(conn.schema?.sizeBytes)}</span>
+            {/if}
+          </span>
           <span class="driver-badge">{conn.config.driver}</span>
           <div class="conn-actions">
             <button class="icon-btn" on:click|stopPropagation={() => editConn(conn)} title="Edit">✏️</button>
@@ -287,7 +478,10 @@
                     >
                       <span class="chevron">{expandedTables[`${conn.config.id}-schema-${pgSchema.name}`] ? '▾' : '▸'}</span>
                       <span class="table-icon">🗂</span>
-                      {pgSchema.name}
+                      <span class="node-name">{pgSchema.name}</span>
+                      {#if formatBytes(pgSchema.sizeBytes)}
+                        <span class="size-label">{formatBytes(pgSchema.sizeBytes)}</span>
+                      {/if}
                     </div>
                     {#if expandedTables[`${conn.config.id}-schema-${pgSchema.name}`]}
                       <div class="conn-children">
@@ -316,7 +510,10 @@
                                 >
                                   <span class="chevron">{expandedTables[`${conn.config.id}-${pgSchema.name}-t-${table.name}`] ? '▾' : '▸'}</span>
                                   <span class="table-icon">📋</span>
-                                  {table.name}
+                                  <span class="node-name">{table.name}</span>
+                                  {#if formatBytes(table.sizeBytes)}
+                                    <span class="size-label">{formatBytes(table.sizeBytes)}</span>
+                                  {/if}
                                 </div>
                                 {#if expandedTables[`${conn.config.id}-${pgSchema.name}-t-${table.name}`]}
                                   <div class="col-list">
@@ -409,7 +606,10 @@
                       >
                         <span class="chevron">{expandedTables[`${conn.config.id}-t-${table.name}`] ? '▾' : '▸'}</span>
                         <span class="table-icon">📋</span>
-                        {table.name}
+                        <span class="node-name">{table.name}</span>
+                        {#if formatBytes(table.sizeBytes)}
+                          <span class="size-label">{formatBytes(table.sizeBytes)}</span>
+                        {/if}
                       </div>
                       {#if expandedTables[`${conn.config.id}-t-${table.name}`]}
                         <div class="col-list">
@@ -479,12 +679,13 @@
           </div>
         {/if}
       </div>
+      {/if}
     {/each}
 
     {#if $activeConnections.length === 0}
       <div class="empty-nav">
         <p>No connections.</p>
-        <button class="btn-link" on:click={() => showConnectionDialog.set(true)}>+ New Connection</button>
+        <button class="btn-link" on:click={openNewConnection}>+ New Connection</button>
       </div>
     {/if}
   </div>
@@ -549,25 +750,116 @@
     min-width: 0;
   }
   .nav-header {
+    position: relative;
     display: flex; align-items: center; justify-content: space-between;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
-    font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-muted);
+    font-size: calc(11px * var(--app-font-scale)); font-weight: 600; text-transform: uppercase; color: var(--text-muted);
   }
+  .nav-title-row { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
   .nav-title { letter-spacing: 0.05em; }
+  .header-icon {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+  }
+  .header-icon:hover { background: var(--bg-hover); }
+  .header-menu {
+    position: absolute;
+    z-index: 310;
+    top: calc(100% + 4px);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    text-transform: none;
+    font-weight: 400;
+    color: var(--text);
+  }
+  .add-menu { left: 12px; min-width: 170px; overflow: hidden; }
+  .settings-menu { right: 8px; width: 220px; padding: 10px; }
+  .header-menu button {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+    font-size: calc(12px * var(--app-font-scale));
+  }
+  .header-menu button:hover { background: var(--bg-hover); }
+  .settings-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: calc(12px * var(--app-font-scale));
+    color: var(--text-muted);
+  }
+  .font-controls {
+    display: grid;
+    grid-template-columns: 26px 1fr auto 26px;
+    align-items: center;
+    gap: 6px;
+  }
+  .font-controls input {
+    min-width: 0;
+    height: 26px;
+    box-sizing: border-box;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text);
+    padding: 3px 6px;
+    font-size: calc(12px * var(--app-font-scale));
+  }
+  .percent-mark { color: var(--text-muted); }
+  .scale-btn {
+    width: 26px;
+    height: 26px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-input);
+    text-align: center;
+  }
   .nav-content { flex: 1; overflow-y: auto; padding: 4px 0; }
+
+  .group-label {
+    display: flex; align-items: center; gap: 4px;
+    padding: 5px 8px; cursor: pointer; user-select: none;
+    font-size: calc(13px * var(--app-font-scale)); color: var(--text);
+  }
+  .group-label:hover,
+  .group-label.active { background: var(--bg-hover); }
+  .group-label:focus { outline: 1px solid var(--accent); }
 
   .conn-label {
     display: flex; align-items: center; gap: 4px;
     padding: 5px 8px; cursor: pointer; user-select: none;
-    font-size: 13px; color: var(--text);
+    font-size: calc(13px * var(--app-font-scale)); color: var(--text);
   }
+  .conn-label.grouped { padding-left: 24px; }
   .conn-label:hover { background: var(--bg-hover); }
   .conn-label.selected { background: var(--bg-selected); }
   .conn-label:focus { outline: 1px solid var(--accent); }
-  .conn-name { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conn-name {
+    display: inline-flex; align-items: baseline; gap: 6px;
+    font-weight: 500; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap;
+  }
+  .node-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .size-label {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    font-size: calc(11px * var(--app-font-scale));
+    font-weight: 400;
+    opacity: 0.72;
+  }
   .driver-badge {
-    font-size: 10px; padding: 1px 5px; border-radius: 3px;
+    font-size: calc(10px * var(--app-font-scale)); padding: 1px 5px; border-radius: 3px;
     background: var(--bg-badge); color: var(--text-muted);
   }
   .conn-actions { display: none; gap: 2px; align-items: center; }
@@ -590,16 +882,16 @@
   .section-label {
     display: flex; align-items: center; gap: 4px;
     padding: 3px 8px; cursor: pointer; user-select: none;
-    font-size: 12px; color: var(--text-muted); font-weight: 500;
+    font-size: calc(12px * var(--app-font-scale)); color: var(--text-muted); font-weight: 500;
   }
   .section-label:hover { color: var(--text); }
-  .section-label.schema-node { color: var(--text); font-size: 13px; }
+  .section-label.schema-node { color: var(--text); font-size: calc(13px * var(--app-font-scale)); }
   .count { font-weight: 400; opacity: 0.7; }
 
   .table-label {
     display: flex; align-items: center; gap: 4px;
     padding: 3px 8px; cursor: pointer; user-select: none;
-    font-size: 12px; color: var(--text);
+    font-size: calc(12px * var(--app-font-scale)); color: var(--text);
   }
   .table-label:hover { background: var(--bg-hover); }
   .table-label.leaf { padding-left: 24px; }
@@ -607,26 +899,26 @@
   .col-list { padding-left: 24px; }
   .col-row {
     display: flex; align-items: center; gap: 6px;
-    padding: 2px 8px; font-size: 11px; color: var(--text-muted);
+    padding: 2px 8px; font-size: calc(11px * var(--app-font-scale)); color: var(--text-muted);
   }
   .col-key { width: 14px; flex-shrink: 0; }
   .col-name { flex: 1; }
   .col-type { opacity: 0.6; font-style: italic; }
 
-  .chevron { opacity: 0.5; font-size: 10px; width: 10px; flex-shrink: 0; }
+  .chevron { opacity: 0.5; font-size: calc(10px * var(--app-font-scale)); width: 10px; flex-shrink: 0; }
   .icon-btn {
     background: none; border: none; cursor: pointer;
-    color: var(--text-muted); font-size: 12px; padding: 2px 4px;
+    color: var(--text-muted); font-size: calc(12px * var(--app-font-scale)); padding: 2px 4px;
     line-height: 1;
   }
   .icon-btn:hover { color: var(--text); }
 
-  .nav-info { padding: 6px 12px; font-size: 12px; color: var(--text-muted); }
-  .nav-error { padding: 6px 12px; font-size: 12px; color: var(--error); }
+  .nav-info { padding: 6px 12px; font-size: calc(12px * var(--app-font-scale)); color: var(--text-muted); }
+  .nav-error { padding: 6px 12px; font-size: calc(12px * var(--app-font-scale)); color: var(--error); }
 
   .empty-nav { padding: 20px 16px; text-align: center; }
-  .empty-nav p { font-size: 12px; color: var(--text-muted); margin: 0 0 8px; }
-  .btn-link { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; }
+  .empty-nav p { font-size: calc(12px * var(--app-font-scale)); color: var(--text-muted); margin: 0 0 8px; }
+  .btn-link { background: none; border: none; color: var(--accent); cursor: pointer; font-size: calc(12px * var(--app-font-scale)); }
   .btn-link:hover { text-decoration: underline; }
 
   .context-menu {
@@ -639,7 +931,7 @@
   .context-menu button {
     display: block; width: 100%; text-align: left;
     padding: 8px 16px; background: none; border: none;
-    color: var(--text); font-size: 13px; cursor: pointer;
+    color: var(--text); font-size: calc(13px * var(--app-font-scale)); cursor: pointer;
   }
   .context-menu button:hover { background: var(--bg-hover); }
   .context-menu button:disabled { opacity: 0.5; cursor: default; }
@@ -650,7 +942,7 @@
     height: 1px; background: var(--border); margin: 3px 0;
   }
   .context-title {
-    font-size: 12px;
+    font-size: calc(12px * var(--app-font-scale));
     color: var(--text-muted);
     padding: 8px 16px;
     border-bottom: 1px solid var(--border);

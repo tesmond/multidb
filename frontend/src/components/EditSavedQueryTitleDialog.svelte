@@ -86,7 +86,7 @@
 
   .dialog-header h2 {
     margin: 0;
-    font-size: 16px;
+    font-size: calc(16px * var(--app-font-scale));
     font-weight: 600;
     color: var(--text);
   }
@@ -99,7 +99,7 @@
   }
 
   .dialog-body label {
-    font-size: 12px;
+    font-size: calc(12px * var(--app-font-scale));
     font-weight: 500;
     color: var(--text-muted);
     text-transform: uppercase;
@@ -112,7 +112,7 @@
     color: var(--text);
     padding: 8px 12px;
     border-radius: 4px;
-    font-size: 13px;
+    font-size: calc(13px * var(--app-font-scale));
     font-family: inherit;
   }
 
@@ -134,7 +134,7 @@
   .btn-save {
     padding: 6px 16px;
     border-radius: 4px;
-    font-size: 12px;
+    font-size: calc(12px * var(--app-font-scale));
     font-weight: 500;
     cursor: pointer;
     border: 1px solid transparent;

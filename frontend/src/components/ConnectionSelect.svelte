@@ -169,7 +169,7 @@
     border: 1px solid var(--border);
     background: var(--bg-input);
     color: var(--text);
-    font-size: 12px;
+    font-size: calc(12px * var(--app-font-scale));
     cursor: pointer;
     text-align: left;
   }
@@ -199,7 +199,7 @@
   .dropdown-caret {
     flex: 0 0 auto;
     opacity: 0.8;
-    font-size: 14px;
+    font-size: calc(14px * var(--app-font-scale));
     line-height: 1;
   }
 
@@ -229,7 +229,7 @@
     border-radius: 6px;
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: calc(12px * var(--app-font-scale));
     cursor: pointer;
     text-align: left;
   }
@@ -254,6 +254,6 @@
   .option-check {
     flex: 0 0 auto;
     color: var(--accent);
-    font-size: 11px;
+    font-size: calc(11px * var(--app-font-scale));
   }
 </style>

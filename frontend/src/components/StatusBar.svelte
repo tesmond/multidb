@@ -31,7 +31,7 @@
     height: 24px; padding: 0 12px;
     background: var(--bg-toolbar);
     border-top: 1px solid var(--border);
-    font-size: 11px; color: var(--text-muted);
+    font-size: calc(11px * var(--app-font-scale)); color: var(--text-muted);
     flex-shrink: 0;
   }
   .status-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -40,7 +40,7 @@
   .export-btn {
     background: var(--accent); color: white;
     border: none; border-radius: 3px; padding: 2px 8px;
-    font-size: 11px; cursor: pointer;
+    font-size: calc(11px * var(--app-font-scale)); cursor: pointer;
     margin-left: 4px;
   }
   .export-btn:hover { background: var(--accent-hover, #0056b3); }

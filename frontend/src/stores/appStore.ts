@@ -5,7 +5,7 @@ import type {
   history,
   main,
 } from "../../wailsjs/go/models";
-import { LoadSchema, SaveSchema } from "../../wailsjs/go/main/App";
+import { GetSchema, LoadSchema, SaveSchema } from "../../wailsjs/go/main/App";
 
 // -----------------------------------------------------------------------
 // Connection state
@@ -26,6 +26,158 @@ export interface ActiveConnection {
 
 export const activeConnections = writable<ActiveConnection[]>([]);
 export const selectedConnId = writable<string>("");
+
+export interface ServerGroup {
+  id: string;
+  title: string;
+  connectionIds: string[];
+}
+
+const serverGroupsStorageKey = "multidb.serverGroups.v1";
+const fontScaleStorageKey = "multidb.fontScalePercent.v1";
+
+function readStoredServerGroups(): ServerGroup[] {
+  if (typeof localStorage === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(serverGroupsStorageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((group) => group && typeof group.id === "string")
+      .map((group) => ({
+        id: group.id,
+        title: typeof group.title === "string" ? group.title : "Server Group",
+        connectionIds: Array.isArray(group.connectionIds)
+          ? group.connectionIds.filter((id: unknown) => typeof id === "string")
+          : [],
+      }));
+  } catch (_) {
+    return [];
+  }
+}
+
+function readStoredFontScale(): number {
+  if (typeof localStorage === "undefined") return 100;
+  const stored = Number(localStorage.getItem(fontScaleStorageKey));
+  return Number.isFinite(stored) && stored > 0 ? stored : 100;
+}
+
+function clampFontScale(value: number): number {
+  if (!Number.isFinite(value)) return 100;
+  return Math.max(50, Math.min(250, Math.round(value)));
+}
+
+export const serverGroups = writable<ServerGroup[]>(readStoredServerGroups());
+export const activeServerGroupId = writable<string>("");
+export const fontScalePercent = writable<number>(
+  clampFontScale(readStoredFontScale()),
+);
+
+serverGroups.subscribe((groups) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(serverGroupsStorageKey, JSON.stringify(groups));
+});
+
+fontScalePercent.subscribe((value) => {
+  const scale = clampFontScale(value);
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(fontScaleStorageKey, String(scale));
+  }
+  if (typeof document !== "undefined") {
+    document.documentElement.style.setProperty(
+      "--app-font-scale",
+      String(scale / 100),
+    );
+  }
+});
+
+export function setFontScalePercent(value: number) {
+  fontScalePercent.set(clampFontScale(value));
+}
+
+export function addServerGroup(title: string) {
+  const trimmed = title.trim();
+  const id = crypto.randomUUID();
+  serverGroups.update((groups) => [
+    ...groups,
+    { id, title: trimmed || "Server Group", connectionIds: [] },
+  ]);
+  activeServerGroupId.set(id);
+  return id;
+}
+
+export function addConnectionToGroup(connId: string, groupId: string) {
+  serverGroups.update((groups) =>
+    groups.map((group) => ({
+      ...group,
+      connectionIds:
+        group.id === groupId
+          ? Array.from(new Set([...group.connectionIds, connId]))
+          : group.connectionIds.filter((id) => id !== connId),
+    })),
+  );
+}
+
+export function removeConnectionFromGroups(connId: string) {
+  serverGroups.update((groups) =>
+    groups.map((group) => ({
+      ...group,
+      connectionIds: group.connectionIds.filter((id) => id !== connId),
+    })),
+  );
+}
+
+export function moveConnectionInList(
+  connId: string,
+  targetConnId: string | null,
+  placement: "before" | "after" | "end",
+  groupId?: string,
+) {
+  if (groupId) {
+    serverGroups.update((groups) =>
+      groups.map((group) => {
+        const withoutMoved = group.connectionIds.filter((id) => id !== connId);
+        if (group.id !== groupId) {
+          return { ...group, connectionIds: withoutMoved };
+        }
+
+        const next = [...withoutMoved];
+        const targetIndex = targetConnId
+          ? next.findIndex((id) => id === targetConnId)
+          : -1;
+        const insertIndex =
+          placement === "end" || targetIndex === -1
+            ? next.length
+            : placement === "after"
+              ? targetIndex + 1
+              : targetIndex;
+        next.splice(insertIndex, 0, connId);
+        return { ...group, connectionIds: next };
+      }),
+    );
+    return;
+  }
+
+  removeConnectionFromGroups(connId);
+  activeConnections.update((connections) => {
+    const moved = connections.find((conn) => conn.config.id === connId);
+    if (!moved) return connections;
+
+    const next = connections.filter((conn) => conn.config.id !== connId);
+    const targetIndex = targetConnId
+      ? next.findIndex((conn) => conn.config.id === targetConnId)
+      : -1;
+    const insertIndex =
+      placement === "end" || targetIndex === -1
+        ? next.length
+        : placement === "after"
+          ? targetIndex + 1
+          : targetIndex;
+    next.splice(insertIndex, 0, moved);
+    return next;
+  });
+}
 
 // -----------------------------------------------------------------------
 // Tab / editor state
@@ -135,7 +287,7 @@ function createTabStore() {
         return newTabs;
       });
     },
-    closeTabsForConn(connId) {
+    closeTabsForConn(connId: string) {
       update((tabs) => {
         const remaining = tabs.filter((t) => t.connId !== connId);
         return remaining.length > 0 ? remaining : [makeTab()];
@@ -284,6 +436,49 @@ export async function saveCachedSchema(
     }));
   } catch (e) {
     // ignore persistence failures
+  }
+}
+
+export async function refreshConnectionSchema(connId: string) {
+  const conn = get(activeConnections).find((c) => c.config.id === connId);
+  if (!conn || conn.schemaLoading) return;
+
+  activeConnections.update((conns) =>
+    conns.map((c) =>
+      c.config.id === connId
+        ? { ...c, schemaLoading: true, schemaError: null }
+        : c,
+    ),
+  );
+
+  try {
+    const tree = await GetSchema(connId);
+    activeConnections.update((conns) =>
+      conns.map((c) =>
+        c.config.id === connId
+          ? { ...c, schema: tree, schemaLoading: false }
+          : c,
+      ),
+    );
+    const hash = JSON.stringify(tree);
+    await saveCachedSchema(connId, tree, hash);
+  } catch (e) {
+    activeConnections.update((conns) =>
+      conns.map((c) =>
+        c.config.id === connId
+          ? { ...c, schemaLoading: false, schemaError: String(e) }
+          : c,
+      ),
+    );
+  }
+}
+
+export async function refreshMissingConnectionSchemas() {
+  const conns = get(activeConnections).filter(
+    (conn) => !conn.schema && !conn.schemaLoading,
+  );
+  for (const conn of conns) {
+    void refreshConnectionSchema(conn.config.id);
   }
 }
 

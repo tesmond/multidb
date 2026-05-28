@@ -388,7 +388,7 @@
           }),
           EditorView.theme({
             '&': { height: '100%' },
-            '.cm-scroller': { fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace", fontSize: '13px', lineHeight: '1.6' },
+            '.cm-scroller': { fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace", fontSize: 'calc(13px * var(--app-font-scale))', lineHeight: '1.6' },
             '.cm-content': { padding: '12px 0' },
           }),
         ],
@@ -476,14 +476,14 @@
   }
 
   .btn-run, .btn-stop {
-    padding: 5px 14px; border-radius: 4px; font-size: 12px;
+    padding: 5px 14px; border-radius: 4px; font-size: calc(12px * var(--app-font-scale));
     cursor: pointer; border: 1px solid transparent; font-weight: 500;
   }
   .btn-run { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn-run:hover { background: var(--accent-hover); }
   .btn-stop { background: var(--error); color: #fff; border-color: var(--error); }
   .btn-stop:hover { opacity: 0.85; }
-  .btn-save { background: var(--accent-secondary, #336fc8); color: #fff; border-color: var(--accent-secondary, #48a868); padding: 5px 14px; border-radius: 4px; font-size: 12px; cursor: pointer; border: 1px solid transparent; font-weight: 500; }
+  .btn-save { background: var(--accent-secondary, #336fc8); color: #fff; border-color: var(--accent-secondary, #48a868); padding: 5px 14px; border-radius: 4px; font-size: calc(12px * var(--app-font-scale)); cursor: pointer; border: 1px solid transparent; font-weight: 500; }
   .btn-save:hover:not(:disabled) { opacity: 0.9; }
   .btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
 
