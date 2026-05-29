@@ -12,6 +12,9 @@
   let settingsOpen = false;
   let fontScaleInput = '100';
   let draggingConnId = '';
+  let showServerGroupDialog = false;
+  let serverGroupTitle = '';
+  let serverGroupError = '';
 
   type NavItem =
     | { kind: 'group'; group: ServerGroup }
@@ -160,12 +163,29 @@
   }
 
   function createServerGroup() {
-    const title = window.prompt('Server group title', 'Server Group');
-    if (title === null) return;
+    serverGroupTitle = '';
+    serverGroupError = '';
+    showServerGroupDialog = true;
+    addMenuOpen = false;
+  }
+
+  function closeServerGroupDialog() {
+    showServerGroupDialog = false;
+    serverGroupTitle = '';
+    serverGroupError = '';
+  }
+
+  function saveServerGroup() {
+    const title = serverGroupTitle.trim();
+    if (!title) {
+      serverGroupError = 'Title is required';
+      return;
+    }
+
     const groupId = addServerGroup(title);
     expandedGroups[groupId] = true;
     expandedGroups = { ...expandedGroups };
-    addMenuOpen = false;
+    closeServerGroupDialog();
   }
 
   function closeFloatingUi() {
@@ -741,6 +761,43 @@
   </div>
 {/if}
 
+{#if showServerGroupDialog}
+  <div class="modal-overlay" role="dialog" aria-modal="true" aria-label="New Server Group">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>New Server Group</h2>
+        <button class="close-btn" on:click={closeServerGroupDialog} aria-label="Close">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-row">
+          <label>Group Title
+            <!-- svelte-ignore a11y-autofocus -->
+            <input
+              type="text"
+              bind:value={serverGroupTitle}
+              placeholder="Production"
+              autocomplete="off"
+              autocapitalize="none"
+              spellcheck="false"
+              autofocus
+              on:keydown={e => e.key === 'Enter' && saveServerGroup()}
+            />
+          </label>
+        </div>
+        {#if serverGroupError}
+          <p class="error">{serverGroupError}</p>
+        {/if}
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" on:click={closeServerGroupDialog}>Cancel</button>
+        <button class="btn-primary" on:click={saveServerGroup}>Create Group</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   .navigator {
     display: flex; flex-direction: column;
@@ -947,4 +1004,52 @@
     padding: 8px 16px;
     border-bottom: 1px solid var(--border);
   }
+
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 320;
+  }
+  .modal {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 420px;
+    max-width: 95vw;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-header h2 { margin: 0; font-size: calc(16px * var(--app-font-scale)); font-weight: 600; }
+  .close-btn {
+    background: none; border: none; color: var(--text-muted);
+    cursor: pointer; font-size: calc(16px * var(--app-font-scale)); padding: 4px 8px;
+  }
+  .close-btn:hover { color: var(--text); }
+  .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+  .form-row { display: flex; flex-direction: column; gap: 4px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: calc(12px * var(--app-font-scale)); color: var(--text-muted); }
+  input {
+    background: var(--bg-input); border: 1px solid var(--border);
+    color: var(--text); padding: 7px 10px; border-radius: 4px;
+    font-size: calc(13px * var(--app-font-scale)); width: 100%; box-sizing: border-box;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  .modal-footer {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 16px 20px; border-top: 1px solid var(--border);
+  }
+  .btn-primary, .btn-secondary {
+    padding: 7px 16px; border-radius: 4px; font-size: calc(13px * var(--app-font-scale));
+    cursor: pointer; border: 1px solid transparent;
+  }
+  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-secondary { background: var(--bg-input); color: var(--text); border-color: var(--border); }
+  .btn-secondary:hover { border-color: var(--accent); }
+  .error { color: var(--error); font-size: calc(12px * var(--app-font-scale)); margin: 0; }
 </style>

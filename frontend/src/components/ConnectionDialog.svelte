@@ -178,7 +178,14 @@
       </div>
       <div class="form-row two-col">
         <label>Username
-          <input type="text" bind:value={form.username} autocomplete="off" />
+          <input
+            type="text"
+            bind:value={form.username}
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            inputmode="text"
+          />
         </label>
         <label>Password
           <input type="password" bind:value={form.password} autocomplete="new-password" />
