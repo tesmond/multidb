@@ -35,6 +35,7 @@ export interface ServerGroup {
 
 const serverGroupsStorageKey = "multidb.serverGroups.v1";
 const fontScaleStorageKey = "multidb.fontScalePercent.v1";
+const connectionOrderStorageKey = "multidb.connectionOrder.v1";
 
 function readStoredServerGroups(): ServerGroup[] {
   if (typeof localStorage === "undefined") return [];
@@ -61,6 +62,34 @@ function readStoredFontScale(): number {
   if (typeof localStorage === "undefined") return 100;
   const stored = Number(localStorage.getItem(fontScaleStorageKey));
   return Number.isFinite(stored) && stored > 0 ? stored : 100;
+}
+
+function readStoredConnectionOrder(): string[] {
+  if (typeof localStorage === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(connectionOrderStorageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === "string");
+  } catch (_) {
+    return [];
+  }
+}
+
+function applyStoredConnectionOrder(connections: ActiveConnection[]): ActiveConnection[] {
+  const order = readStoredConnectionOrder();
+  if (order.length === 0) return connections;
+
+  const rank = new Map(order.map((id, index) => [id, index]));
+  return [...connections].sort((a, b) => {
+    const ai = rank.get(a.config.id);
+    const bi = rank.get(b.config.id);
+    if (ai === undefined && bi === undefined) return 0;
+    if (ai === undefined) return 1;
+    if (bi === undefined) return -1;
+    return ai - bi;
+  });
 }
 
 function clampFontScale(value: number): number {
@@ -92,8 +121,34 @@ fontScalePercent.subscribe((value) => {
   }
 });
 
+activeConnections.subscribe((connections) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(
+    connectionOrderStorageKey,
+    JSON.stringify(connections.map((conn) => conn.config.id)),
+  );
+});
+
 export function setFontScalePercent(value: number) {
   fontScalePercent.set(clampFontScale(value));
+}
+
+export function setActiveConnectionsOrdered(connections: ActiveConnection[]) {
+  activeConnections.set(applyStoredConnectionOrder(connections));
+}
+
+export function upsertActiveConnection(connection: ActiveConnection) {
+  activeConnections.update((connections) => {
+    const index = connections.findIndex(
+      (existing) => existing.config.id === connection.config.id,
+    );
+    if (index === -1) {
+      return [...connections, connection];
+    }
+    const next = [...connections];
+    next[index] = connection;
+    return next;
+  });
 }
 
 export function addServerGroup(title: string) {
@@ -174,6 +229,29 @@ export function moveConnectionInList(
         : placement === "after"
           ? targetIndex + 1
           : targetIndex;
+    next.splice(insertIndex, 0, moved);
+    return next;
+  });
+}
+
+export function moveServerGroup(
+  groupId: string,
+  targetGroupId: string | null,
+  placement: "before" | "after",
+) {
+  serverGroups.update((groups) => {
+    const moved = groups.find((g) => g.id === groupId);
+    if (!moved) return groups;
+
+    const withoutMoved = groups.filter((g) => g.id !== groupId);
+    if (!targetGroupId) return [...withoutMoved, moved];
+
+    const next = [...withoutMoved];
+    const targetIndex = next.findIndex((g) => g.id === targetGroupId);
+    if (targetIndex === -1) return [...withoutMoved, moved];
+
+    const insertIndex =
+      placement === "after" ? targetIndex + 1 : targetIndex;
     next.splice(insertIndex, 0, moved);
     return next;
   });

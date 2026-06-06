@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList } from '../stores/appStore';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup } from '../stores/appStore';
   import type { ActiveConnection, ServerGroup } from '../stores/appStore';
   import { Disconnect, TestConnection, BackupTable, DropTable } from '../../wailsjs/go/main/App';
   import { get } from 'svelte/store';
@@ -12,8 +12,16 @@
   let settingsOpen = false;
   let fontScaleInput = '100';
   let draggingConnId = '';
-  let dragDropCompleted = false;
-  const connectionDragMime = 'application/x-multidb-connection';
+  let draggingGroupId = '';
+  let dropTargetConnId = '';
+  let dropTargetGroupId = '';
+  let dropPlacement: 'before' | 'after' = 'before';
+  let dragCandidate:
+    | { kind: 'conn'; id: string; startX: number; startY: number }
+    | { kind: 'group'; id: string; startX: number; startY: number }
+    | null = null;
+  let pointerDragging = false;
+  let suppressNextClick = false;
   let showServerGroupDialog = false;
   let serverGroupTitle = '';
   let serverGroupError = '';
@@ -204,87 +212,148 @@
     setFontScalePercent(Number(fontScaleInput));
   }
 
-  function startConnDrag(e: DragEvent, connId: string) {
-    draggingConnId = connId;
-    dragDropCompleted = false;
-    if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.dropEffect = 'move';
-      e.dataTransfer.setData(connectionDragMime, connId);
-      e.dataTransfer.setData('text/plain', connId);
+  function shouldIgnorePointerDown(target: EventTarget | null) {
+    const element = target as HTMLElement | null;
+    return !!element?.closest('button, input, textarea, select, a, .conn-actions, .icon-btn, .header-menu, .context-menu');
+  }
+
+  function beginConnPointerDrag(e: MouseEvent, connId: string) {
+    if (e.button !== 0 || shouldIgnorePointerDown(e.target)) return;
+    dragCandidate = { kind: 'conn', id: connId, startX: e.clientX, startY: e.clientY };
+  }
+
+  function beginGroupPointerDrag(e: MouseEvent, groupId: string) {
+    if (e.button !== 0 || shouldIgnorePointerDown(e.target)) return;
+    dragCandidate = { kind: 'group', id: groupId, startX: e.clientX, startY: e.clientY };
+  }
+
+  function clearDropTargets() {
+    dropTargetConnId = '';
+    dropTargetGroupId = '';
+  }
+
+  function updateDropPlacement(element: HTMLElement) {
+    const rect = element.getBoundingClientRect();
+    dropPlacement = window.event instanceof MouseEvent && window.event.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
+  }
+
+  function updatePointerDropTarget(clientX: number, clientY: number) {
+    clearDropTargets();
+    const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    if (!target) return;
+
+    const connLabel = target.closest('.conn-label') as HTMLElement | null;
+    if (draggingConnId && connLabel) {
+      const connId = connLabel.dataset.connId ?? '';
+      if (connId && connId !== draggingConnId) {
+        const rect = connLabel.getBoundingClientRect();
+        dropPlacement = clientY > rect.top + rect.height / 2 ? 'after' : 'before';
+        dropTargetConnId = connId;
+      }
+      return;
+    }
+
+    const groupLabel = target.closest('.group-label') as HTMLElement | null;
+    if (groupLabel) {
+      const groupId = groupLabel.dataset.groupId ?? '';
+      if (!groupId) return;
+
+      if (draggingGroupId) {
+        if (groupId !== draggingGroupId) {
+          const rect = groupLabel.getBoundingClientRect();
+          dropPlacement = clientY > rect.top + rect.height / 2 ? 'after' : 'before';
+          dropTargetGroupId = groupId;
+        }
+      } else if (draggingConnId) {
+        dropTargetGroupId = groupId;
+      }
     }
   }
 
-  function getDraggedConnId(e: DragEvent): string {
-    return e.dataTransfer?.getData(connectionDragMime)
-      || e.dataTransfer?.getData('text/plain')
-      || draggingConnId;
+  function handlePointerMove(e: MouseEvent) {
+    if (!dragCandidate && !pointerDragging) return;
+
+    if (!pointerDragging && dragCandidate) {
+      const movedX = Math.abs(e.clientX - dragCandidate.startX);
+      const movedY = Math.abs(e.clientY - dragCandidate.startY);
+      if (Math.max(movedX, movedY) < 4) return;
+
+      pointerDragging = true;
+      suppressNextClick = true;
+      if (dragCandidate.kind === 'conn') {
+        draggingConnId = dragCandidate.id;
+      } else {
+        draggingGroupId = dragCandidate.id;
+      }
+      document.body.style.cursor = 'grabbing';
+    }
+
+    if (!pointerDragging) return;
+    updatePointerDropTarget(e.clientX, e.clientY);
   }
 
-  function hasConnectionDragData(e: DragEvent): boolean {
-    const types = Array.from(e.dataTransfer?.types ?? []);
-    return draggingConnId !== ''
-      || types.includes(connectionDragMime)
-      || types.includes('text/plain');
-  }
-
-  function allowConnDrop(e: DragEvent) {
-    if (!hasConnectionDragData(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-  }
-
-  function finishConnDrag() {
-    dragDropCompleted = true;
+  function finishPointerDrag() {
+    dragCandidate = null;
+    pointerDragging = false;
     draggingConnId = '';
+    draggingGroupId = '';
+    clearDropTargets();
+    document.body.style.cursor = '';
   }
 
-  function endConnDrag() {
-    setTimeout(() => {
-      if (!dragDropCompleted) draggingConnId = '';
-      dragDropCompleted = false;
-    }, 0);
-  }
+  function handlePointerUp(e: MouseEvent) {
+    if (!dragCandidate && !pointerDragging) return;
 
-  function dropConnOnGroup(e: DragEvent, groupId: string) {
-    e.preventDefault();
-    e.stopPropagation();
-    const connId = getDraggedConnId(e);
-    if (!connId) return;
-    addConnectionToGroup(connId, groupId);
-    expandedGroups[groupId] = true;
-    expandedGroups = { ...expandedGroups };
-    activeServerGroupId.set(groupId);
-    finishConnDrag();
-  }
-
-  function dropConnOnConnection(e: DragEvent, targetConnId: string, groupId?: string) {
-    e.preventDefault();
-    e.stopPropagation();
-    const connId = getDraggedConnId(e);
-    if (!connId || connId === targetConnId) return;
-
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const placement = e.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
-    moveConnectionInList(connId, targetConnId, placement, groupId);
-    if (groupId) {
-      expandedGroups[groupId] = true;
-      expandedGroups = { ...expandedGroups };
-      activeServerGroupId.set(groupId);
+    if (!pointerDragging) {
+      dragCandidate = null;
+      return;
     }
-    finishConnDrag();
+
+    const target = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const connLabel = target?.closest('.conn-label') as HTMLElement | null;
+    const groupLabel = target?.closest('.group-label') as HTMLElement | null;
+    const navContent = target?.closest('.nav-content') as HTMLElement | null;
+
+    if (draggingConnId) {
+      if (connLabel) {
+        const targetConnId = connLabel.dataset.connId ?? '';
+        const targetGroupId = connLabel.dataset.groupId || undefined;
+        if (targetConnId && targetConnId !== draggingConnId) {
+          moveConnectionInList(draggingConnId, targetConnId, dropPlacement, targetGroupId);
+          if (targetGroupId) {
+            expandedGroups[targetGroupId] = true;
+            expandedGroups = { ...expandedGroups };
+            activeServerGroupId.set(targetGroupId);
+          } else {
+            activeServerGroupId.set('');
+          }
+        }
+      } else if (groupLabel) {
+        const targetGroupId = groupLabel.dataset.groupId ?? '';
+        if (targetGroupId) {
+          addConnectionToGroup(draggingConnId, targetGroupId);
+          expandedGroups[targetGroupId] = true;
+          expandedGroups = { ...expandedGroups };
+          activeServerGroupId.set(targetGroupId);
+        }
+      } else if (navContent) {
+        moveConnectionInList(draggingConnId, null, 'end');
+        activeServerGroupId.set('');
+      }
+    } else if (draggingGroupId && groupLabel) {
+      const targetGroupId = groupLabel.dataset.groupId ?? '';
+      if (targetGroupId && targetGroupId !== draggingGroupId) {
+        moveServerGroup(draggingGroupId, targetGroupId, dropPlacement);
+      }
+    }
+
+    finishPointerDrag();
   }
 
-  function dropConnUngrouped(e: DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    const target = e.target as HTMLElement;
-    if (target.closest('.group-label') || target.closest('.conn-label')) return;
-    const connId = getDraggedConnId(e);
-    if (!connId) return;
-    moveConnectionInList(connId, null, 'end');
-    finishConnDrag();
+  function maybeSuppressClick() {
+    if (!suppressNextClick) return false;
+    suppressNextClick = false;
+    return true;
   }
 
   // Context menu state
@@ -410,7 +479,7 @@
   }
 </script>
 
-<svelte:window on:click={handleWindowClick} />
+<svelte:window on:mousemove={handlePointerMove} on:mouseup={handlePointerUp} on:click={handleWindowClick} />
 
 <aside class="navigator">
   <div class="nav-header">
@@ -453,18 +522,22 @@
     class="nav-content"
     role="tree"
     tabindex="-1"
-    on:dragover={allowConnDrop}
-    on:drop={dropConnUngrouped}
   >
     {#each navItems as item (item.kind === 'group' ? `group-${item.group.id}` : `conn-${item.conn.config.id}-${item.groupId ?? 'root'}`)}
       {#if item.kind === 'group'}
         <div class="group-node">
           <div
             class="group-label"
+            data-group-id={item.group.id}
             class:active={$activeServerGroupId === item.group.id}
-            on:click={() => toggleGroup(item.group.id)}
-            on:dragover={allowConnDrop}
-            on:drop={e => dropConnOnGroup(e, item.group.id)}
+            class:drop-before={dropTargetGroupId === item.group.id && dropPlacement === 'before'}
+            class:drop-after={dropTargetGroupId === item.group.id && dropPlacement === 'after'}
+            class:dragging={draggingGroupId === item.group.id}
+            on:mousedown={e => beginGroupPointerDrag(e, item.group.id)}
+            on:click={() => {
+              if (maybeSuppressClick()) return;
+              toggleGroup(item.group.id);
+            }}
             role="treeitem"
             aria-selected={$activeServerGroupId === item.group.id}
             aria-expanded={!!expandedGroups[item.group.id]}
@@ -482,15 +555,19 @@
       <div class="conn-node">
         <div
           class="conn-label"
+          data-conn-id={conn.config.id}
+          data-group-id={item.groupId ?? ''}
           class:selected={$selectedConnId === conn.config.id}
           class:grouped={!!item.groupId}
-          on:click={() => toggleConn(conn.config.id, conn)}
+          class:drop-before={dropTargetConnId === conn.config.id && dropPlacement === 'before'}
+          class:drop-after={dropTargetConnId === conn.config.id && dropPlacement === 'after'}
+          class:dragging={draggingConnId === conn.config.id}
+          on:mousedown={e => beginConnPointerDrag(e, conn.config.id)}
+          on:click={() => {
+            if (maybeSuppressClick()) return;
+            toggleConn(conn.config.id, conn);
+          }}
           on:contextmenu={e => openDatabaseContextMenu(e, conn.config.id)}
-          draggable="true"
-          on:dragstart={e => startConnDrag(e, conn.config.id)}
-          on:dragover={allowConnDrop}
-          on:drop={e => dropConnOnConnection(e, conn.config.id, item.groupId)}
-          on:dragend={endConnDrag}
           role="treeitem" aria-selected={false}
           aria-expanded={!!expanded[conn.config.id]}
           tabindex="0"
@@ -924,25 +1001,44 @@
     background: var(--bg-input);
     text-align: center;
   }
-  .nav-content { flex: 1; overflow-y: auto; padding: 4px 0; }
+  .nav-content { flex: 1; overflow-y: auto; padding: 4px 0 40px; }
 
   .group-label {
     display: flex; align-items: center; gap: 4px;
-    padding: 5px 8px; cursor: pointer; user-select: none;
+    padding: 5px 8px; cursor: grab; user-select: none;
     font-size: calc(13px * var(--app-font-scale)); color: var(--text);
   }
+  .group-label:active { cursor: grabbing; }
+  .group-label.dragging { opacity: 0.6; }
   .group-label:hover,
   .group-label.active { background: var(--bg-hover); }
+  .group-label.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+  .group-label.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
   .group-label:focus { outline: 1px solid var(--accent); }
 
   .conn-label {
     display: flex; align-items: center; gap: 4px;
-    padding: 5px 8px; cursor: pointer; user-select: none;
+    padding: 5px 8px; cursor: grab; user-select: none;
     font-size: calc(13px * var(--app-font-scale)); color: var(--text);
   }
+  .conn-label:active { cursor: grabbing; }
+  .conn-label.dragging { opacity: 0.6; }
+  .drag-handle {
+    flex-shrink: 0;
+    border: 0;
+    background: transparent;
+    padding: 0 2px;
+    color: var(--text-muted);
+    letter-spacing: -1px;
+    cursor: grab;
+    user-select: none;
+  }
+  .drag-handle:active { cursor: grabbing; }
   .conn-label.grouped { padding-left: 24px; }
   .conn-label:hover { background: var(--bg-hover); }
   .conn-label.selected { background: var(--bg-selected); }
+  .conn-label.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+  .conn-label.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
   .conn-label:focus { outline: 1px solid var(--accent); }
   .conn-name {
     display: inline-flex; align-items: baseline; gap: 6px;

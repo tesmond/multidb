@@ -69,6 +69,25 @@ impl AppState {
             }
         }
     }
+
+    pub async fn get_mysql_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::MySqlPool> {
+        match self.connections.get_mysql_pool(conn_id).await {
+            Ok(pool) => Ok(pool),
+            Err(original) => {
+                let store = self.store().await?;
+                let saved = store.list_saved_connections().await?;
+                let cfg = saved
+                    .into_iter()
+                    .find(|cfg| cfg.id == conn_id)
+                    .ok_or_else(|| anyhow!("connection {conn_id:?} not found"))?;
+                self.connections.connect(cfg).await?;
+                self.connections
+                    .get_mysql_pool(conn_id)
+                    .await
+                    .map_err(|err| anyhow!("{original}; reconnect failed: {err}"))
+            }
+        }
+    }
 }
 
 fn history_db_path() -> PathBuf {

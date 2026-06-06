@@ -1,6 +1,9 @@
 use crate::models::ConnectionConfig;
 use anyhow::{anyhow, Context, Result};
-use sqlx::{any::AnyPoolOptions, postgres::PgPoolOptions, AnyPool, PgPool};
+use sqlx::{
+    any::AnyPoolOptions, mysql::MySqlPoolOptions, postgres::PgPoolOptions, AnyPool, MySqlPool,
+    PgPool,
+};
 use std::{
     collections::HashMap,
     net::{TcpStream, ToSocketAddrs},
@@ -14,6 +17,7 @@ use url::Url;
 struct ManagedConnection {
     pool: AnyPool,
     pg_pool: Option<PgPool>,
+    mysql_pool: Option<MySqlPool>,
     config: ConnectionConfig,
     port_forward: Option<Child>,
 }
@@ -55,12 +59,27 @@ impl ConnectionManager {
         } else {
             None
         };
+        let mysql_pool = if effective.driver == "mysql" {
+            Some(
+                MySqlPoolOptions::new()
+                    .max_connections(10)
+                    .min_connections(0)
+                    .connect(&dsn)
+                    .await
+                    .with_context(|| format!("connect mysql {}", cfg.name))?,
+            )
+        } else {
+            None
+        };
 
         let mut inner = self.inner.write().await;
         if let Some(mut old) = inner.remove(&cfg.id) {
             old.pool.close().await;
             if let Some(pg_pool) = old.pg_pool {
                 pg_pool.close().await;
+            }
+            if let Some(mysql_pool) = old.mysql_pool {
+                mysql_pool.close().await;
             }
             kill_port_forward(&mut old.port_forward);
         }
@@ -69,6 +88,7 @@ impl ConnectionManager {
             ManagedConnection {
                 pool,
                 pg_pool,
+                mysql_pool,
                 config: cfg,
                 port_forward,
             },
@@ -108,6 +128,9 @@ impl ConnectionManager {
         if let Some(pg_pool) = conn.pg_pool {
             pg_pool.close().await;
         }
+        if let Some(mysql_pool) = conn.mysql_pool {
+            mysql_pool.close().await;
+        }
         kill_port_forward(&mut conn.port_forward);
         Ok(())
     }
@@ -126,6 +149,14 @@ impl ConnectionManager {
             .get(id)
             .and_then(|conn| conn.pg_pool.clone())
             .ok_or_else(|| anyhow!("postgres connection {id:?} not found"))
+    }
+
+    pub async fn get_mysql_pool(&self, id: &str) -> Result<MySqlPool> {
+        let inner = self.inner.read().await;
+        inner
+            .get(id)
+            .and_then(|conn| conn.mysql_pool.clone())
+            .ok_or_else(|| anyhow!("mysql connection {id:?} not found"))
     }
 
     pub async fn get_config(&self, id: &str) -> Option<ConnectionConfig> {

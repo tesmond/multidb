@@ -15,6 +15,7 @@
         selectedConnId,
         hydrateCachedSchemas,
         refreshMissingConnectionSchemas,
+        setActiveConnectionsOrdered,
     } from "./stores/appStore";
     import {
         ListSavedConnections,
@@ -264,7 +265,7 @@
             try {
                 const saved = await ListSavedConnections();
                 if (mounted && saved && saved.length > 0) {
-                    activeConnections.set(
+                    setActiveConnectionsOrdered(
                         saved.map((cfg) => ({
                             config: cfg,
                             schema: null,

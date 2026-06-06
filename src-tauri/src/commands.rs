@@ -95,6 +95,12 @@ pub async fn execute_query(
             .await
             .map_err(command_err)?;
         queries::execute_postgres(&pool, &query, max_rows, cancel).await
+    } else if cfg.driver == "mysql" {
+        let pool = state
+            .get_mysql_pool_or_reconnect(&conn_id)
+            .await
+            .map_err(command_err)?;
+        queries::execute_mysql(&pool, &query, max_rows, cancel).await
     } else {
         let pool = state
             .get_pool_or_reconnect(&conn_id)
@@ -195,6 +201,33 @@ pub async fn execute_query_streamed(
             }
             Err(err) => Err(err),
         }
+    } else if cfg.driver == "mysql" {
+        match state.get_mysql_pool_or_reconnect(&conn_id).await {
+            Ok(pool) => {
+                if queries::looks_like_row_returning_query(&query) {
+                    stream_mysql_rows(
+                        &app,
+                        &pool,
+                        &query_id,
+                        &query,
+                        max_rows,
+                        cancel.clone(),
+                        start,
+                    )
+                    .await
+                } else {
+                    let result = queries::execute_mysql_non_query(&pool, &query).await;
+                    Ok(QueryStreamDone {
+                        query_id: query_id.clone(),
+                        total_rows: 0,
+                        rows_affected: result.rows_affected,
+                        duration: result.duration,
+                        error: result.error,
+                    })
+                }
+            }
+            Err(err) => Err(err),
+        }
     } else {
         match state.get_pool_or_reconnect(&conn_id).await {
             Ok(pool) => {
@@ -252,6 +285,92 @@ pub async fn execute_query_streamed(
 
     emit_done(&app, done).map_err(command_err)?;
     Ok(())
+}
+
+async fn stream_mysql_rows(
+    app: &AppHandle,
+    pool: &sqlx::MySqlPool,
+    query_id: &str,
+    query: &str,
+    max_rows: usize,
+    cancel: CancellationToken,
+    start: Instant,
+) -> Result<QueryStreamDone> {
+    const FIRST_CHUNK_SIZE: usize = 500;
+    const CHUNK_SIZE: usize = 50_000;
+
+    let mut stream = sqlx::query(query).fetch(pool);
+    let mut chunk = Vec::with_capacity(FIRST_CHUNK_SIZE);
+    let mut total_rows = 0_usize;
+    let mut first_flush = false;
+    let mut emitted_meta = false;
+
+    loop {
+        if total_rows >= max_rows {
+            break;
+        }
+
+        let next = tokio::select! {
+            _ = cancel.cancelled() => {
+                flush_chunk(app, query_id, &mut chunk, total_rows)?;
+                return Ok(QueryStreamDone {
+                    query_id: query_id.to_string(),
+                    total_rows,
+                    rows_affected: 0,
+                    duration: queries::elapsed_ms(start),
+                    error: "query cancelled".to_string(),
+                });
+            }
+            row = stream.next() => row,
+        };
+
+        let Some(row) = next else { break };
+        let row = row?;
+
+        if !emitted_meta {
+            let columns = row
+                .columns()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect();
+            let column_types = row
+                .columns()
+                .iter()
+                .map(|column| column.type_info().name().to_string())
+                .collect();
+            app.emit(
+                "query:meta",
+                QueryStreamMeta {
+                    query_id: query_id.to_string(),
+                    columns,
+                    column_types,
+                },
+            )?;
+            emitted_meta = true;
+        }
+
+        chunk.push(queries::mysql_row_to_json_values(&row)?);
+        total_rows += 1;
+
+        let limit = if first_flush {
+            CHUNK_SIZE
+        } else {
+            FIRST_CHUNK_SIZE
+        };
+        if chunk.len() >= limit {
+            flush_chunk(app, query_id, &mut chunk, total_rows)?;
+            first_flush = true;
+        }
+    }
+
+    flush_chunk(app, query_id, &mut chunk, total_rows)?;
+    Ok(QueryStreamDone {
+        query_id: query_id.to_string(),
+        total_rows,
+        rows_affected: 0,
+        duration: queries::elapsed_ms(start),
+        error: String::new(),
+    })
 }
 
 async fn stream_rows(
