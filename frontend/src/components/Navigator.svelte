@@ -12,6 +12,8 @@
   let settingsOpen = false;
   let fontScaleInput = '100';
   let draggingConnId = '';
+  let dragDropCompleted = false;
+  const connectionDragMime = 'application/x-multidb-connection';
   let showServerGroupDialog = false;
   let serverGroupTitle = '';
   let serverGroupError = '';
@@ -204,26 +206,63 @@
 
   function startConnDrag(e: DragEvent, connId: string) {
     draggingConnId = connId;
-    e.dataTransfer?.setData('text/plain', connId);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    dragDropCompleted = false;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.dropEffect = 'move';
+      e.dataTransfer.setData(connectionDragMime, connId);
+      e.dataTransfer.setData('text/plain', connId);
+    }
+  }
+
+  function getDraggedConnId(e: DragEvent): string {
+    return e.dataTransfer?.getData(connectionDragMime)
+      || e.dataTransfer?.getData('text/plain')
+      || draggingConnId;
+  }
+
+  function hasConnectionDragData(e: DragEvent): boolean {
+    const types = Array.from(e.dataTransfer?.types ?? []);
+    return draggingConnId !== ''
+      || types.includes(connectionDragMime)
+      || types.includes('text/plain');
+  }
+
+  function allowConnDrop(e: DragEvent) {
+    if (!hasConnectionDragData(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  }
+
+  function finishConnDrag() {
+    dragDropCompleted = true;
+    draggingConnId = '';
+  }
+
+  function endConnDrag() {
+    setTimeout(() => {
+      if (!dragDropCompleted) draggingConnId = '';
+      dragDropCompleted = false;
+    }, 0);
   }
 
   function dropConnOnGroup(e: DragEvent, groupId: string) {
     e.preventDefault();
     e.stopPropagation();
-    const connId = e.dataTransfer?.getData('text/plain') || draggingConnId;
+    const connId = getDraggedConnId(e);
     if (!connId) return;
     addConnectionToGroup(connId, groupId);
     expandedGroups[groupId] = true;
     expandedGroups = { ...expandedGroups };
     activeServerGroupId.set(groupId);
-    draggingConnId = '';
+    finishConnDrag();
   }
 
   function dropConnOnConnection(e: DragEvent, targetConnId: string, groupId?: string) {
     e.preventDefault();
     e.stopPropagation();
-    const connId = e.dataTransfer?.getData('text/plain') || draggingConnId;
+    const connId = getDraggedConnId(e);
     if (!connId || connId === targetConnId) return;
 
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -234,16 +273,18 @@
       expandedGroups = { ...expandedGroups };
       activeServerGroupId.set(groupId);
     }
-    draggingConnId = '';
+    finishConnDrag();
   }
 
   function dropConnUngrouped(e: DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
     const target = e.target as HTMLElement;
     if (target.closest('.group-label') || target.closest('.conn-label')) return;
-    const connId = e.dataTransfer?.getData('text/plain') || draggingConnId;
+    const connId = getDraggedConnId(e);
     if (!connId) return;
     moveConnectionInList(connId, null, 'end');
-    draggingConnId = '';
+    finishConnDrag();
   }
 
   // Context menu state
@@ -412,7 +453,7 @@
     class="nav-content"
     role="tree"
     tabindex="-1"
-    on:dragover={e => e.preventDefault()}
+    on:dragover={allowConnDrop}
     on:drop={dropConnUngrouped}
   >
     {#each navItems as item (item.kind === 'group' ? `group-${item.group.id}` : `conn-${item.conn.config.id}-${item.groupId ?? 'root'}`)}
@@ -422,7 +463,7 @@
             class="group-label"
             class:active={$activeServerGroupId === item.group.id}
             on:click={() => toggleGroup(item.group.id)}
-            on:dragover={e => e.preventDefault()}
+            on:dragover={allowConnDrop}
             on:drop={e => dropConnOnGroup(e, item.group.id)}
             role="treeitem"
             aria-selected={$activeServerGroupId === item.group.id}
@@ -447,9 +488,9 @@
           on:contextmenu={e => openDatabaseContextMenu(e, conn.config.id)}
           draggable="true"
           on:dragstart={e => startConnDrag(e, conn.config.id)}
-          on:dragover={e => e.preventDefault()}
+          on:dragover={allowConnDrop}
           on:drop={e => dropConnOnConnection(e, conn.config.id, item.groupId)}
-          on:dragend={() => (draggingConnId = '')}
+          on:dragend={endConnDrag}
           role="treeitem" aria-selected={false}
           aria-expanded={!!expanded[conn.config.id]}
           tabindex="0"

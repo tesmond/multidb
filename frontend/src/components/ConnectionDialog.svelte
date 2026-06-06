@@ -69,6 +69,26 @@
     }
   }
 
+  function connectionTargetChanged(previous: ConnectionConfig | null, next: ConnectionConfig): boolean {
+    if (!previous) return true;
+    const keys: (keyof ConnectionConfig)[] = [
+      'driver',
+      'host',
+      'port',
+      'username',
+      'password',
+      'database',
+      'dsn',
+      'useKubePortForward',
+      'kubeContext',
+      'kubeNamespace',
+      'kubeResource',
+      'kubeLocalPort',
+      'kubeRemotePort',
+    ];
+    return keys.some((key) => previous[key] !== next[key]);
+  }
+
   async function handleTest() {
     testResult = '';
     testError = '';
@@ -88,11 +108,20 @@
     saving = true;
     testError = '';
     try {
+      const previous = $editingConnection ? { ...$editingConnection } : null;
+      const shouldRefreshSchema = connectionTargetChanged(previous, form);
       await SaveAndConnect(form);
       activeConnections.update(conns => {
         const exists = conns.find(c => c.config.id === form.id);
         if (exists) {
-          return conns.map(c => c.config.id === form.id ? { config: form, schema: null, schemaLoading: false, schemaError: null } : c);
+          return conns.map(c => c.config.id === form.id
+            ? {
+                config: { ...form },
+                schema: shouldRefreshSchema ? null : c.schema,
+                schemaLoading: shouldRefreshSchema ? false : c.schemaLoading,
+                schemaError: shouldRefreshSchema ? null : c.schemaError,
+              }
+            : c);
         }
         return [...conns, { config: { ...form }, schema: null, schemaLoading: false, schemaError: null }];
       });
@@ -103,7 +132,7 @@
         addConnectionToGroup(form.id, $activeServerGroupId);
       }
       statusMessage.set(`Connected to ${form.name}`);
-      void refreshConnectionSchema(form.id);
+      if (shouldRefreshSchema) void refreshConnectionSchema(form.id);
       showConnectionDialog.set(false);
     } catch (e: any) {
       testError = String(e);
