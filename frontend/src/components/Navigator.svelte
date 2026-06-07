@@ -1,7 +1,7 @@
 <script lang="ts">
   import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup } from '../stores/appStore';
   import type { ActiveConnection, ServerGroup } from '../stores/appStore';
-  import { Disconnect, TestConnection, BackupTable, DropTable } from '../../wailsjs/go/main/App';
+  import { Disconnect, TestConnection, BackupTable, DropTable } from '../../tauri/gen/main/App';
   import { get } from 'svelte/store';
 
   // Expandable node state

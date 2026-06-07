@@ -63,7 +63,7 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 - `src-tauri/src/history.rs`: local metadata persistence in `history.db`
 - `src-tauri/src/backup.rs`: table backup, import, pg_dump import, and drop workflows
 - `frontend/src`: Svelte UI components and stores
-- `frontend/wailsjs`: compatibility shim mapping the previous Wails-style frontend calls to Tauri commands
+- `src-tauri/gen/`: Tauri-generated frontend bindings (auto-generated during build)
 - `docs/rust-tauri-migration-plan.md`: migration inventory and follow-up hardening plan
 
 ## Prerequisites

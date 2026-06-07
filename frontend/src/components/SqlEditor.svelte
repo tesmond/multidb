@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { tabs, activeConnections, selectedConnId, statusMessage, outputTab, requestSchemaRefresh, extractFirstTableName } from '../stores/appStore';
-  import { ExecuteQueryStreamed, CancelQuery } from '../../wailsjs/go/main/App';
-  import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
+  import { ExecuteQueryStreamed, CancelQuery } from '../../tauri/gen/main/App';
+  import { EventsOn, EventsOff } from '../../tauri/runtime/runtime';
   import { get } from 'svelte/store';
   import SaveQueryDialog from './SaveQueryDialog.svelte';
 
@@ -207,7 +207,7 @@
 
     // Rendezvous state: finalize only once BOTH the done signal has arrived
     // AND all expected rows have been received. This handles the case where
-    // Wails sends query:done and the last query:chunk as separate WebSocket
+    // Tauri sends query:done and the last query:chunk as separate WebSocket
     // frames (separate macrotasks) that can arrive in either order.
     let pendingTotalRows = -1;  // -1 = done not yet received
     let pendingDuration = 0;
@@ -336,7 +336,7 @@
     }
 
     try {
-      const app = await import('../../wailsjs/go/main/App') as any;
+      const app = await import('../../tauri/gen/main/App') as any;
       await app.SaveQuery(connId, title, sql);
       statusMessage.set(`Query saved as "${title}"`);
       // Dispatch an event to refresh the saved queries list

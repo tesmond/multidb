@@ -4,8 +4,8 @@ import type {
   schema,
   history,
   main,
-} from "../../wailsjs/go/models";
-import { GetSchema, LoadSchema, SaveSchema } from "../../wailsjs/go/main/App";
+} from "../../tauri/gen/models";
+import { GetSchema, LoadSchema, SaveSchema } from "../../tauri/gen/main/App";
 
 // -----------------------------------------------------------------------
 // Connection state

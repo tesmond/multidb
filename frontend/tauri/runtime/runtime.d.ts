@@ -1,11 +1,9 @@
 /*
- _       __      _ __
-| |     / /___ _(_) /____
-| | /| / / __ `/ / / ___/
-| |/ |/ / /_/ / / (__  )
-|__/|__/\__,_/_/_/____/
-The electron alternative for Go
-(c) Lea Anthony 2019-present
+Tauri API bindings for the Tauri webview runtime.
+
+This file provides TypeScript declarations for interacting with
+the Tauri backend from frontend JavaScript/TypeScript code.
+https://v2.tauri.app
 */
 
 export interface Position {

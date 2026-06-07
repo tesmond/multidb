@@ -20,7 +20,7 @@
     import {
         ListSavedConnections,
         GetQueryHistory,
-    } from "../wailsjs/go/main/App";
+    } from "../tauri/gen/main/App";
     import { get } from "svelte/store";
 
     // Tab context menu state

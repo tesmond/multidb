@@ -1,5 +1,5 @@
-// Mock Wails runtime before any store imports
-vi.mock('../../wailsjs/go/models', () => ({
+// Mock Tauri bindings before any store imports
+vi.mock('../../tauri/gen/models', () => ({
   connections: { ConnectionConfig: class {} },
   schema: { SchemaTree: class {} },
   history: { QueryRecord: class {} },

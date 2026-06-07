@@ -6,7 +6,7 @@
   $: activeTabConnId = $activeTab?.connId ?? '';
   import ResultsGrid from './ResultsGrid.svelte';
   import EditSavedQueryTitleDialog from './EditSavedQueryTitleDialog.svelte';
-  import { GetQueryHistoryByConnID, SaveAndConnect, ClearQueryHistoryByConnID, ClearQueryHistory, GetTablePrimaryKeys } from '../../wailsjs/go/main/App';
+  import { GetQueryHistoryByConnID, SaveAndConnect, ClearQueryHistoryByConnID, ClearQueryHistory, GetTablePrimaryKeys } from '../../tauri/gen/main/App';
   import { get } from 'svelte/store';
 
   // ─── Simple SELECT detection ──────────────────────────────────────────────────
@@ -189,7 +189,7 @@
     const connId = $activeTab?.connId ?? get(selectedConnId);
     if (connId) {
       try {
-        const app = await import('../../wailsjs/go/main/App') as any;
+        const app = await import('../../tauri/gen/main/App') as any;
         const saved = await app.GetSavedQueries(connId);
         connectionSavedQueries = saved || [];
         hasSavedQueries = (saved?.length ?? 0) > 0;
@@ -250,7 +250,7 @@
 
     if (!isActive) {
       try {
-        const { ListSavedConnections } = await import('../../wailsjs/go/main/App');
+        const { ListSavedConnections } = await import('../../tauri/gen/main/App');
         const savedConns = await ListSavedConnections();
         const savedConn = savedConns.find(c => c.id === connId);
 
@@ -288,7 +288,7 @@
         // We need to get the saved connection config
         // For now, let's assume we can get it from somewhere
         // Actually, let me check if we can get saved connections
-        const { ListSavedConnections } = await import('../../wailsjs/go/main/App');
+        const { ListSavedConnections } = await import('../../tauri/gen/main/App');
         const savedConns = await ListSavedConnections();
         const savedConn = savedConns.find(c => c.id === connId);
 
@@ -323,7 +323,7 @@
     if (e) e.stopPropagation();
     if (!contextMenu || contextMenu.type !== 'saved' || !contextMenu.itemId) return;
     try {
-      const app = await import('../../wailsjs/go/main/App') as any;
+      const app = await import('../../tauri/gen/main/App') as any;
       await app.DeleteSavedQuery(contextMenu.itemId);
       await loadSavedQueries();
     } catch (err) {
@@ -343,7 +343,7 @@
     if (!newTitle || newTitle === currentTitle) return;
 
     try {
-      const app = await import('../../wailsjs/go/main/App') as any;
+      const app = await import('../../tauri/gen/main/App') as any;
       await app.UpdateSavedQueryTitle(savedId, newTitle);
       await loadSavedQueries();
     } catch (e) {
