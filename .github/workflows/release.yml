@@ -1,8 +1,5 @@
 name: Release
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 on:
   push:
     tags:
@@ -34,7 +31,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
@@ -47,7 +44,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
 
@@ -68,7 +65,7 @@ jobs:
         run: npm run build
 
       - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: src-tauri/target/release/bundle/**/*
@@ -78,16 +75,61 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
 
-      - name: Publish release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/**/*
-          generate_release_notes: true
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          while IFS= read -r -d '' file; do
+            cp "$file" release-assets/
+          done < <(
+            find dist -type f \
+              \( \
+                -iname '*.exe' -o \
+                -iname '*.msi' -o \
+                -iname '*.dmg' -o \
+                -iname '*.pkg' -o \
+                -iname '*.appimage' -o \
+                -iname '*.deb' -o \
+                -iname '*.rpm' -o \
+                -iname '*.zip' -o \
+                -iname '*.tar.gz' \
+              \) \
+              ! -iname '*.sig' \
+              -print0
+          )
+
+          echo "Collected release assets:"
+          ls -lah release-assets
+
+          if ! find release-assets -maxdepth 1 -type f | grep -q .; then
+            echo 'No release assets found to publish.'
+            exit 1
+          fi
+
+      - name: Create release if missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists."
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes
+          fi
+
+      - name: Upload release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
