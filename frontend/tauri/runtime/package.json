@@ -1,0 +1,23 @@
+{
+  "name": "@tauri-apps/api",
+  "version": "2.0.0",
+  "description": "Tauri JavaScript runtime library",
+  "main": "runtime.js",
+  "types": "runtime.d.ts",
+  "scripts": {
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tauri-apps/tauri.git"
+  },
+  "keywords": [
+    "Tauri",
+    "Javascript",
+    "Rust"
+  ],
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/tauri-apps/tauri/issues"
+  },
+  "homepage": "https://v2.tauri.app"
+}

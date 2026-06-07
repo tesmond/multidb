@@ -4,8 +4,8 @@ import type {
   schema,
   history,
   main,
-} from "../../wailsjs/go/models";
-import { GetSchema, LoadSchema, SaveSchema } from "../../wailsjs/go/main/App";
+} from "../../tauri/gen/models";
+import { GetSchema, LoadSchema, SaveSchema } from "../../tauri/gen/main/App";
 
 // -----------------------------------------------------------------------
 // Connection state
@@ -35,6 +35,7 @@ export interface ServerGroup {
 
 const serverGroupsStorageKey = "multidb.serverGroups.v1";
 const fontScaleStorageKey = "multidb.fontScalePercent.v1";
+const connectionOrderStorageKey = "multidb.connectionOrder.v1";
 
 function readStoredServerGroups(): ServerGroup[] {
   if (typeof localStorage === "undefined") return [];
@@ -61,6 +62,34 @@ function readStoredFontScale(): number {
   if (typeof localStorage === "undefined") return 100;
   const stored = Number(localStorage.getItem(fontScaleStorageKey));
   return Number.isFinite(stored) && stored > 0 ? stored : 100;
+}
+
+function readStoredConnectionOrder(): string[] {
+  if (typeof localStorage === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(connectionOrderStorageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === "string");
+  } catch (_) {
+    return [];
+  }
+}
+
+function applyStoredConnectionOrder(connections: ActiveConnection[]): ActiveConnection[] {
+  const order = readStoredConnectionOrder();
+  if (order.length === 0) return connections;
+
+  const rank = new Map(order.map((id, index) => [id, index]));
+  return [...connections].sort((a, b) => {
+    const ai = rank.get(a.config.id);
+    const bi = rank.get(b.config.id);
+    if (ai === undefined && bi === undefined) return 0;
+    if (ai === undefined) return 1;
+    if (bi === undefined) return -1;
+    return ai - bi;
+  });
 }
 
 function clampFontScale(value: number): number {
@@ -92,8 +121,34 @@ fontScalePercent.subscribe((value) => {
   }
 });
 
+activeConnections.subscribe((connections) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(
+    connectionOrderStorageKey,
+    JSON.stringify(connections.map((conn) => conn.config.id)),
+  );
+});
+
 export function setFontScalePercent(value: number) {
   fontScalePercent.set(clampFontScale(value));
+}
+
+export function setActiveConnectionsOrdered(connections: ActiveConnection[]) {
+  activeConnections.set(applyStoredConnectionOrder(connections));
+}
+
+export function upsertActiveConnection(connection: ActiveConnection) {
+  activeConnections.update((connections) => {
+    const index = connections.findIndex(
+      (existing) => existing.config.id === connection.config.id,
+    );
+    if (index === -1) {
+      return [...connections, connection];
+    }
+    const next = [...connections];
+    next[index] = connection;
+    return next;
+  });
 }
 
 export function addServerGroup(title: string) {
@@ -174,6 +229,29 @@ export function moveConnectionInList(
         : placement === "after"
           ? targetIndex + 1
           : targetIndex;
+    next.splice(insertIndex, 0, moved);
+    return next;
+  });
+}
+
+export function moveServerGroup(
+  groupId: string,
+  targetGroupId: string | null,
+  placement: "before" | "after",
+) {
+  serverGroups.update((groups) => {
+    const moved = groups.find((g) => g.id === groupId);
+    if (!moved) return groups;
+
+    const withoutMoved = groups.filter((g) => g.id !== groupId);
+    if (!targetGroupId) return [...withoutMoved, moved];
+
+    const next = [...withoutMoved];
+    const targetIndex = next.findIndex((g) => g.id === targetGroupId);
+    if (targetIndex === -1) return [...withoutMoved, moved];
+
+    const insertIndex =
+      placement === "after" ? targetIndex + 1 : targetIndex;
     next.splice(insertIndex, 0, moved);
     return next;
   });
@@ -327,8 +405,6 @@ export const outputTab = writable<"results" | "messages" | "history" | "saved">(
 );
 
 export const statusMessage = writable("Ready");
-export const queryHistoryStore = writable<QueryRecord[]>([]);
-
 // -----------------------------------------------------------------------
 // Schema refresh signal
 // -----------------------------------------------------------------------
@@ -364,20 +440,11 @@ export function extractFirstTableName(sql: string): string | null {
 // Schema cache persistence
 // -----------------------------------------------------------------------
 
-// Simple in-memory cache (mirrors persisted cache on disk via backend)
-// keyed by connection ID.
-export const schemaCache = writable<
-  Record<
-    string,
-    { schema: SchemaTree | null; lastRefreshedAt: string; hash: string }
-  >
->({});
-
 /**
  * loadCachedSchema
  * - Calls backend LoadSchema(connId)
- * - Accepts either a raw JSON string or an object { schemaJson, lastRefreshedAt, hash }
- * - Updates both `schemaCache` and `activeConnections` so the UI can render immediately
+ * - Accepts either a raw JSON string or an object { schemaJson }
+ * - Updates `activeConnections` so the UI can render immediately
  */
 export async function loadCachedSchema(connId: string) {
   try {
@@ -389,32 +456,11 @@ export async function loadCachedSchema(connId: string) {
     if (!schemaJson) return;
 
     const schema = JSON.parse(schemaJson) as SchemaTree;
-    const lastRefreshedAt: string = res.lastRefreshedAt ?? res.last_refreshed_at ?? new Date().toISOString();
-    const hash: string = res.hash ?? '';
-
-    schemaCache.update((cache) => ({
-      ...cache,
-      [connId]: { schema, lastRefreshedAt, hash },
-    }));
     activeConnections.update((conns) =>
       conns.map((c) => (c.config.id === connId ? { ...c, schema } : c)),
     );
   } catch (e) {
     // Missing cache or parse failure — ignore
-  }
-}
-
-/**
- * hydrateCachedSchemas
- * - Iterates activeConnections and loads cached schema for each
- * - Sequential to avoid backend overload on startup; can be parallelised later
- */
-export async function hydrateCachedSchemas() {
-  const conns = get(activeConnections);
-  for (const conn of conns) {
-    // loadCachedSchema already swallows errors
-    // eslint-disable-next-line no-await-in-loop
-    await loadCachedSchema(conn.config.id);
   }
 }
 
@@ -425,15 +471,10 @@ export async function hydrateCachedSchemas() {
 export async function saveCachedSchema(
   connId: string,
   schema: SchemaTree,
-  hash: string,
 ) {
   try {
     const schemaJson = JSON.stringify(schema);
-    await SaveSchema(connId, schemaJson, hash);
-    schemaCache.update((cache) => ({
-      ...cache,
-      [connId]: { schema, lastRefreshedAt: new Date().toISOString(), hash },
-    }));
+    await SaveSchema(connId, schemaJson, "");
   } catch (e) {
     // ignore persistence failures
   }
@@ -460,8 +501,7 @@ export async function refreshConnectionSchema(connId: string) {
           : c,
       ),
     );
-    const hash = JSON.stringify(tree);
-    await saveCachedSchema(connId, tree, hash);
+    await saveCachedSchema(connId, tree);
   } catch (e) {
     activeConnections.update((conns) =>
       conns.map((c) =>
@@ -473,23 +513,13 @@ export async function refreshConnectionSchema(connId: string) {
   }
 }
 
-export async function refreshMissingConnectionSchemas() {
-  const conns = get(activeConnections).filter(
-    (conn) => !conn.schema && !conn.schemaLoading,
-  );
-  for (const conn of conns) {
-    void refreshConnectionSchema(conn.config.id);
-  }
-}
-
 /**
  * deleteCachedSchema
- * - Remove entry from local cache (backend deletion not implemented here)
+ * - Remove schema from local state; backend deletion is handled when a saved
+ *   connection is disconnected.
  */
 export async function deleteCachedSchema(connId: string) {
-  schemaCache.update((cache) => {
-    const next = { ...cache };
-    delete next[connId];
-    return next;
-  });
+  activeConnections.update((conns) =>
+    conns.map((c) => (c.config.id === connId ? { ...c, schema: null } : c)),
+  );
 }

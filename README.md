@@ -2,127 +2,128 @@
 
 ![image](mascot.png)
 
+`multidb` is a desktop SQL client for working across multiple database engines with one UI for querying, schema browsing, table backup/import workflows, and query history.
 
-`multidb` is a desktop SQL client. It is designed for working across multiple database engines with one UI for querying,
-schema browsing, table backup/import workflows, and query history.
-
-I used pgadmin and MySQL Workbench for years, they both randomly crashed, or if I had to reset my VPN all the DB connections were broken and I would need to restart the app. Each load time took tens of seconds, when all I needed was to run a quick SQL query to validate data or debug an issue. Not only were they slow to load and took up lots of memory they also started moving away from my use case of running SQL queries and exporting data for quick reports or debugging. Even exploring the space I struggled to find any useful alternative. DBeaver is probably the best, but it still is sluggish to load and with all its functionality the query window is a little less intuitive to access.
-
-So I thought I would finally roll my own. This is a simple SQL explorer, massively paired down compared to pgamin, DBeaver or MySQL Workbench, but it loads fast, uses little memory and can handle displaying large tables quickly.
+I used pgAdmin and MySQL Workbench for years, and both could be slow to load or fragile after VPN resets. `multidb` is intentionally much smaller than tools like pgAdmin, DBeaver, or MySQL Workbench: it focuses on fast startup, low memory use, quick SQL execution, exporting data, and browsing schemas without a lot of surrounding weight.
 
 ## Screenshot
 
 ![image](screenshot.png)
 
-
 ## Features
 
 - Multi-database connectivity:
-	- MySQL
-	- PostgreSQL
-	- SQLite
+  - MySQL
+  - PostgreSQL
+  - SQLite
 - Connection management:
-	- Save, edit, test, and remove connections
-	- Optional Kubernetes port-forward support for database access
-	- Per-connection tab color + optional black tab text
-	- Connection color swatch shown in the left navigator
+  - Save, edit, test, and remove connections
+  - Optional Kubernetes port-forward support for database access
+  - Per-connection tab color and optional black tab text
+  - Connection color swatch shown in the left navigator
 - SQL editor experience:
-	- CodeMirror-based SQL editor
-	- Connection-aware SQL dialect switching
-	- Schema-driven SQL autocomplete
-	- Query cancellation support
+  - CodeMirror-based SQL editor
+  - Connection-aware SQL dialect switching
+  - Schema-driven SQL autocomplete
+  - Query cancellation support
 - Query execution:
-	- Streamed query results for large datasets
-	- Virtualized results grid for performance
-	- Column sorting and copy/select behavior
-	- CSV export support
+  - Streamed query results for large datasets
+  - Virtualized results grid for performance
+  - Column sorting and copy/select behavior
+  - CSV export support
 - Schema explorer:
-	- Expandable navigation tree for schemas/tables/views/indexes
-	- Context menu actions (view table, refresh schema, backup, drop, import)
+  - Expandable navigation tree for schemas, tables, views, indexes, and columns
+  - Context menu actions for viewing tables, refreshing schema, backups, drops, and imports
 - Backup and import:
-	- Table backup generation
-	- Import from zipped SQL and pg_dump formats
+  - Table backup generation
+  - Import from zipped SQL backup archives and PostgreSQL dump files
 - Query productivity:
-	- Per-connection query history
-	- Saved queries with title editing
-	- Quick re-open of saved/history queries into new tabs
+  - Per-connection query history
+  - Saved queries with title editing
+  - Quick re-open of saved/history queries into new tabs
 - Persistence:
-	- Local SQLite metadata store for saved connections, history, saved queries, and schema cache
+  - Local SQLite metadata store for saved connections, history, saved queries, and schema cache
 
 ## Tech Stack
 
-- Desktop framework: Wails v2
-- Backend: Go
+- Desktop framework: Tauri 2
+- Backend: Rust
 - Frontend: Svelte + TypeScript + Vite
 - Editor: CodeMirror 6
-- Database drivers:
-	- `github.com/go-sql-driver/mysql`
-	- `github.com/jackc/pgx/v5`
-	- `modernc.org/sqlite`
+- Database layer:
+  - `sqlx` with MySQL, PostgreSQL, and SQLite support
+  - Local metadata stored in SQLite
 
 ## Project Structure
 
-- `main.go`: Wails app bootstrap and runtime options
-- `app.go`: Main backend API bound to the frontend
-- `backend/connections`: Connection manager and DSN logic
-- `backend/queries`: Query execution and streaming logic
-- `backend/schema`: Schema inspection
-- `backend/history`: Local persistence (history.db)
+- `src-tauri`: Tauri app, Rust backend, command handlers, and packaging config
+- `src-tauri/src/connections.rs`: connection manager, DSN logic, and Kubernetes port-forwarding
+- `src-tauri/src/queries.rs`: query execution, cancellation, result conversion, and non-query handling
+- `src-tauri/src/schema.rs`: schema and primary-key inspection
+- `src-tauri/src/history.rs`: local metadata persistence in `history.db`
+- `src-tauri/src/backup.rs`: table backup, import, pg_dump import, and drop workflows
 - `frontend/src`: Svelte UI components and stores
+- `src-tauri/gen/`: Tauri-generated frontend bindings (auto-generated during build)
+- `docs/rust-tauri-migration-plan.md`: migration inventory and follow-up hardening plan
 
 ## Prerequisites
 
-- Go (module targets Go `1.25.x`)
+- Rust stable
 - Node.js and npm
-- Wails CLI v2
+- Platform dependencies for Tauri 2
 - Optional tools based on workflow:
-	- `kubectl` for Kubernetes port-forwarded connections
-	- `pg_restore` / PostgreSQL client tools for pg_dump import flows
+  - `kubectl` for Kubernetes port-forwarded connections
 
 ## Development
 
-Install frontend dependencies:
+Install dependencies:
 
 ```bash
+npm install
 cd frontend
 npm install
 cd ..
 ```
 
-Run in live development mode:
+Run the desktop app in development mode:
 
 ```bash
-wails dev
+npm run dev
 ```
 
-This starts the desktop app with Vite hot reload for frontend updates.
+This starts the Tauri desktop app and the Vite dev server for frontend updates.
 
 ## Build
 
 Create a production desktop build:
 
 ```bash
-wails build
+npm run build
 ```
 
-## Testing
+## Testing And Checks
 
-Run backend tests:
+Run Rust checks:
 
 ```bash
-go test ./backend/...
+npm run rust:check
 ```
 
-Run frontend checks/tests from `frontend/` as needed:
+Run frontend checks:
 
 ```bash
-npm run check
+npm run frontend:check
+```
+
+Build the frontend:
+
+```bash
+npm run frontend:build
 ```
 
 ## Data Storage
 
-Application metadata is stored in a local SQLite database (`history.db`) under the
-user config directory in `multidb/`.
+Application metadata is stored in a local SQLite database (`history.db`) under the user config directory in `multidb/`.
 
 Stored data includes:
 
@@ -135,5 +136,6 @@ Stored data includes:
 
 Desktop icon assets are committed for packaging:
 
-- macOS icon: `resources/appicon.icns`
-- Windows icon: `resources/appicon.ico`
+- macOS icon: `build/appicon.icns`
+- Windows icon: `build/appicon.ico`
+- PNG icon: `build/icon.png`

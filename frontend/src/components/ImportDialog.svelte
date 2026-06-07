@@ -1,6 +1,6 @@
 <script lang="ts">
   import { showImportDialog, importDialogConnId, statusMessage, requestSchemaRefresh } from '../stores/appStore';
-  import { ImportTable, SelectImportFile } from '../../wailsjs/go/main/App';
+  import { ImportTable, SelectImportFile } from '../../tauri/gen/main/App';
 
   let importType = 'zipped-sql';
   let sourcePath = '';

@@ -1,11 +1,11 @@
 // Shared CSV export utilities used by ResultsGrid and StatusBar.
 //
-// On Wails/macOS WKWebView, blob URL downloads via simulated anchor clicks do
-// not work.  All save operations are therefore routed through the native Wails
+// On macOS WKWebView, blob URL downloads via simulated anchor clicks do
+// not work.  All save operations are therefore routed through the native Tauri
 // SaveCSV backend call which opens a system save-file dialog and writes the
-// file from Go.
+// file from Rust.
 
-import { SaveCSV } from "../../wailsjs/go/main/App";
+import { SaveCSV } from "../../tauri/gen/main/App";
 
 export function escapeCSV(value: any): string {
   if (value === null || value === undefined) return "";

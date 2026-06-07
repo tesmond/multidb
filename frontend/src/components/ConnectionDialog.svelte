@@ -1,7 +1,7 @@
 <script lang="ts">
   import { showConnectionDialog, editingConnection, activeConnections, selectedConnId, statusMessage, tabs, refreshConnectionSchema, activeServerGroupId, addConnectionToGroup } from '../stores/appStore';
   import type { ConnectionConfig } from '../stores/appStore';
-  import { SaveAndConnect, TestConnection } from '../../wailsjs/go/main/App';
+  import { SaveAndConnect, SelectSqliteFile, TestConnection } from '../../tauri/gen/main/App';
 
   let form: ConnectionConfig = emptyForm();
   let testing = false;
@@ -69,9 +69,64 @@
     }
   }
 
+  function inferConnectionName(path: string): string {
+    const filename = path.split(/[\\/]/).pop() ?? path;
+    const trimmed = filename.trim();
+    return trimmed.replace(/\.(sqlite|sqlite3|db|db3)$/i, '') || trimmed;
+  }
+
+  function validateForm(requireName: boolean): string {
+    if (requireName && !form.name.trim()) return 'Name is required';
+    if (form.driver === 'sqlite' && !form.database.trim()) {
+      return 'SQLite database path is required';
+    }
+    return '';
+  }
+
+  async function browseSqliteFile() {
+    testResult = '';
+    testError = '';
+    try {
+      const selected = await SelectSqliteFile();
+      if (!selected) return;
+
+      form.database = selected;
+      if (!form.name.trim()) {
+        form.name = inferConnectionName(selected);
+      }
+    } catch (e: any) {
+      testError = String(e);
+    }
+  }
+
+  function connectionTargetChanged(previous: ConnectionConfig | null, next: ConnectionConfig): boolean {
+    if (!previous) return true;
+    const keys: (keyof ConnectionConfig)[] = [
+      'driver',
+      'host',
+      'port',
+      'username',
+      'password',
+      'database',
+      'dsn',
+      'useKubePortForward',
+      'kubeContext',
+      'kubeNamespace',
+      'kubeResource',
+      'kubeLocalPort',
+      'kubeRemotePort',
+    ];
+    return keys.some((key) => previous[key] !== next[key]);
+  }
+
   async function handleTest() {
     testResult = '';
     testError = '';
+    const validationError = validateForm(false);
+    if (validationError) {
+      testError = validationError;
+      return;
+    }
     testing = true;
     try {
       await TestConnection(form);
@@ -84,15 +139,25 @@
   }
 
   async function handleSave() {
-    if (!form.name) { testError = 'Name is required'; return; }
+    const validationError = validateForm(true);
+    if (validationError) { testError = validationError; return; }
     saving = true;
     testError = '';
     try {
+      const previous = $editingConnection ? { ...$editingConnection } : null;
+      const shouldRefreshSchema = connectionTargetChanged(previous, form);
       await SaveAndConnect(form);
       activeConnections.update(conns => {
         const exists = conns.find(c => c.config.id === form.id);
         if (exists) {
-          return conns.map(c => c.config.id === form.id ? { config: form, schema: null, schemaLoading: false, schemaError: null } : c);
+          return conns.map(c => c.config.id === form.id
+            ? {
+                config: { ...form },
+                schema: shouldRefreshSchema ? null : c.schema,
+                schemaLoading: shouldRefreshSchema ? false : c.schemaLoading,
+                schemaError: shouldRefreshSchema ? null : c.schemaError,
+              }
+            : c);
         }
         return [...conns, { config: { ...form }, schema: null, schemaLoading: false, schemaError: null }];
       });
@@ -103,7 +168,7 @@
         addConnectionToGroup(form.id, $activeServerGroupId);
       }
       statusMessage.set(`Connected to ${form.name}`);
-      void refreshConnectionSchema(form.id);
+      if (shouldRefreshSchema) void refreshConnectionSchema(form.id);
       showConnectionDialog.set(false);
     } catch (e: any) {
       testError = String(e);
@@ -199,8 +264,14 @@
       {:else}
       <div class="form-row">
         <label>Database File Path
-          <input type="text" bind:value={form.database} placeholder="/path/to/file.db" />
+          <div class="sqlite-file-row">
+            <input type="text" bind:value={form.database} placeholder="C:\\path\\to\\file.db or :memory:" />
+            <button type="button" class="btn-secondary btn-browse" on:click={browseSqliteFile}>
+              Browse…
+            </button>
+          </div>
         </label>
+        <span class="field-help">Choose an existing SQLite database file, or enter <code>:memory:</code> for an in-memory database.</span>
       </div>
       {/if}
 
@@ -292,6 +363,8 @@
   label { display: flex; flex-direction: column; gap: 4px; font-size: calc(12px * var(--app-font-scale)); color: var(--text-muted); }
   .tab-color-label { gap: 6px; }
   .tab-color-inputs { display: flex; align-items: center; gap: 8px; }
+  .sqlite-file-row { display: flex; align-items: center; gap: 8px; }
+  .sqlite-file-row input { flex: 1; }
   .tab-color-picker {
     width: 36px;
     min-width: 36px;
@@ -311,11 +384,24 @@
     cursor: pointer;
   }
   .btn-clear-color:hover { border-color: var(--accent); }
+  .btn-browse {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
   .tab-black-text-label { width: fit-content; }
   input, select {
     background: var(--bg-input); border: 1px solid var(--border);
     color: var(--text); padding: 7px 10px; border-radius: 4px;
     font-size: calc(13px * var(--app-font-scale)); width: 100%; box-sizing: border-box;
+  }
+  .field-help {
+    color: var(--text-muted);
+    font-size: calc(11px * var(--app-font-scale));
+    line-height: 1.4;
+  }
+  .field-help code {
+    font-family: ui-monospace, SFMono-Regular, SFMono-Regular, Consolas, monospace;
+    color: var(--text);
   }
   input:focus, select:focus { outline: none; border-color: var(--accent); }
   .modal-footer {

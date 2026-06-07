@@ -31,55 +31,40 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          go-version-file: go.mod
+          workspaces: src-tauri
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
 
-      - name: Install frontend dependencies (prefer npm ci)
-        if: ${{ hashFiles('frontend/package-lock.json') != '' }}
-        working-directory: frontend
-        run: |
-          npm ci || npm install
+      - name: Install root dependencies
+        run: npm ci || npm install
 
-      - name: Install frontend dependencies (no lockfile)
-        if: ${{ hashFiles('frontend/package-lock.json') == '' }}
+      - name: Install frontend dependencies
         working-directory: frontend
-        run: npm install
+        run: npm ci || npm install
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libgtk-3-dev libwebkit2gtk-4.0-dev
+          sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
-      - name: Build app with Wails
-        run: go run github.com/wailsapp/wails/v2/cmd/wails@latest build -clean
-
-      - name: Package Linux/macOS build
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          tar -czf "multidb-${{ matrix.target }}.tar.gz" -C build/bin .
-
-      - name: Package Windows build
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path build/bin/* -DestinationPath "multidb-${{ matrix.target }}.zip" -Force
+      - name: Build app with Tauri
+        run: npm run build
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: |
-            multidb-${{ matrix.target }}.tar.gz
-            multidb-${{ matrix.target }}.zip
+          path: src-tauri/target/release/bundle/**/*
           if-no-files-found: ignore
 
   release:
