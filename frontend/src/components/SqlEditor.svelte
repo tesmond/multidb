@@ -204,11 +204,6 @@
     let streamCols: string[] = [];
     let streamColTypes: string[] = [];
     let streamRows: any[][] = [];
-
-    // Rendezvous state: finalize only once BOTH the done signal has arrived
-    // AND all expected rows have been received. This handles the case where
-    // Tauri sends query:done and the last query:chunk as separate WebSocket
-    // frames (separate macrotasks) that can arrive in either order.
     let pendingTotalRows = -1;  // -1 = done not yet received
     let pendingDuration = 0;
     let pendingRowsAffected = 0;
