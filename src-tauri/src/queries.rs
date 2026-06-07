@@ -501,6 +501,14 @@ pub fn mysql_value_at(row: &MySqlRow, idx: usize) -> Result<Value> {
             return Ok(Value::String(format_binary_value(&ty, &value)));
         }
     }
+    // MySQL binary/blob types must be decoded as bytes *before* the String
+    // fallback — WKB and other binary payloads are valid UTF-8 control
+    // characters that try_get::<String> happily returns as garbage.
+    if is_mysql_binary_type(&ty) {
+        if let Ok(value) = row.try_get::<Vec<u8>, _>(idx) {
+            return Ok(Value::String(format_binary_value(&ty, &value)));
+        }
+    }
     if let Ok(value) = row.try_get::<String, _>(idx) {
         return Ok(Value::String(value));
     }
@@ -547,7 +555,26 @@ fn format_binary_value(type_name: &str, bytes: &[u8]) -> String {
         return format!("\\x{hex}");
     }
 
+    if is_mysql_binary_type(type_name) {
+        // Try to interpret the bytes as WKB geometry (e.g. from ST_AsBinary()).
+        // MySQL's native geometry columns carry a 4-byte SRID prefix which
+        // geometry_bytes_to_text already handles; ST_AsBinary() produces raw WKB.
+        if let Some(text) = geometry_bytes_to_text(bytes) {
+            return text;
+        }
+        // Not parseable as geometry — hex-encode so the output is at least readable.
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        return format!("0x{hex}");
+    }
+
     String::from_utf8_lossy(bytes).to_string()
+}
+
+fn is_mysql_binary_type(type_name: &str) -> bool {
+    matches!(
+        type_name.to_ascii_lowercase().as_str(),
+        "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob"
+    )
 }
 
 fn is_bytea_type(type_name: &str) -> bool {
@@ -1423,6 +1450,29 @@ mod tests {
             let result = format_text_value(ty, val.to_string());
             assert_eq!(result, val, "type '{ty}' should pass through unchanged");
         }
+    }
+
+    // ── MySQL binary/varbinary/blob ───────────────────────────────────────────────
+
+    #[test]
+    fn mysql_varbinary_wkb_point_renders_as_wkt() {
+        // WKB for POINT(1 1) as produced by ST_AsBinary() — no SRID prefix.
+        let bytes: &[u8] = &[
+            0x01,                                           // little-endian
+            0x01, 0x00, 0x00, 0x00,                       // type: POINT
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, // x = 1.0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, // y = 1.0
+        ];
+        assert_eq!(format_binary_value("varbinary", bytes), "POINT(1 1)");
+        assert_eq!(format_binary_value("VARBINARY", bytes), "POINT(1 1)");
+        assert_eq!(format_binary_value("blob", bytes),     "POINT(1 1)");
+    }
+
+    #[test]
+    fn mysql_varbinary_non_geometry_hex_encodes() {
+        // Non-WKB binary data must hex-encode rather than show as garbage.
+        let bytes: &[u8] = &[0xde, 0xad, 0xbe, 0xef];
+        assert_eq!(format_binary_value("varbinary", bytes), "0xdeadbeef");
     }
 
     #[test]
