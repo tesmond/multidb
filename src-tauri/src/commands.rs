@@ -78,10 +78,9 @@ pub async fn execute_query(
     max_rows: i64,
 ) -> CommandResult<ExecuteResult> {
     let cfg = state
-        .connections
-        .get_config(&conn_id)
+        .get_config_or_saved(&conn_id)
         .await
-        .ok_or_else(|| "config not found".to_string())?;
+        .map_err(command_err)?;
     let cancel = CancellationToken::new();
     state
         .query_cancels
@@ -143,9 +142,9 @@ pub async fn execute_query_streamed(
     query: String,
     max_rows: i64,
 ) -> CommandResult<()> {
-    let cfg = match state.connections.get_config(&conn_id).await {
-        Some(cfg) => cfg,
-        None => {
+    let cfg = match state.get_config_or_saved(&conn_id).await {
+        Ok(cfg) => cfg,
+        Err(err) => {
             emit_done(
                 &app,
                 QueryStreamDone {
@@ -153,7 +152,7 @@ pub async fn execute_query_streamed(
                     total_rows: 0,
                     rows_affected: 0,
                     duration: 0,
-                    error: "config not found".to_string(),
+                    error: err.to_string(),
                 },
             )
             .map_err(command_err)?;
@@ -596,10 +595,9 @@ pub async fn get_schema(state: State<'_, AppState>, conn_id: String) -> CommandR
         .await
         .map_err(command_err)?;
     let cfg = state
-        .connections
-        .get_config(&conn_id)
+        .get_config_or_saved(&conn_id)
         .await
-        .ok_or_else(|| "config not found".to_string())?;
+        .map_err(command_err)?;
     schema::get_schema(&pool, &cfg.driver)
         .await
         .map_err(command_err)
@@ -640,10 +638,9 @@ pub async fn backup_table(
         .await
         .map_err(command_err)?;
     let cfg = state
-        .connections
-        .get_config(&conn_id)
+        .get_config_or_saved(&conn_id)
         .await
-        .ok_or_else(|| "config not found".to_string())?;
+        .map_err(command_err)?;
     let default_name = if schema_name.is_empty() {
         format!("{table_name}.zip")
     } else {
@@ -674,10 +671,9 @@ pub async fn drop_table(
         .await
         .map_err(command_err)?;
     let cfg = state
-        .connections
-        .get_config(&conn_id)
+        .get_config_or_saved(&conn_id)
         .await
-        .ok_or_else(|| "config not found".to_string())?;
+        .map_err(command_err)?;
     backup::drop_table(&pool, &cfg, &table_name, &schema_name)
         .await
         .map_err(command_err)
@@ -726,10 +722,9 @@ pub async fn import_table(
         .await
         .map_err(command_err)?;
     let cfg = state
-        .connections
-        .get_config(&conn_id)
+        .get_config_or_saved(&conn_id)
         .await
-        .ok_or_else(|| "config not found".to_string())?;
+        .map_err(command_err)?;
     backup::import_table(&pool, &cfg, &import_type, &PathBuf::from(source_path))
         .await
         .map_err(command_err)

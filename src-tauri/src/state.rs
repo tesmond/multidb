@@ -1,4 +1,8 @@
-use crate::{connections::ConnectionManager, history::HistoryStore};
+use crate::{
+    connections::ConnectionManager,
+    history::HistoryStore,
+    models::ConnectionConfig,
+};
 use anyhow::{anyhow, Result};
 use std::{collections::HashMap, path::PathBuf};
 use tokio::sync::{Mutex, RwLock};
@@ -14,12 +18,6 @@ pub struct AppState {
 impl AppState {
     pub async fn initialise(&self) -> Result<()> {
         let store = HistoryStore::open(history_db_path()).await?;
-        let saved = store.list_saved_connections().await.unwrap_or_default();
-
-        for cfg in saved {
-            let _ = self.connections.connect(cfg).await;
-        }
-
         *self.store.write().await = Some(store);
         Ok(())
     }
@@ -30,6 +28,20 @@ impl AppState {
             .await
             .clone()
             .ok_or_else(|| anyhow!("store not initialised"))
+    }
+
+    pub async fn get_config_or_saved(&self, conn_id: &str) -> Result<ConnectionConfig> {
+        if let Some(cfg) = self.connections.get_config(conn_id).await {
+            return Ok(cfg);
+        }
+
+        let store = self.store().await?;
+        store
+            .list_saved_connections()
+            .await?
+            .into_iter()
+            .find(|cfg| cfg.id == conn_id)
+            .ok_or_else(|| anyhow!("connection {conn_id:?} not found"))
     }
 
     pub async fn get_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::AnyPool> {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { outputTab, activeTab, queryHistoryStore, tabs, activeTabId, selectedConnId, activeConnections } from '../stores/appStore';
+  import { outputTab, activeTab, tabs, activeTabId, selectedConnId, activeConnections } from '../stores/appStore';
 
   // Derive connection ID from the active tab
   $: activeTabConnId = $activeTab?.connId ?? '';
@@ -157,12 +157,11 @@
     connectionHistory = [];
   }
 
-  let hasSavedQueries = false;
-  
   let outputTabs: Array<['results' | 'messages' | 'history' | 'saved', string]> = [
     ['results', 'Results'],
     ['messages', 'Messages'],
     ['history', 'History'],
+    ['saved', 'Saved'],
   ];
 
   let connectionHistory: import('../stores/appStore').QueryRecord[] = [];
@@ -192,13 +191,6 @@
         const app = await import('../../tauri/gen/main/App') as any;
         const saved = await app.GetSavedQueries(connId);
         connectionSavedQueries = saved || [];
-        hasSavedQueries = (saved?.length ?? 0) > 0;
-        // Update the tabs list if needed
-        if (hasSavedQueries && !outputTabs.find(t => t[0] === 'saved')) {
-          outputTabs = [...outputTabs, ['saved', 'Saved']];
-        } else if (!hasSavedQueries && outputTabs.find(t => t[0] === 'saved') && $outputTab !== 'saved') {
-          outputTabs = outputTabs.filter(t => t[0] !== 'saved');
-        }
       } catch (e) {
         console.error('Failed to load saved queries:', e);
         connectionSavedQueries = [];
@@ -211,7 +203,6 @@
   // Reload history when active tab's connection changes or history tab is selected
   $: if (activeTabConnId && $outputTab === 'history') loadConnectionHistory();
   $: if (activeTabConnId && $outputTab === 'saved') loadSavedQueries();
-  $: if (activeTabConnId && ($outputTab === 'results' || $outputTab === 'messages')) loadSavedQueries();
 
   // Also load history when switching to history tab
   function handleTabClick(tab: 'results' | 'messages' | 'history' | 'saved') {
@@ -228,8 +219,6 @@
     if (get(outputTab) === 'history') {
       loadConnectionHistory();
     } else if (get(outputTab) === 'saved') {
-      loadSavedQueries();
-    } else {
       loadSavedQueries();
     }
 

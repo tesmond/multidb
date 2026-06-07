@@ -2,7 +2,6 @@
     import { onMount, tick } from "svelte";
     import TopToolbar from "./components/TopToolbar.svelte";
     import Navigator from "./components/Navigator.svelte";
-    import SqlEditor from "./components/SqlEditor.svelte";
     import OutputPanel from "./components/OutputPanel.svelte";
     import StatusBar from "./components/StatusBar.svelte";
     import ConnectionDialog from "./components/ConnectionDialog.svelte";
@@ -11,20 +10,17 @@
         tabs,
         activeTabId,
         activeConnections,
-        queryHistoryStore,
         selectedConnId,
-        hydrateCachedSchemas,
-        refreshMissingConnectionSchemas,
         setActiveConnectionsOrdered,
     } from "./stores/appStore";
-    import {
-        ListSavedConnections,
-        GetQueryHistory,
-    } from "../tauri/gen/main/App";
+    import { ListSavedConnections } from "../tauri/gen/main/App";
     import { get } from "svelte/store";
 
     // Tab context menu state
     let tabContextMenu: { tabId: string; x: number; y: number } | null = null;
+    let SqlEditor:
+        | typeof import("./components/SqlEditor.svelte").default
+        | null = null;
 
     // Inline tab editing state
     let editingTabId: string | null = null;
@@ -261,6 +257,10 @@
         if ($tabs.length > 0) activeTabId.set($tabs[0].id);
 
         void (async () => {
+            void import("./components/SqlEditor.svelte").then((module) => {
+                if (mounted) SqlEditor = module.default;
+            });
+
             // Load saved connections
             try {
                 const saved = await ListSavedConnections();
@@ -274,17 +274,7 @@
                         })),
                     );
                     selectedConnId.set(saved[0].id);
-                    // Hydrate cached schemas
-                    await hydrateCachedSchemas();
-                    // Fresh installs or newly-added saved connections collect schema in the background.
-                    await refreshMissingConnectionSchemas();
                 }
-            } catch (_) {}
-
-            // Load query history
-            try {
-                const hist = await GetQueryHistory(200);
-                if (mounted && hist) queryHistoryStore.set(hist);
             } catch (_) {}
 
             await tick();
@@ -447,12 +437,16 @@
                     class="editor-pane"
                     style="flex: {editorRatio} 0 0; min-height: 80px;"
                 >
-                    {#each $tabs as tab (tab.id)}
+                    {#each $tabs.filter((tab) => tab.id === $activeTabId) as tab (tab.id)}
                         <div
                             class="tab-panel"
                             class:active={$activeTabId === tab.id}
                         >
-                            <SqlEditor tabId={tab.id} />
+                            {#if SqlEditor}
+                                <SqlEditor tabId={tab.id} />
+                            {:else}
+                                <div class="editor-loading">Loading editor...</div>
+                            {/if}
                         </div>
                     {/each}
                 </div>
@@ -783,6 +777,14 @@
         display: flex;
         flex-direction: column;
         height: 100%;
+    }
+    .editor-loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: var(--text-muted);
+        font-size: calc(12px * var(--app-font-scale));
     }
 
     .tab-context-menu {

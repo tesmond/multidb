@@ -405,8 +405,6 @@ export const outputTab = writable<"results" | "messages" | "history" | "saved">(
 );
 
 export const statusMessage = writable("Ready");
-export const queryHistoryStore = writable<QueryRecord[]>([]);
-
 // -----------------------------------------------------------------------
 // Schema refresh signal
 // -----------------------------------------------------------------------
@@ -442,20 +440,11 @@ export function extractFirstTableName(sql: string): string | null {
 // Schema cache persistence
 // -----------------------------------------------------------------------
 
-// Simple in-memory cache (mirrors persisted cache on disk via backend)
-// keyed by connection ID.
-export const schemaCache = writable<
-  Record<
-    string,
-    { schema: SchemaTree | null; lastRefreshedAt: string; hash: string }
-  >
->({});
-
 /**
  * loadCachedSchema
  * - Calls backend LoadSchema(connId)
- * - Accepts either a raw JSON string or an object { schemaJson, lastRefreshedAt, hash }
- * - Updates both `schemaCache` and `activeConnections` so the UI can render immediately
+ * - Accepts either a raw JSON string or an object { schemaJson }
+ * - Updates `activeConnections` so the UI can render immediately
  */
 export async function loadCachedSchema(connId: string) {
   try {
@@ -467,32 +456,11 @@ export async function loadCachedSchema(connId: string) {
     if (!schemaJson) return;
 
     const schema = JSON.parse(schemaJson) as SchemaTree;
-    const lastRefreshedAt: string = res.lastRefreshedAt ?? res.last_refreshed_at ?? new Date().toISOString();
-    const hash: string = res.hash ?? '';
-
-    schemaCache.update((cache) => ({
-      ...cache,
-      [connId]: { schema, lastRefreshedAt, hash },
-    }));
     activeConnections.update((conns) =>
       conns.map((c) => (c.config.id === connId ? { ...c, schema } : c)),
     );
   } catch (e) {
     // Missing cache or parse failure — ignore
-  }
-}
-
-/**
- * hydrateCachedSchemas
- * - Iterates activeConnections and loads cached schema for each
- * - Sequential to avoid backend overload on startup; can be parallelised later
- */
-export async function hydrateCachedSchemas() {
-  const conns = get(activeConnections);
-  for (const conn of conns) {
-    // loadCachedSchema already swallows errors
-    // eslint-disable-next-line no-await-in-loop
-    await loadCachedSchema(conn.config.id);
   }
 }
 
@@ -503,15 +471,10 @@ export async function hydrateCachedSchemas() {
 export async function saveCachedSchema(
   connId: string,
   schema: SchemaTree,
-  hash: string,
 ) {
   try {
     const schemaJson = JSON.stringify(schema);
-    await SaveSchema(connId, schemaJson, hash);
-    schemaCache.update((cache) => ({
-      ...cache,
-      [connId]: { schema, lastRefreshedAt: new Date().toISOString(), hash },
-    }));
+    await SaveSchema(connId, schemaJson, "");
   } catch (e) {
     // ignore persistence failures
   }
@@ -538,8 +501,7 @@ export async function refreshConnectionSchema(connId: string) {
           : c,
       ),
     );
-    const hash = JSON.stringify(tree);
-    await saveCachedSchema(connId, tree, hash);
+    await saveCachedSchema(connId, tree);
   } catch (e) {
     activeConnections.update((conns) =>
       conns.map((c) =>
@@ -551,23 +513,13 @@ export async function refreshConnectionSchema(connId: string) {
   }
 }
 
-export async function refreshMissingConnectionSchemas() {
-  const conns = get(activeConnections).filter(
-    (conn) => !conn.schema && !conn.schemaLoading,
-  );
-  for (const conn of conns) {
-    void refreshConnectionSchema(conn.config.id);
-  }
-}
-
 /**
  * deleteCachedSchema
- * - Remove entry from local cache (backend deletion not implemented here)
+ * - Remove schema from local state; backend deletion is handled when a saved
+ *   connection is disconnected.
  */
 export async function deleteCachedSchema(connId: string) {
-  schemaCache.update((cache) => {
-    const next = { ...cache };
-    delete next[connId];
-    return next;
-  });
+  activeConnections.update((conns) =>
+    conns.map((c) => (c.config.id === connId ? { ...c, schema: null } : c)),
+  );
 }

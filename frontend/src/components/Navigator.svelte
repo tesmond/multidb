@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup } from '../stores/appStore';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, loadCachedSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup } from '../stores/appStore';
   import type { ActiveConnection, ServerGroup } from '../stores/appStore';
   import { Disconnect, TestConnection, BackupTable, DropTable } from '../../tauri/gen/main/App';
   import { get } from 'svelte/store';
@@ -60,7 +60,13 @@
   function toggleConn(id: string, conn: ActiveConnection) {
     expanded[id] = !expanded[id];
     if (expanded[id] && !conn.schema) {
-      void refreshConnectionSchema(conn.config.id);
+      void (async () => {
+        await loadCachedSchema(conn.config.id);
+        const current = get(activeConnections).find(c => c.config.id === conn.config.id);
+        if (!current?.schema) {
+          await refreshConnectionSchema(conn.config.id);
+        }
+      })();
     }
     expanded = { ...expanded };
     selectedConnId.set(id);
@@ -147,7 +153,6 @@
   }
 
   function openTableQuery(connId: string, tableName: string, schemaName?: string) {
-    const id = crypto.randomUUID();
     tabs.add(connId);
     // Find the just-added tab and set its SQL
     const allTabs = get(tabs);
@@ -1023,17 +1028,6 @@
   }
   .conn-label:active { cursor: grabbing; }
   .conn-label.dragging { opacity: 0.6; }
-  .drag-handle {
-    flex-shrink: 0;
-    border: 0;
-    background: transparent;
-    padding: 0 2px;
-    color: var(--text-muted);
-    letter-spacing: -1px;
-    cursor: grab;
-    user-select: none;
-  }
-  .drag-handle:active { cursor: grabbing; }
   .conn-label.grouped { padding-left: 24px; }
   .conn-label:hover { background: var(--bg-hover); }
   .conn-label.selected { background: var(--bg-selected); }
