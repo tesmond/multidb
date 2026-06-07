@@ -6,7 +6,17 @@
   $: activeTabConnId = $activeTab?.connId ?? '';
   import ResultsGrid from './ResultsGrid.svelte';
   import EditSavedQueryTitleDialog from './EditSavedQueryTitleDialog.svelte';
-  import { GetQueryHistoryByConnID, SaveAndConnect, ClearQueryHistoryByConnID, ClearQueryHistory, GetTablePrimaryKeys } from '../../tauri/gen/main/App';
+  import {
+    GetQueryHistoryByConnID,
+    SaveAndConnect,
+    ClearQueryHistoryByConnID,
+    ClearQueryHistory,
+    GetTablePrimaryKeys,
+    GetSavedQueries,
+    ListSavedConnections,
+    DeleteSavedQuery,
+    UpdateSavedQueryTitle,
+  } from '../../tauri/gen/main/App';
   import { get } from 'svelte/store';
 
   // ─── Simple SELECT detection ──────────────────────────────────────────────────
@@ -188,8 +198,7 @@
     const connId = $activeTab?.connId ?? get(selectedConnId);
     if (connId) {
       try {
-        const app = await import('../../tauri/gen/main/App') as any;
-        const saved = await app.GetSavedQueries(connId);
+        const saved = await GetSavedQueries(connId);
         connectionSavedQueries = saved || [];
       } catch (e) {
         console.error('Failed to load saved queries:', e);
@@ -239,7 +248,6 @@
 
     if (!isActive) {
       try {
-        const { ListSavedConnections } = await import('../../tauri/gen/main/App');
         const savedConns = await ListSavedConnections();
         const savedConn = savedConns.find(c => c.id === connId);
 
@@ -274,10 +282,6 @@
     if (!isActive) {
       // Find the saved connection config and connect to it
       try {
-        // We need to get the saved connection config
-        // For now, let's assume we can get it from somewhere
-        // Actually, let me check if we can get saved connections
-        const { ListSavedConnections } = await import('../../tauri/gen/main/App');
         const savedConns = await ListSavedConnections();
         const savedConn = savedConns.find(c => c.id === connId);
 
@@ -312,8 +316,7 @@
     if (e) e.stopPropagation();
     if (!contextMenu || contextMenu.type !== 'saved' || !contextMenu.itemId) return;
     try {
-      const app = await import('../../tauri/gen/main/App') as any;
-      await app.DeleteSavedQuery(contextMenu.itemId);
+      await DeleteSavedQuery(contextMenu.itemId);
       await loadSavedQueries();
     } catch (err) {
       console.error('Failed to delete saved query:', err);
@@ -332,8 +335,7 @@
     if (!newTitle || newTitle === currentTitle) return;
 
     try {
-      const app = await import('../../tauri/gen/main/App') as any;
-      await app.UpdateSavedQueryTitle(savedId, newTitle);
+      await UpdateSavedQueryTitle(savedId, newTitle);
       await loadSavedQueries();
     } catch (e) {
       console.error('Failed to update saved query title:', e);

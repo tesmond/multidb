@@ -3,6 +3,7 @@ mod commands;
 mod connections;
 mod history;
 mod models;
+mod password_vault;
 mod queries;
 mod schema;
 mod state;

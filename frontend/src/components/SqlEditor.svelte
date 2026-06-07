@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { tabs, activeConnections, selectedConnId, statusMessage, outputTab, requestSchemaRefresh, extractFirstTableName } from '../stores/appStore';
-  import { ExecuteQueryStreamed, CancelQuery } from '../../tauri/gen/main/App';
+  import { ExecuteQueryStreamed, CancelQuery, SaveQuery } from '../../tauri/gen/main/App';
   import { EventsOn, EventsOff } from '../../tauri/runtime/runtime';
   import { get } from 'svelte/store';
   import SaveQueryDialog from './SaveQueryDialog.svelte';
@@ -331,8 +331,7 @@
     }
 
     try {
-      const app = await import('../../tauri/gen/main/App') as any;
-      await app.SaveQuery(connId, title, sql);
+      await SaveQuery(connId, title, sql);
       statusMessage.set(`Query saved as "${title}"`);
       // Dispatch an event to refresh the saved queries list
       window.dispatchEvent(new Event('saved-query-added'));

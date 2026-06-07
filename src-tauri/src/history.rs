@@ -1,4 +1,7 @@
-use crate::models::{ConnectionConfig, QueryRecord, SavedQuery, SchemaCacheEntry};
+use crate::{
+    models::{ConnectionConfig, QueryRecord, SavedQuery, SchemaCacheEntry},
+    password_vault,
+};
 use anyhow::{Context, Result};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
@@ -27,6 +30,7 @@ impl HistoryStore {
             .context("open history store")?;
         let store = Self { pool };
         store.migrate().await?;
+        store.migrate_connection_passwords_to_keychain().await?;
         Ok(store)
     }
 
@@ -186,6 +190,8 @@ impl HistoryStore {
     }
 
     pub async fn save_connection(&self, cfg: &ConnectionConfig) -> Result<()> {
+        password_vault::save_connection_password(&cfg.id, &cfg.password)?;
+
         sqlx::query(
             r#"
             INSERT INTO saved_connections (
@@ -211,7 +217,7 @@ impl HistoryStore {
         .bind(&cfg.host)
         .bind(cfg.port as i64)
         .bind(&cfg.username)
-        .bind(&cfg.password)
+        .bind("")
         .bind(&cfg.database)
         .bind(&cfg.dsn)
         .bind(cfg.use_kube_port_forward as i64)
@@ -230,6 +236,7 @@ impl HistoryStore {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        password_vault::delete_connection_password(id)?;
         Ok(())
     }
 
@@ -245,9 +252,21 @@ impl HistoryStore {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter()
-            .map(|row| {
-                Ok(ConnectionConfig {
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let legacy_password: String = row.try_get("password")?;
+            let password = match password_vault::load_connection_password(&id)? {
+                Some(password) => password,
+                None if !legacy_password.is_empty() => {
+                    password_vault::save_connection_password(&id, &legacy_password)?;
+                    self.clear_legacy_password(&id).await?;
+                    legacy_password
+                }
+                None => String::new(),
+            };
+
+            out.push(ConnectionConfig {
                     id: row.try_get("id")?,
                     name: row.try_get("name")?,
                     driver: row.try_get("driver")?,
@@ -256,7 +275,7 @@ impl HistoryStore {
                     host: row.try_get("host")?,
                     port: row.try_get::<i64, _>("port")? as i32,
                     username: row.try_get("username")?,
-                    password: row.try_get("password")?,
+                    password,
                     database: row.try_get("database")?,
                     dsn: row.try_get("dsn")?,
                     use_kube_port_forward: row.try_get::<i64, _>("use_kube_port_forward")? != 0,
@@ -265,9 +284,38 @@ impl HistoryStore {
                     kube_resource: row.try_get("kube_resource")?,
                     kube_local_port: row.try_get::<i64, _>("kube_local_port")? as i32,
                     kube_remote_port: row.try_get::<i64, _>("kube_remote_port")? as i32,
-                })
-            })
-            .collect()
+                });
+        }
+
+        Ok(out)
+    }
+
+    async fn migrate_connection_passwords_to_keychain(&self) -> Result<()> {
+        let rows = sqlx::query("SELECT id, password FROM saved_connections WHERE password <> ''")
+            .fetch_all(&self.pool)
+            .await?;
+
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let legacy_password: String = row.try_get("password")?;
+            if legacy_password.is_empty() {
+                continue;
+            }
+            if password_vault::load_connection_password(&id)?.is_none() {
+                password_vault::save_connection_password(&id, &legacy_password)?;
+            }
+            self.clear_legacy_password(&id).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn clear_legacy_password(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE saved_connections SET password = '' WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn save_schema(&self, conn_id: &str, schema_json: &str, hash: &str) -> Result<()> {

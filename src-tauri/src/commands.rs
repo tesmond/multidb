@@ -16,8 +16,12 @@ use tokio_util::sync::CancellationToken;
 
 type CommandResult<T> = std::result::Result<T, String>;
 
-fn command_err(err: impl std::fmt::Display) -> String {
-    err.to_string()
+fn command_err(err: impl Into<anyhow::Error>) -> String {
+    let err: anyhow::Error = err.into();
+    err.chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 #[tauri::command]
