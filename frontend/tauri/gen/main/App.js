@@ -101,6 +101,10 @@ export function SelectImportFile(importType) {
   return invoke("select_import_file", { importType });
 }
 
+export function SelectSqliteFile() {
+  return invoke("select_sqlite_file");
+}
+
 export function TestConnection(cfg) {
   return invoke("test_connection", { cfg });
 }

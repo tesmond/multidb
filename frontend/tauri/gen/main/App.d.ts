@@ -54,6 +54,8 @@ export function SaveSchema(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function SelectImportFile(arg1:string):Promise<string>;
 
+export function SelectSqliteFile():Promise<string>;
+
 export function TestConnection(arg1:connections.ConnectionConfig):Promise<void>;
 
 export function UpdateSavedQueryTitle(arg1:number,arg2:string):Promise<void>;

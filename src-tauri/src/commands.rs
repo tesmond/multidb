@@ -702,6 +702,16 @@ pub fn select_import_file(import_type: String) -> CommandResult<String> {
 }
 
 #[tauri::command]
+pub fn select_sqlite_file() -> CommandResult<String> {
+    Ok(rfd::FileDialog::new()
+        .set_title("Select SQLite database")
+        .add_filter("SQLite Database", &["db", "sqlite", "sqlite3", "db3"])
+        .pick_file()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
 pub async fn import_table(
     state: State<'_, AppState>,
     conn_id: String,

@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use serde_json::{Map, Value};
-use sqlx::{AnyPool, Column, Row};
+use sqlx::{any::AnyRow, AnyPool, Column, ColumnIndex, Row};
 use std::{
     fs,
     io::{Cursor, Read, Write},
@@ -100,7 +100,7 @@ async fn get_create_table_sql(
                     .bind(table_name)
                     .fetch_one(pool)
                     .await?;
-            Ok(row.try_get::<String, _>(0)?.trim().to_string())
+            Ok(decode_any_text(&row, 0)?.trim().to_string())
         }
         "postgres" => {
             let qualified = qualified_table_name("postgres", table_name, schema_name);
@@ -131,14 +131,14 @@ async fn get_create_table_sql(
             .bind(schema_name)
             .fetch_one(pool)
             .await?;
-            Ok(row.try_get::<String, _>(0)?.trim().to_string())
+            Ok(decode_any_text(&row, 0)?.trim().to_string())
         }
         "mysql" => {
             let qualified = qualified_table_name("mysql", table_name, schema_name);
             let row = sqlx::query(&format!("SHOW CREATE TABLE {qualified}"))
                 .fetch_one(pool)
                 .await?;
-            Ok(row.try_get::<String, _>(1)?.trim().to_string())
+            Ok(decode_any_text(&row, 1)?.trim().to_string())
         }
         other => Err(anyhow!("backup not supported for driver: {other}")),
     }
@@ -185,9 +185,9 @@ async fn get_create_indexes_sql(
             .await?;
             let mut out = Vec::new();
             for row in rows {
-                let name: String = row.try_get(0)?;
+                let name = decode_any_text(&row, 0)?;
                 let non_unique: i64 = row.try_get(1)?;
-                let cols: String = row.try_get(2)?;
+                let cols = decode_any_text(&row, 2)?;
                 let mut prefix = "CREATE ".to_string();
                 if non_unique == 0 {
                     prefix.push_str("UNIQUE ");
@@ -600,9 +600,38 @@ async fn string_column(pool: &AnyPool, sql: &str, args: &[&str]) -> Result<Vec<S
         query = query.bind(*arg);
     }
     let rows = query.fetch_all(pool).await?;
-    rows.into_iter()
-        .map(|row| row.try_get(0).map_err(Into::into))
-        .collect()
+    rows.into_iter().map(|row| decode_any_text(&row, 0)).collect()
+}
+
+fn decode_any_text<I>(row: &AnyRow, index: I) -> Result<String>
+where
+    I: ColumnIndex<AnyRow> + Copy,
+{
+    if let Ok(value) = row.try_get::<String, _>(index) {
+        return Ok(value);
+    }
+    if let Ok(value) = row.try_get::<Vec<u8>, _>(index) {
+        return Ok(String::from_utf8_lossy(&value).into_owned());
+    }
+    if let Ok(value) = row.try_get::<i64, _>(index) {
+        return Ok(value.to_string());
+    }
+    if let Ok(value) = row.try_get::<f64, _>(index) {
+        return Ok(value.to_string());
+    }
+    if let Ok(value) = row.try_get::<bool, _>(index) {
+        return Ok(if value { "1" } else { "0" }.to_string());
+    }
+    if let Ok(value) = row.try_get::<Option<String>, _>(index) {
+        return Ok(value.unwrap_or_default());
+    }
+    if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(index) {
+        return Ok(value
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default());
+    }
+
+    Err(anyhow!("failed to decode text value"))
 }
 
 pub fn qualified_table_name(driver: &str, table_name: &str, schema_name: &str) -> String {

@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import type { ExecuteResult, TabEditInfo } from '../stores/appStore';
   import { fontScalePercent, tabs } from '../stores/appStore';
+  import { escapeTsvCell, formatValueForClipboard } from '../lib/resultClipboard';
 
   export let result: ExecuteResult | null = null;
   export let tabId: string = '';
@@ -863,7 +864,7 @@
 
     // Default: copy cell value to clipboard
     const val  = row[hit.col];
-    const text = val === null ? 'NULL' : String(val);
+  const text = formatValueForClipboard(val, result?.columnTypes?.[hit.col], 'NULL');
     navigator.clipboard.writeText(text).catch(() => {});
 
     sel = { r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col };
@@ -994,7 +995,7 @@
         const cells: string[] = [];
         for (let c = 0; c < result.columns.length; c++) {
           const v = c < row.length ? row[c] : null;
-          cells.push(v === null ? '' : String(v));
+          cells.push(escapeTsvCell(formatValueForClipboard(v, result.columnTypes?.[c], '')));
         }
         lines.push(cells.join('\t'));
       }
@@ -1019,7 +1020,7 @@
       const cells: string[] = [];
       for (let c = c0; c <= c1; c++) {
         const v = c < row.length ? row[c] : null;
-        cells.push(v === null ? '' : String(v));
+        cells.push(escapeTsvCell(formatValueForClipboard(v, result.columnTypes?.[c], '')));
       }
       lines.push(cells.join('\t'));
     }

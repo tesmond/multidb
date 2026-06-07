@@ -1,6 +1,6 @@
 use crate::models::{Column as DbColumn, Schema, SchemaTree, Table};
 use anyhow::{anyhow, Result};
-use sqlx::{AnyPool, Row};
+use sqlx::{any::AnyRow, AnyPool, ColumnIndex, Row, ValueRef};
 use std::collections::HashMap;
 
 pub async fn get_schema(pool: &AnyPool, driver: &str) -> Result<SchemaTree> {
@@ -65,7 +65,7 @@ pub async fn get_primary_keys(
             let mut entries: Vec<(i64, String)> = rows
                 .into_iter()
                 .filter_map(|row| {
-                    let name: String = row.try_get("name").ok()?;
+                    let name = decode_any_text(&row, "name").ok()?;
                     let pk: i64 = row.try_get("pk").ok()?;
                     (pk > 0).then_some((pk, name))
                 })
@@ -92,7 +92,7 @@ async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
     let mut tree = SchemaTree::default();
     let mut total_size = 0_i64;
     for row in db_rows {
-        let db_name: String = row.try_get(0)?;
+        let db_name = decode_any_text(&row, 0)?;
         let mut schema = Schema {
             name: db_name.clone(),
             ..Schema::default()
@@ -111,8 +111,8 @@ async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
         .await?;
 
         for row in tables {
-            let name: String = row.try_get(0)?;
-            let table_type: String = row.try_get(1)?;
+            let name = decode_any_text(&row, 0)?;
+            let table_type = decode_any_text(&row, 1)?;
             let mut table = Table {
                 name: name.clone(),
                 table_type: if table_type == "VIEW" {
@@ -170,8 +170,8 @@ async fn mysql_table_sizes(pool: &AnyPool) -> Result<HashMap<String, i64>> {
     .await?;
     let mut out = HashMap::new();
     for row in rows {
-        let schema: String = row.try_get(0)?;
-        let table: String = row.try_get(1)?;
+        let schema = decode_any_text(&row, 0)?;
+        let table = decode_any_text(&row, 1)?;
         let size: i64 = row.try_get(2)?;
         out.insert(format!("{schema}.{table}"), size);
     }
@@ -194,11 +194,11 @@ async fn mysql_columns(pool: &AnyPool, db_name: &str, table: &str) -> Result<Vec
     rows.into_iter()
         .map(|row| {
             Ok(DbColumn {
-                name: row.try_get(0)?,
-                column_type: row.try_get(1)?,
-                nullable: row.try_get::<String, _>(2)? == "YES",
-                default: row.try_get(3)?,
-                key: row.try_get(4)?,
+                name: decode_any_text(&row, 0)?,
+                column_type: decode_any_text(&row, 1)?,
+                nullable: decode_any_text(&row, 2)? == "YES",
+                default: decode_any_text(&row, 3)?,
+                key: decode_any_text(&row, 4)?,
             })
         })
         .collect()
@@ -347,8 +347,8 @@ async fn sqlite_schema(pool: &AnyPool) -> Result<SchemaTree> {
     .await?;
 
     for row in rows {
-        let name: String = row.try_get(0)?;
-        let obj_type: String = row.try_get(1)?;
+        let name = decode_any_text(&row, 0)?;
+        let obj_type = decode_any_text(&row, 1)?;
         let mut table = Table {
             name: name.clone(),
             table_type: if obj_type == "view" { "VIEW" } else { "TABLE" }.to_string(),
@@ -386,12 +386,10 @@ async fn sqlite_columns(pool: &AnyPool, table: &str) -> Result<Vec<DbColumn>> {
             let not_null: i64 = row.try_get("notnull")?;
             let pk: i64 = row.try_get("pk")?;
             Ok(DbColumn {
-                name: row.try_get("name")?,
-                column_type: row.try_get("type")?,
+                name: decode_any_text(&row, "name")?,
+                column_type: decode_any_text(&row, "type")?,
                 nullable: not_null == 0,
-                default: row
-                    .try_get::<Option<String>, _>("dflt_value")?
-                    .unwrap_or_default(),
+                default: decode_optional_any_text(&row, "dflt_value")?.unwrap_or_default(),
                 key: if pk > 0 {
                     "PRI".to_string()
                 } else {
@@ -416,7 +414,7 @@ async fn sqlite_table_sizes(pool: &AnyPool) -> Result<HashMap<String, i64>> {
     .await?;
     let mut out = HashMap::new();
     for row in rows {
-        let name: String = row.try_get(0)?;
+        let name = decode_any_text(&row, 0)?;
         let size: Option<i64> = row.try_get(1)?;
         if let Some(size) = size {
             out.insert(name, size);
@@ -443,11 +441,104 @@ async fn string_column(pool: &AnyPool, sql: &str, args: &[&str]) -> Result<Vec<S
         query = query.bind(*arg);
     }
     let rows = query.fetch_all(pool).await?;
-    rows.into_iter()
-        .map(|row| row.try_get(0).map_err(Into::into))
-        .collect()
+    rows.into_iter().map(|row| decode_any_text(&row, 0)).collect()
+}
+
+fn decode_any_text<I>(row: &AnyRow, index: I) -> Result<String>
+where
+    I: ColumnIndex<AnyRow> + Copy,
+{
+    if let Ok(value) = row.try_get::<String, _>(index) {
+        return Ok(value);
+    }
+    if let Ok(value) = row.try_get::<Vec<u8>, _>(index) {
+        return Ok(String::from_utf8_lossy(&value).into_owned());
+    }
+    if let Ok(value) = row.try_get::<i64, _>(index) {
+        return Ok(value.to_string());
+    }
+    if let Ok(value) = row.try_get::<f64, _>(index) {
+        return Ok(value.to_string());
+    }
+    if let Ok(value) = row.try_get::<bool, _>(index) {
+        return Ok(if value { "1" } else { "0" }.to_string());
+    }
+    if let Ok(value) = row.try_get::<Option<String>, _>(index) {
+        return Ok(value.unwrap_or_default());
+    }
+    if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(index) {
+        return Ok(value
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default());
+    }
+
+    Err(anyhow!("failed to decode text value"))
+}
+
+fn decode_optional_any_text<I>(row: &AnyRow, index: I) -> Result<Option<String>>
+where
+    I: ColumnIndex<AnyRow> + Copy,
+{
+    let raw = row.try_get_raw(index)?;
+    if raw.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(decode_any_text(row, index)?))
 }
 
 fn quote_sqlite_pragma(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_any_text;
+    use sqlx::any::AnyPoolOptions;
+
+    #[tokio::test]
+    async fn decode_any_text_handles_sqlite_blob_values() {
+        sqlx::any::install_default_drivers();
+
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create in-memory sqlite pool");
+
+        let row = sqlx::query("SELECT x'68656c6c6f'")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch blob row");
+
+        let decoded = decode_any_text(&row, 0).expect("decode blob text");
+        assert_eq!(decoded, "hello");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_schema_handles_blob_result_values() {
+        sqlx::any::install_default_drivers();
+
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create in-memory sqlite pool");
+
+        sqlx::query("CREATE TABLE sample (id INTEGER PRIMARY KEY, payload BLOB)")
+            .execute(&pool)
+            .await
+            .expect("create table");
+
+        let row = sqlx::query("PRAGMA table_info(\"sample\")")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch pragma row");
+
+        let name = decode_any_text(&row, "name").expect("decode pragma column name");
+        assert_eq!(name, "id");
+
+        pool.close().await;
+    }
 }

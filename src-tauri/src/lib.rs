@@ -41,6 +41,7 @@ pub fn run() {
             commands::backup_table,
             commands::drop_table,
             commands::select_import_file,
+            commands::select_sqlite_file,
             commands::import_table,
             commands::save_csv,
             commands::save_file,
