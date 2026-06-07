@@ -8,6 +8,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (for example: v0.3.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -30,6 +35,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -83,3 +90,4 @@ jobs:
         with:
           files: dist/**/*
           generate_release_notes: true
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
