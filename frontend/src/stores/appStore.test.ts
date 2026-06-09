@@ -1,5 +1,5 @@
-// Mock Tauri bindings before any store imports
-vi.mock('../../tauri/gen/models', () => ({
+// Mock generated desktop bindings before any store imports
+vi.mock('../../desktop/gen/models', () => ({
   connections: { ConnectionConfig: class {} },
   schema: { SchemaTree: class {} },
   history: { QueryRecord: class {} },

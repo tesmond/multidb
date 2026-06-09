@@ -2,7 +2,11 @@ use crate::models::ExecuteResult;
 use anyhow::Result;
 use futures_util::StreamExt;
 use serde_json::{Number, Value};
-use sqlx::{mysql::MySqlRow, postgres::{PgRow, PgValueFormat}, AnyPool, Column, MySqlPool, PgPool, Row, TypeInfo, Value as SqlxValue, ValueRef};
+use sqlx::{
+    mysql::MySqlRow,
+    postgres::{PgRow, PgValueFormat},
+    AnyPool, Column, MySqlPool, PgPool, Row, TypeInfo, Value as SqlxValue, ValueRef,
+};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -377,7 +381,8 @@ pub fn pg_value_at(row: &PgRow, idx: usize) -> Result<Value> {
     if let Ok(value) = row.try_get::<sqlx::types::chrono::NaiveTime, _>(idx) {
         return Ok(Value::String(value.to_string()));
     }
-    if let Ok(value) = row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, _>(idx)
+    if let Ok(value) =
+        row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, _>(idx)
     {
         return Ok(Value::String(value.to_rfc3339()));
     }
@@ -386,7 +391,8 @@ pub fn pg_value_at(row: &PgRow, idx: usize) -> Result<Value> {
     {
         return Ok(Value::String(value.to_rfc3339()));
     }
-    if let Ok(value) = row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Local>, _>(idx)
+    if let Ok(value) =
+        row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Local>, _>(idx)
     {
         return Ok(Value::String(value.to_rfc3339()));
     }
@@ -489,7 +495,9 @@ pub fn mysql_value_at(row: &MySqlRow, idx: usize) -> Result<Value> {
     if let Ok(value) = row.try_get::<sqlx::types::chrono::NaiveTime, _>(idx) {
         return Ok(Value::String(value.to_string()));
     }
-    if let Ok(value) = row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, _>(idx) {
+    if let Ok(value) =
+        row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, _>(idx)
+    {
         return Ok(Value::String(value.to_rfc3339()));
     }
     if let Ok(value) = row.try_get::<sqlx::mysql::types::MySqlTime, _>(idx) {
@@ -589,29 +597,28 @@ fn is_bytea_type(type_name: &str) -> bool {
 fn format_pg_binary_value(type_name: &str, bytes: &[u8]) -> String {
     let ty_lower = type_name.to_ascii_lowercase();
     match ty_lower.as_str() {
-        "macaddr"          => format_pg_macaddr(bytes),
-        "macaddr8"         => format_pg_macaddr8(bytes),
-        "line"             => format_pg_line(bytes),
-        "lseg"             => format_pg_lseg(bytes),
-        "box"              => format_pg_box(bytes),
-        "circle"           => format_pg_circle(bytes),
-        "money"            => format_pg_money(bytes),
-        "inet" | "cidr"    => format_pg_inet(bytes),
-        "interval"         => format_pg_interval(bytes),
-        "timetz"           => format_pg_timetz(bytes),
-        "time"             => format_pg_time(bytes),
-        "int4range" | "int8range" | "numrange"
-        | "tsrange" | "tstzrange" | "daterange" => format_pg_range(bytes, ty_lower.as_str()),
-        "bytea"            => {
+        "macaddr" => format_pg_macaddr(bytes),
+        "macaddr8" => format_pg_macaddr8(bytes),
+        "line" => format_pg_line(bytes),
+        "lseg" => format_pg_lseg(bytes),
+        "box" => format_pg_box(bytes),
+        "circle" => format_pg_circle(bytes),
+        "money" => format_pg_money(bytes),
+        "inet" | "cidr" => format_pg_inet(bytes),
+        "interval" => format_pg_interval(bytes),
+        "timetz" => format_pg_timetz(bytes),
+        "time" => format_pg_time(bytes),
+        "int4range" | "int8range" | "numrange" | "tsrange" | "tstzrange" | "daterange" => {
+            format_pg_range(bytes, ty_lower.as_str())
+        }
+        "bytea" => {
             let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
             format!("\\x{hex}")
         }
         // Array types: sqlx may report either the catalog form (_int4) or the
         // display form (INT4[]).  Handle both.
-        ty if ty.starts_with('_') || ty.ends_with("[]") => {
-            format_pg_array_binary(bytes)
-                .unwrap_or_else(|| format!("<{type_name}:{} bytes>", bytes.len()))
-        }
+        ty if ty.starts_with('_') || ty.ends_with("[]") => format_pg_array_binary(bytes)
+            .unwrap_or_else(|| format!("<{type_name}:{} bytes>", bytes.len())),
         _ => {
             // Unknown binary type: pass through as UTF-8 if valid, else hex-encode.
             String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| {
@@ -637,8 +644,7 @@ fn format_pg_macaddr8(bytes: &[u8]) -> String {
     if bytes.len() == 8 {
         format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7]
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]
         )
     } else {
         format!("<macaddr8:{} bytes>", bytes.len())
@@ -653,7 +659,12 @@ fn format_pg_line(bytes: &[u8]) -> String {
     let a = f64::from_be_bytes(bytes[0..8].try_into().unwrap());
     let b = f64::from_be_bytes(bytes[8..16].try_into().unwrap());
     let c = f64::from_be_bytes(bytes[16..24].try_into().unwrap());
-    format!("{{{},{},{}}}", format_ordinate(a), format_ordinate(b), format_ordinate(c))
+    format!(
+        "{{{},{},{}}}",
+        format_ordinate(a),
+        format_ordinate(b),
+        format_ordinate(c)
+    )
 }
 
 fn format_pg_lseg(bytes: &[u8]) -> String {
@@ -675,8 +686,10 @@ fn format_pg_two_points(bytes: &[u8], type_name: &str) -> String {
     let y2 = f64::from_be_bytes(bytes[24..32].try_into().unwrap());
     format!(
         "({},{}),({},{})",
-        format_ordinate(x1), format_ordinate(y1),
-        format_ordinate(x2), format_ordinate(y2)
+        format_ordinate(x1),
+        format_ordinate(y1),
+        format_ordinate(x2),
+        format_ordinate(y2)
     )
 }
 
@@ -688,7 +701,12 @@ fn format_pg_circle(bytes: &[u8]) -> String {
     let x = f64::from_be_bytes(bytes[0..8].try_into().unwrap());
     let y = f64::from_be_bytes(bytes[8..16].try_into().unwrap());
     let r = f64::from_be_bytes(bytes[16..24].try_into().unwrap());
-    format!("<({},{}),{}>", format_ordinate(x), format_ordinate(y), format_ordinate(r))
+    format!(
+        "<({},{}),{}>",
+        format_ordinate(x),
+        format_ordinate(y),
+        format_ordinate(r)
+    )
 }
 
 fn format_pg_money(bytes: &[u8]) -> String {
@@ -708,8 +726,8 @@ fn format_pg_inet(bytes: &[u8]) -> String {
         return format!("<inet:{} bytes>", bytes.len());
     }
     let family = bytes[0];
-    let bits   = bytes[1];
-    let nb     = bytes[3] as usize;
+    let bits = bytes[1];
+    let nb = bytes[3] as usize;
     if bytes.len() < 4 + nb {
         return format!("<inet:{} bytes>", bytes.len());
     }
@@ -717,7 +735,11 @@ fn format_pg_inet(bytes: &[u8]) -> String {
     match (family, nb) {
         (2, 4) => {
             let s = format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]);
-            if bits == 32 { s } else { format!("{s}/{bits}") }
+            if bits == 32 {
+                s
+            } else {
+                format!("{s}/{bits}")
+            }
         }
         (3, 16) => {
             let groups: Vec<String> = addr
@@ -725,7 +747,11 @@ fn format_pg_inet(bytes: &[u8]) -> String {
                 .map(|c| format!("{:x}", u16::from_be_bytes([c[0], c[1]])))
                 .collect();
             let s = groups.join(":");
-            if bits == 128 { s } else { format!("{s}/{bits}") }
+            if bits == 128 {
+                s
+            } else {
+                format!("{s}/{bits}")
+            }
         }
         _ => format!("<inet:{} bytes>", bytes.len()),
     }
@@ -736,33 +762,44 @@ fn format_pg_interval(bytes: &[u8]) -> String {
     if bytes.len() != 16 {
         return format!("<interval:{} bytes>", bytes.len());
     }
-    let usecs:  i64 = i64::from_be_bytes(bytes[0..8].try_into().unwrap());
-    let days:   i32 = i32::from_be_bytes(bytes[8..12].try_into().unwrap());
+    let usecs: i64 = i64::from_be_bytes(bytes[0..8].try_into().unwrap());
+    let days: i32 = i32::from_be_bytes(bytes[8..12].try_into().unwrap());
     let months: i32 = i32::from_be_bytes(bytes[12..16].try_into().unwrap());
 
-    let years      = months / 12;
+    let years = months / 12;
     let rem_months = months % 12;
-    let abs_us     = usecs.unsigned_abs();
+    let abs_us = usecs.unsigned_abs();
     let total_secs = abs_us / 1_000_000;
-    let micros     = abs_us % 1_000_000;
-    let secs       = total_secs % 60;
-    let mins       = (total_secs / 60) % 60;
-    let hours      = total_secs / 3600;
-    let time_neg   = usecs < 0;
+    let micros = abs_us % 1_000_000;
+    let secs = total_secs % 60;
+    let mins = (total_secs / 60) % 60;
+    let hours = total_secs / 3600;
+    let time_neg = usecs < 0;
 
     let mut parts: Vec<String> = Vec::new();
     if years != 0 {
-        parts.push(format!("{years} year{}", if years.abs() != 1 { "s" } else { "" }));
+        parts.push(format!(
+            "{years} year{}",
+            if years.abs() != 1 { "s" } else { "" }
+        ));
     }
     if rem_months != 0 {
-        parts.push(format!("{rem_months} mon{}", if rem_months.abs() != 1 { "s" } else { "" }));
+        parts.push(format!(
+            "{rem_months} mon{}",
+            if rem_months.abs() != 1 { "s" } else { "" }
+        ));
     }
     if days != 0 {
-        parts.push(format!("{days} day{}", if days.abs() != 1 { "s" } else { "" }));
+        parts.push(format!(
+            "{days} day{}",
+            if days.abs() != 1 { "s" } else { "" }
+        ));
     }
     let time_sign = if time_neg { "-" } else { "" };
     if micros > 0 {
-        parts.push(format!("{time_sign}{hours:02}:{mins:02}:{secs:02}.{micros:06}"));
+        parts.push(format!(
+            "{time_sign}{hours:02}:{mins:02}:{secs:02}.{micros:06}"
+        ));
     } else if hours != 0 || mins != 0 || secs != 0 || parts.is_empty() {
         parts.push(format!("{time_sign}{hours:02}:{mins:02}:{secs:02}"));
     }
@@ -775,21 +812,21 @@ fn format_pg_timetz(bytes: &[u8]) -> String {
     if bytes.len() != 12 {
         return format!("<timetz:{} bytes>", bytes.len());
     }
-    let usecs: i64    = i64::from_be_bytes(bytes[0..8].try_into().unwrap());
+    let usecs: i64 = i64::from_be_bytes(bytes[0..8].try_into().unwrap());
     let zone_secs: i32 = i32::from_be_bytes(bytes[8..12].try_into().unwrap());
 
-    let abs_us     = usecs.unsigned_abs();
+    let abs_us = usecs.unsigned_abs();
     let total_secs = abs_us / 1_000_000;
-    let micros     = abs_us % 1_000_000;
-    let secs       = total_secs % 60;
-    let mins       = (total_secs / 60) % 60;
-    let hours      = total_secs / 3600;
+    let micros = abs_us % 1_000_000;
+    let secs = total_secs % 60;
+    let mins = (total_secs / 60) % 60;
+    let hours = total_secs / 3600;
 
     // zone_secs is seconds *west* of UTC: positive = negative UTC offset.
     let zone_sign = if zone_secs >= 0 { '-' } else { '+' };
-    let abs_zone  = zone_secs.unsigned_abs();
-    let z_hours   = abs_zone / 3600;
-    let z_mins    = (abs_zone % 3600) / 60;
+    let abs_zone = zone_secs.unsigned_abs();
+    let z_hours = abs_zone / 3600;
+    let z_mins = (abs_zone % 3600) / 60;
 
     let time_part = if micros > 0 {
         format!("{hours:02}:{mins:02}:{secs:02}.{micros:06}")
@@ -809,13 +846,13 @@ fn format_pg_time(bytes: &[u8]) -> String {
     if bytes.len() != 8 {
         return format!("<time:{} bytes>", bytes.len());
     }
-    let usecs: i64    = i64::from_be_bytes(bytes.try_into().unwrap());
-    let abs_us        = usecs.unsigned_abs();
-    let total_secs    = abs_us / 1_000_000;
-    let micros        = abs_us % 1_000_000;
-    let secs          = total_secs % 60;
-    let mins          = (total_secs / 60) % 60;
-    let hours         = total_secs / 3600;
+    let usecs: i64 = i64::from_be_bytes(bytes.try_into().unwrap());
+    let abs_us = usecs.unsigned_abs();
+    let total_secs = abs_us / 1_000_000;
+    let micros = abs_us % 1_000_000;
+    let secs = total_secs % 60;
+    let mins = (total_secs / 60) % 60;
+    let hours = total_secs / 3600;
     if micros > 0 {
         format!("{hours:02}:{mins:02}:{secs:02}.{micros:06}")
     } else {
@@ -833,7 +870,7 @@ fn format_pg_range(bytes: &[u8], range_type: &str) -> String {
         return format!("<{range_type}: 0 bytes>");
     }
     let flags = bytes[0];
-    const RANGE_EMPTY:  u8 = 0x01;
+    const RANGE_EMPTY: u8 = 0x01;
     const RANGE_LB_INC: u8 = 0x02;
     const RANGE_UB_INC: u8 = 0x04;
     const RANGE_LB_INF: u8 = 0x08;
@@ -844,13 +881,13 @@ fn format_pg_range(bytes: &[u8], range_type: &str) -> String {
     }
 
     let elem_oid: u32 = match range_type {
-        "int4range"  => 23,
-        "int8range"  => 20,
-        "numrange"   => 1700,
-        "daterange"  => 1082,
-        "tsrange"    => 1114,
-        "tstzrange"  => 1184,
-        _            => 25,
+        "int4range" => 23,
+        "int8range" => 20,
+        "numrange" => 1700,
+        "daterange" => 1082,
+        "tsrange" => 1114,
+        "tstzrange" => 1184,
+        _ => 25,
     };
 
     let lb = if flags & RANGE_LB_INC != 0 { '[' } else { '(' };
@@ -862,7 +899,7 @@ fn format_pg_range(bytes: &[u8], range_type: &str) -> String {
     } else {
         match read_range_bound(bytes, &mut cursor, elem_oid) {
             Some(s) => s,
-            None    => return format!("<{range_type}:{} bytes>", bytes.len()),
+            None => return format!("<{range_type}:{} bytes>", bytes.len()),
         }
     };
     let upper = if flags & RANGE_UB_INF != 0 {
@@ -870,7 +907,7 @@ fn format_pg_range(bytes: &[u8], range_type: &str) -> String {
     } else {
         match read_range_bound(bytes, &mut cursor, elem_oid) {
             Some(s) => s,
-            None    => return format!("<{range_type}:{} bytes>", bytes.len()),
+            None => return format!("<{range_type}:{} bytes>", bytes.len()),
         }
     };
 
@@ -878,12 +915,18 @@ fn format_pg_range(bytes: &[u8], range_type: &str) -> String {
 }
 
 fn read_range_bound(bytes: &[u8], cursor: &mut usize, elem_oid: u32) -> Option<String> {
-    if *cursor + 4 > bytes.len() { return None; }
+    if *cursor + 4 > bytes.len() {
+        return None;
+    }
     let len = i32::from_be_bytes(bytes[*cursor..*cursor + 4].try_into().ok()?);
     *cursor += 4;
-    if len < 0 { return Some("NULL".to_string()); }
+    if len < 0 {
+        return Some("NULL".to_string());
+    }
     let len = len as usize;
-    if *cursor + len > bytes.len() { return None; }
+    if *cursor + len > bytes.len() {
+        return None;
+    }
     let s = decode_pg_range_element(elem_oid, &bytes[*cursor..*cursor + len]);
     *cursor += len;
     Some(s)
@@ -916,14 +959,14 @@ fn decode_pg_range_element(elem_oid: u32, bytes: &[u8]) -> String {
 fn pg_unix_day_to_date(unix_day: i64) -> String {
     // Convert a Unix day number (days since 1970-01-01) to a YYYY-MM-DD string.
     sqlx::types::chrono::NaiveDate::from_num_days_from_ce_opt(
-        (unix_day + 719_163) as i32  // days since year 1 CE: Unix epoch = day 719163 CE
+        (unix_day + 719_163) as i32, // days since year 1 CE: Unix epoch = day 719163 CE
     )
     .map(|d| d.to_string())
     .unwrap_or_else(|| format!("<date:day={unix_day}>"))
 }
 
 fn pg_unix_us_to_datetime(unix_us: i64) -> String {
-    let secs  = unix_us.div_euclid(1_000_000);
+    let secs = unix_us.div_euclid(1_000_000);
     let nsecs = (unix_us.rem_euclid(1_000_000) * 1_000) as u32;
     sqlx::types::chrono::DateTime::<sqlx::types::chrono::Utc>::from_timestamp(secs, nsecs)
         .map(|dt| dt.naive_utc().to_string())
@@ -933,11 +976,13 @@ fn pg_unix_us_to_datetime(unix_us: i64) -> String {
 fn decode_pg_numeric(bytes: &[u8]) -> String {
     // PostgreSQL NUMERIC binary: ndigits(u16) weight(i16) sign(u16) dscale(u16)
     //   followed by ndigits × u16 base-10000 digit groups.
-    if bytes.len() < 8 { return format!("<numeric:{} bytes>", bytes.len()); }
+    if bytes.len() < 8 {
+        return format!("<numeric:{} bytes>", bytes.len());
+    }
     let ndigits = u16::from_be_bytes([bytes[0], bytes[1]]) as i32;
-    let weight  = i16::from_be_bytes([bytes[2], bytes[3]]) as i32;
-    let sign    = u16::from_be_bytes([bytes[4], bytes[5]]);
-    let dscale  = u16::from_be_bytes([bytes[6], bytes[7]]) as usize;
+    let weight = i16::from_be_bytes([bytes[2], bytes[3]]) as i32;
+    let sign = u16::from_be_bytes([bytes[4], bytes[5]]);
+    let dscale = u16::from_be_bytes([bytes[6], bytes[7]]) as usize;
     match sign {
         0xC000 => return "NaN".to_string(),
         0xD000 => return "Infinity".to_string(),
@@ -951,11 +996,18 @@ fn decode_pg_numeric(bytes: &[u8]) -> String {
         .map(|i| u16::from_be_bytes([bytes[8 + i * 2], bytes[9 + i * 2]]))
         .collect();
     let mut result = String::new();
-    if sign == 0x4000 { result.push('-'); }
+    if sign == 0x4000 {
+        result.push('-');
+    }
     // Zero
     if ndigits == 0 {
         result.push('0');
-        if dscale > 0 { result.push('.'); for _ in 0..dscale { result.push('0'); } }
+        if dscale > 0 {
+            result.push('.');
+            for _ in 0..dscale {
+                result.push('0');
+            }
+        }
         return result;
     }
     // Integer part: groups[0..int_groups]
@@ -965,8 +1017,11 @@ fn decode_pg_numeric(bytes: &[u8]) -> String {
     } else {
         for g in 0..int_groups {
             if g < groups.len() {
-                if g == 0 { result.push_str(&groups[g].to_string()); }
-                else       { result.push_str(&format!("{:04}", groups[g])); }
+                if g == 0 {
+                    result.push_str(&groups[g].to_string());
+                } else {
+                    result.push_str(&format!("{:04}", groups[g]));
+                }
             } else {
                 result.push_str("0000");
             }
@@ -977,22 +1032,33 @@ fn decode_pg_numeric(bytes: &[u8]) -> String {
         result.push('.');
         let mut written = 0usize;
         // Groups before the first stored fractional group (weight < -1)
-        let frac_leading = if weight < -1 { (-(weight + 1)) as usize } else { 0 };
+        let frac_leading = if weight < -1 {
+            (-(weight + 1)) as usize
+        } else {
+            0
+        };
         for _ in 0..frac_leading {
-            if written >= dscale { break; }
+            if written >= dscale {
+                break;
+            }
             let take = (dscale - written).min(4);
             result.push_str(&"0000"[..take]);
             written += take;
         }
         let frac_start = int_groups;
         for g in frac_start..groups.len() {
-            if written >= dscale { break; }
+            if written >= dscale {
+                break;
+            }
             let s = format!("{:04}", groups[g]);
             let take = (dscale - written).min(4);
             result.push_str(&s[..take]);
             written += take;
         }
-        while written < dscale { result.push('0'); written += 1; }
+        while written < dscale {
+            result.push('0');
+            written += 1;
+        }
     }
     result
 }
@@ -1011,7 +1077,7 @@ fn format_pg_array_binary(bytes: &[u8]) -> Option<String> {
     if bytes.len() < 12 {
         return None;
     }
-    let ndim     = i32::from_be_bytes(bytes[0..4].try_into().ok()?) as usize;
+    let ndim = i32::from_be_bytes(bytes[0..4].try_into().ok()?) as usize;
     let elem_oid = u32::from_be_bytes(bytes[8..12].try_into().ok()?);
 
     if ndim == 0 {
@@ -1031,7 +1097,7 @@ fn format_pg_array_binary(bytes: &[u8]) -> Option<String> {
     }
 
     let total: usize = dims.iter().product();
-    let mut offset   = header_end;
+    let mut offset = header_end;
     let mut elements: Vec<Option<String>> = Vec::with_capacity(total);
 
     for _ in 0..total {
@@ -1047,7 +1113,10 @@ fn format_pg_array_binary(bytes: &[u8]) -> Option<String> {
             if offset + len > bytes.len() {
                 return None;
             }
-            elements.push(Some(decode_pg_array_element(elem_oid, &bytes[offset..offset + len])));
+            elements.push(Some(decode_pg_array_element(
+                elem_oid,
+                &bytes[offset..offset + len],
+            )));
             offset += len;
         }
     }
@@ -1097,7 +1166,7 @@ fn pg_array_to_text(
             let s = match &elements[*idx] {
                 None => "NULL".to_string(),
                 Some(v) if pg_array_elem_needs_quoting(v) => {
-                    format!("\"{}\"" , v.replace('\\', "\\\\").replace('"', "\\\""))
+                    format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
                 }
                 Some(v) => v.clone(),
             };
@@ -1117,7 +1186,9 @@ fn pg_array_to_text(
 fn pg_array_elem_needs_quoting(s: &str) -> bool {
     s.is_empty()
         || s.eq_ignore_ascii_case("null")
-        || s.contains(|c: char| matches!(c, '"' | '\\' | '{' | '}' | ',') || c.is_ascii_whitespace())
+        || s.contains(|c: char| {
+            matches!(c, '"' | '\\' | '{' | '}' | ',') || c.is_ascii_whitespace()
+        })
 }
 
 fn is_json_type(type_name: &str) -> bool {
@@ -1197,12 +1268,13 @@ fn parse_wkb_geometry(cursor: &mut WkbCursor<'_>) -> Option<String> {
     let dimensions = 2 + usize::from(has_z) + usize::from(has_m);
 
     match base_type {
-        1 => parse_wkb_point(cursor, little_endian, dimensions).map(|coords| format!("POINT({coords})")),
+        1 => parse_wkb_point(cursor, little_endian, dimensions)
+            .map(|coords| format!("POINT({coords})")),
         2 => parse_wkb_linestring(cursor, little_endian, dimensions)
             .map(|coords| format!("LINESTRING({coords})")),
         3 => parse_wkb_polygon(cursor, little_endian, dimensions)
             .map(|rings| format!("POLYGON({rings})")),
-        4 => parse_wkb_multi(cursor, little_endian, "MULTIPOINT") ,
+        4 => parse_wkb_multi(cursor, little_endian, "MULTIPOINT"),
         5 => parse_wkb_multi(cursor, little_endian, "MULTILINESTRING"),
         6 => parse_wkb_multi(cursor, little_endian, "MULTIPOLYGON"),
         7 => parse_wkb_multi(cursor, little_endian, "GEOMETRYCOLLECTION"),
@@ -1210,11 +1282,19 @@ fn parse_wkb_geometry(cursor: &mut WkbCursor<'_>) -> Option<String> {
     }
 }
 
-fn parse_wkb_point(cursor: &mut WkbCursor<'_>, little_endian: bool, dimensions: usize) -> Option<String> {
+fn parse_wkb_point(
+    cursor: &mut WkbCursor<'_>,
+    little_endian: bool,
+    dimensions: usize,
+) -> Option<String> {
     Some(read_wkb_coordinate(cursor, little_endian, dimensions))
 }
 
-fn parse_wkb_linestring(cursor: &mut WkbCursor<'_>, little_endian: bool, dimensions: usize) -> Option<String> {
+fn parse_wkb_linestring(
+    cursor: &mut WkbCursor<'_>,
+    little_endian: bool,
+    dimensions: usize,
+) -> Option<String> {
     let count = usize::try_from(cursor.read_u32(little_endian)?).ok()?;
     let mut coords = Vec::with_capacity(count);
     for _ in 0..count {
@@ -1223,7 +1303,11 @@ fn parse_wkb_linestring(cursor: &mut WkbCursor<'_>, little_endian: bool, dimensi
     Some(coords.join(", "))
 }
 
-fn parse_wkb_polygon(cursor: &mut WkbCursor<'_>, little_endian: bool, dimensions: usize) -> Option<String> {
+fn parse_wkb_polygon(
+    cursor: &mut WkbCursor<'_>,
+    little_endian: bool,
+    dimensions: usize,
+) -> Option<String> {
     let ring_count = usize::try_from(cursor.read_u32(little_endian)?).ok()?;
     let mut rings = Vec::with_capacity(ring_count);
     for _ in 0..ring_count {
@@ -1246,7 +1330,11 @@ fn parse_wkb_multi(cursor: &mut WkbCursor<'_>, little_endian: bool, label: &str)
     Some(format!("{}({})", label, items.join(", ")))
 }
 
-fn read_wkb_coordinate(cursor: &mut WkbCursor<'_>, little_endian: bool, dimensions: usize) -> String {
+fn read_wkb_coordinate(
+    cursor: &mut WkbCursor<'_>,
+    little_endian: bool,
+    dimensions: usize,
+) -> String {
     let mut ordinates = Vec::with_capacity(dimensions.min(3));
     let x = cursor.read_f64(little_endian).unwrap_or_default();
     let y = cursor.read_f64(little_endian).unwrap_or_default();
@@ -1337,54 +1425,56 @@ pub fn elapsed_ms(start: Instant) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_pg_numeric, format_binary_value, format_pg_array_binary, format_pg_binary_value, format_text_value, geometry_bytes_to_text, json_value_to_text};
+    use super::{
+        decode_pg_numeric, format_binary_value, format_pg_array_binary, format_pg_binary_value,
+        format_text_value, geometry_bytes_to_text, json_value_to_text,
+    };
     use serde_json::json;
 
     #[test]
     fn json_values_render_as_text() {
-        assert_eq!(json_value_to_text(&json!({"name":"demo","ok":true})), r#"{"name":"demo","ok":true}"#);
+        assert_eq!(
+            json_value_to_text(&json!({"name":"demo","ok":true})),
+            r#"{"name":"demo","ok":true}"#
+        );
     }
 
     #[test]
     fn mysql_point_bytes_render_as_wkt() {
         let bytes = [
-            1,
-            1, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 240, 63,
-            0, 0, 0, 0, 0, 0, 0, 64,
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 240, 63, 0, 0, 0, 0, 0, 0, 0, 64,
         ];
 
-        assert_eq!(geometry_bytes_to_text(&bytes), Some("POINT(1 2)".to_string()));
+        assert_eq!(
+            geometry_bytes_to_text(&bytes),
+            Some("POINT(1 2)".to_string())
+        );
         assert_eq!(format_binary_value("POINT", &bytes), "POINT(1 2)");
     }
 
     #[test]
     fn mysql_srid_zero_point_bytes_render_as_wkt() {
         let bytes = [
-            0, 0, 0, 0,
-            1,
-            1, 0, 0, 0,
-            197, 254, 178, 123, 242, 192, 73, 64,
-            235, 226, 54, 26, 192, 91, 192, 191,
+            0, 0, 0, 0, 1, 1, 0, 0, 0, 197, 254, 178, 123, 242, 192, 73, 64, 235, 226, 54, 26, 192,
+            91, 192, 191,
         ];
 
-        assert_eq!(geometry_bytes_to_text(&bytes), Some("POINT(51.5074 -0.1278)".to_string()));
-        assert_eq!(format_binary_value("GEOMETRY", &bytes), "POINT(51.5074 -0.1278)");
+        assert_eq!(
+            geometry_bytes_to_text(&bytes),
+            Some("POINT(51.5074 -0.1278)".to_string())
+        );
+        assert_eq!(
+            format_binary_value("GEOMETRY", &bytes),
+            "POINT(51.5074 -0.1278)"
+        );
     }
 
     #[test]
     fn mysql_srid_zero_linestring_bytes_render_as_wkt() {
         let bytes = [
-            0, 0, 0, 0,
-            1,
-            2, 0, 0, 0,
-            3, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 240, 63,
-            0, 0, 0, 0, 0, 0, 240, 63,
-            0, 0, 0, 0, 0, 0, 0, 64,
-            0, 0, 0, 0, 0, 0, 0, 64,
+            0, 0, 0, 0, 1, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 240, 63, 0, 0, 0, 0, 0, 0, 240, 63, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0,
+            0, 0, 0, 0, 64,
         ];
 
         assert_eq!(
@@ -1400,21 +1490,23 @@ mod tests {
     #[test]
     fn mysql_geometry_with_srid_renders_readably() {
         let bytes = [
-            230, 16, 0, 0,
-            1,
-            1, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 34, 64,
-            0, 0, 0, 0, 0, 0, 36, 64,
+            230, 16, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 34, 64, 0, 0, 0, 0, 0, 0, 36, 64,
         ];
 
-        assert_eq!(geometry_bytes_to_text(&bytes), Some("SRID=4326;POINT(9 10)".to_string()));
+        assert_eq!(
+            geometry_bytes_to_text(&bytes),
+            Some("SRID=4326;POINT(9 10)".to_string())
+        );
     }
 
     // ── Postgres type display ──────────────────────────────────────────────────
 
     #[test]
     fn bytea_binary_renders_as_hex() {
-        assert_eq!(format_binary_value("bytea", &[0xde, 0xad, 0xbe, 0xef]), r"\xdeadbeef");
+        assert_eq!(
+            format_binary_value("bytea", &[0xde, 0xad, 0xbe, 0xef]),
+            r"\xdeadbeef"
+        );
         assert_eq!(format_binary_value("BYTEA", &[0x00, 0xff]), r"\x00ff");
         assert_eq!(format_binary_value("bytea", &[]), r"\x");
     }
@@ -1431,20 +1523,20 @@ mod tests {
         // These postgres text-format values must be returned unchanged by
         // format_text_value (they are already human-readable as-is).
         let cases = [
-            ("uuid",      "550e8400-e29b-41d4-a716-446655440000"),
-            ("inet",      "192.168.1.0/24"),
-            ("macaddr",   "08:00:2b:01:02:03"),
-            ("bit",       "10101010"),
-            ("varbit",    "101"),
-            ("interval",  "1 year 2 mons 3 days 04:05:06"),
-            ("timetz",    "14:30:00+05:30"),
+            ("uuid", "550e8400-e29b-41d4-a716-446655440000"),
+            ("inet", "192.168.1.0/24"),
+            ("macaddr", "08:00:2b:01:02:03"),
+            ("bit", "10101010"),
+            ("varbit", "101"),
+            ("interval", "1 year 2 mons 3 days 04:05:06"),
+            ("timetz", "14:30:00+05:30"),
             ("int4range", "[1,10)"),
-            ("_int4",     "{1,2,3}"),
-            ("_text",     "{hello,world}"),
-            ("xml",       "<root><child/></root>"),
-            ("money",     "$1,234.56"),
-            ("line",      "{1,2,-3}"),
-            ("box",       "(2,2),(0,0)"),
+            ("_int4", "{1,2,3}"),
+            ("_text", "{hello,world}"),
+            ("xml", "<root><child/></root>"),
+            ("money", "$1,234.56"),
+            ("line", "{1,2,-3}"),
+            ("box", "(2,2),(0,0)"),
         ];
         for (ty, val) in cases {
             let result = format_text_value(ty, val.to_string());
@@ -1458,14 +1550,14 @@ mod tests {
     fn mysql_varbinary_wkb_point_renders_as_wkt() {
         // WKB for POINT(1 1) as produced by ST_AsBinary() — no SRID prefix.
         let bytes: &[u8] = &[
-            0x01,                                           // little-endian
-            0x01, 0x00, 0x00, 0x00,                       // type: POINT
+            0x01, // little-endian
+            0x01, 0x00, 0x00, 0x00, // type: POINT
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, // x = 1.0
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, // y = 1.0
         ];
         assert_eq!(format_binary_value("varbinary", bytes), "POINT(1 1)");
         assert_eq!(format_binary_value("VARBINARY", bytes), "POINT(1 1)");
-        assert_eq!(format_binary_value("blob", bytes),     "POINT(1 1)");
+        assert_eq!(format_binary_value("blob", bytes), "POINT(1 1)");
     }
 
     #[test]
@@ -1490,7 +1582,10 @@ mod tests {
     #[test]
     fn pg_macaddr_binary_renders_correctly() {
         let bytes = [0x08u8, 0x00, 0x2b, 0x01, 0x02, 0x03];
-        assert_eq!(format_pg_binary_value("macaddr", &bytes), "08:00:2b:01:02:03");
+        assert_eq!(
+            format_pg_binary_value("macaddr", &bytes),
+            "08:00:2b:01:02:03"
+        );
     }
 
     #[test]
@@ -1517,25 +1612,34 @@ mod tests {
     #[test]
     fn pg_money_binary_renders_as_decimal() {
         // $99.99 = 9999 cents
-        assert_eq!(format_pg_binary_value("money", &9999i64.to_be_bytes()), "99.99");
+        assert_eq!(
+            format_pg_binary_value("money", &9999i64.to_be_bytes()),
+            "99.99"
+        );
         // -$1.50 = -150 cents
-        assert_eq!(format_pg_binary_value("money", &(-150i64).to_be_bytes()), "-1.50");
+        assert_eq!(
+            format_pg_binary_value("money", &(-150i64).to_be_bytes()),
+            "-1.50"
+        );
     }
 
     #[test]
     fn pg_int_array_binary_renders_as_postgres_array() {
         // INT4 array {1,2,3,4}
         let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(&1i32.to_be_bytes());  // ndim=1
-        bytes.extend_from_slice(&0i32.to_be_bytes());  // flags=0
+        bytes.extend_from_slice(&1i32.to_be_bytes()); // ndim=1
+        bytes.extend_from_slice(&0i32.to_be_bytes()); // flags=0
         bytes.extend_from_slice(&23i32.to_be_bytes()); // elem_oid=INT4=23
-        bytes.extend_from_slice(&4i32.to_be_bytes());  // dim_len=4
-        bytes.extend_from_slice(&1i32.to_be_bytes());  // lower_bound=1
+        bytes.extend_from_slice(&4i32.to_be_bytes()); // dim_len=4
+        bytes.extend_from_slice(&1i32.to_be_bytes()); // lower_bound=1
         for v in [1i32, 2, 3, 4] {
             bytes.extend_from_slice(&4i32.to_be_bytes()); // elem_len=4
             bytes.extend_from_slice(&v.to_be_bytes());
         }
-        assert_eq!(format_pg_array_binary(&bytes), Some("{1,2,3,4}".to_string()));
+        assert_eq!(
+            format_pg_array_binary(&bytes),
+            Some("{1,2,3,4}".to_string())
+        );
     }
 
     #[test]
@@ -1543,13 +1647,13 @@ mod tests {
         // TEXT[][] {{top-left,top-right},{bottom-left,bottom-right}}
         let texts = ["top-left", "top-right", "bottom-left", "bottom-right"];
         let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(&2i32.to_be_bytes());  // ndim=2
-        bytes.extend_from_slice(&0i32.to_be_bytes());  // flags=0
+        bytes.extend_from_slice(&2i32.to_be_bytes()); // ndim=2
+        bytes.extend_from_slice(&0i32.to_be_bytes()); // flags=0
         bytes.extend_from_slice(&25i32.to_be_bytes()); // elem_oid=TEXT=25
-        bytes.extend_from_slice(&2i32.to_be_bytes());  // dim1=2
-        bytes.extend_from_slice(&1i32.to_be_bytes());  // lb1=1
-        bytes.extend_from_slice(&2i32.to_be_bytes());  // dim2=2
-        bytes.extend_from_slice(&1i32.to_be_bytes());  // lb2=1
+        bytes.extend_from_slice(&2i32.to_be_bytes()); // dim1=2
+        bytes.extend_from_slice(&1i32.to_be_bytes()); // lb1=1
+        bytes.extend_from_slice(&2i32.to_be_bytes()); // dim2=2
+        bytes.extend_from_slice(&1i32.to_be_bytes()); // lb2=1
         for t in texts {
             let tb = t.as_bytes();
             bytes.extend_from_slice(&(tb.len() as i32).to_be_bytes());
@@ -1587,11 +1691,11 @@ mod tests {
         // sqlx reports INT4[] (bracket form), not _int4 (catalog form).
         // format_pg_binary_value must route both to format_pg_array_binary.
         let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(&1i32.to_be_bytes());  // ndim=1
-        bytes.extend_from_slice(&0i32.to_be_bytes());  // flags=0
+        bytes.extend_from_slice(&1i32.to_be_bytes()); // ndim=1
+        bytes.extend_from_slice(&0i32.to_be_bytes()); // flags=0
         bytes.extend_from_slice(&23i32.to_be_bytes()); // INT4 OID=23
-        bytes.extend_from_slice(&3i32.to_be_bytes());  // dim=3
-        bytes.extend_from_slice(&1i32.to_be_bytes());  // lower_bound=1
+        bytes.extend_from_slice(&3i32.to_be_bytes()); // dim=3
+        bytes.extend_from_slice(&1i32.to_be_bytes()); // lower_bound=1
         for v in [1i32, 2, 3] {
             bytes.extend_from_slice(&4i32.to_be_bytes());
             bytes.extend_from_slice(&v.to_be_bytes());
@@ -1603,12 +1707,25 @@ mod tests {
 
     // ── Range types ───────────────────────────────────────────────────────────────
 
-    fn make_int4range_bytes(lb_inc: bool, lower: Option<i32>, ub_inc: bool, upper: Option<i32>) -> Vec<u8> {
+    fn make_int4range_bytes(
+        lb_inc: bool,
+        lower: Option<i32>,
+        ub_inc: bool,
+        upper: Option<i32>,
+    ) -> Vec<u8> {
         let mut flags: u8 = 0;
-        if lb_inc { flags |= 0x02; }
-        if ub_inc { flags |= 0x04; }
-        if lower.is_none() { flags |= 0x08; }
-        if upper.is_none() { flags |= 0x10; }
+        if lb_inc {
+            flags |= 0x02;
+        }
+        if ub_inc {
+            flags |= 0x04;
+        }
+        if lower.is_none() {
+            flags |= 0x08;
+        }
+        if upper.is_none() {
+            flags |= 0x10;
+        }
         let mut bytes = vec![flags];
         if let Some(v) = lower {
             bytes.extend_from_slice(&4i32.to_be_bytes());
@@ -1649,10 +1766,10 @@ mod tests {
     fn pg_numeric_decoder_basic() {
         // 1234.5678: ndigits=2, weight=0, sign=0, dscale=4, groups=[1234,5678]
         let mut b: Vec<u8> = Vec::new();
-        b.extend_from_slice(&2u16.to_be_bytes());   // ndigits
-        b.extend_from_slice(&0i16.to_be_bytes());   // weight
-        b.extend_from_slice(&0u16.to_be_bytes());   // sign
-        b.extend_from_slice(&4u16.to_be_bytes());   // dscale
+        b.extend_from_slice(&2u16.to_be_bytes()); // ndigits
+        b.extend_from_slice(&0i16.to_be_bytes()); // weight
+        b.extend_from_slice(&0u16.to_be_bytes()); // sign
+        b.extend_from_slice(&4u16.to_be_bytes()); // dscale
         b.extend_from_slice(&1234u16.to_be_bytes());
         b.extend_from_slice(&5678u16.to_be_bytes());
         assert_eq!(decode_pg_numeric(&b), "1234.5678");

@@ -1,11 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { outputTab, activeTab, tabs, activeTabId, selectedConnId, activeConnections } from '../stores/appStore';
 
   // Derive connection ID from the active tab
   $: activeTabConnId = $activeTab?.connId ?? '';
-  import ResultsGrid from './ResultsGrid.svelte';
-  import EditSavedQueryTitleDialog from './EditSavedQueryTitleDialog.svelte';
   import {
     GetQueryHistoryByConnID,
     SaveAndConnect,
@@ -16,8 +14,35 @@
     ListSavedConnections,
     DeleteSavedQuery,
     UpdateSavedQueryTitle,
-  } from '../../tauri/gen/main/App';
+  } from '../../desktop/gen/main/App';
   import { get } from 'svelte/store';
+
+  let ResultsGridComponent: typeof import('./ResultsGrid.svelte').default | null = null;
+  let EditSavedQueryTitleDialogComponent:
+    | typeof import('./EditSavedQueryTitleDialog.svelte').default
+    | null = null;
+  let editTitleDialog: { open: (currentTitle: string) => Promise<string | null> } | null = null;
+
+  function afterStartupPaint(task: () => void) {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.setTimeout(task, 25);
+      });
+    });
+  }
+
+  async function loadResultsGrid() {
+    if (ResultsGridComponent) return;
+    const module = await import('./ResultsGrid.svelte');
+    ResultsGridComponent = module.default;
+  }
+
+  async function loadSavedQueryTitleDialog() {
+    if (EditSavedQueryTitleDialogComponent) return;
+    const module = await import('./EditSavedQueryTitleDialog.svelte');
+    EditSavedQueryTitleDialogComponent = module.default;
+    await tick();
+  }
 
   // ─── Simple SELECT detection ──────────────────────────────────────────────────
   function parseSimpleSelect(sql: string): { tableName: string; schemaName: string } | null {
@@ -136,9 +161,11 @@
   }
 
   $: hasPendingEdits = Object.keys($activeTab?.pendingEdits ?? {}).length > 0;
+  $: if ($activeTab?.result && !ResultsGridComponent) {
+    void loadResultsGrid();
+  }
 
   let contextMenu: { x: number; y: number; type: 'history' | 'saved'; itemId?: number; itemTitle?: string } | null = null;
-  let editTitleDialog: EditSavedQueryTitleDialog;
 
   function openContextMenu(e: MouseEvent, type: 'history' | 'saved', itemId?: number, itemTitle?: string) {
     contextMenu = { x: e.clientX, y: e.clientY, type, itemId, itemTitle };
@@ -224,6 +251,11 @@
   }
 
   onMount(() => {
+    afterStartupPaint(() => {
+      void loadResultsGrid();
+      void loadSavedQueryTitleDialog();
+    });
+
     // Load history initially if we're on the history tab
     if (get(outputTab) === 'history') {
       loadConnectionHistory();
@@ -331,6 +363,8 @@
     const currentTitle = contextMenu.itemTitle ?? '';
     closeContextMenu();
 
+    await loadSavedQueryTitleDialog();
+    if (!editTitleDialog) return;
     const newTitle = await editTitleDialog.open(currentTitle);
     if (!newTitle || newTitle === currentTitle) return;
 
@@ -363,7 +397,13 @@
 
   <div class="output-content">
     {#if $outputTab === 'results'}
-      <ResultsGrid result={$activeTab?.result ?? null} tabId={$activeTab?.id ?? ''} editInfo={$activeTab?.editInfo ?? null} />
+      {#if ResultsGridComponent}
+        <ResultsGridComponent result={$activeTab?.result ?? null} tabId={$activeTab?.id ?? ''} editInfo={$activeTab?.editInfo ?? null} />
+      {:else if $activeTab?.result}
+        <div class="msg muted">Loading results...</div>
+      {:else}
+        <div class="msg muted">No results.</div>
+      {/if}
 
     {:else if $outputTab === 'messages'}
       <div class="messages">
@@ -427,7 +467,9 @@
   </div>
 </div>
 
-<EditSavedQueryTitleDialog bind:this={editTitleDialog} />
+{#if EditSavedQueryTitleDialogComponent}
+  <EditSavedQueryTitleDialogComponent bind:this={editTitleDialog} />
+{/if}
 
 {#if contextMenu}
   <!-- svelte-ignore a11y-click-events-have-key-events -->

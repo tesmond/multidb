@@ -63,8 +63,12 @@ pub fn save_connection_password(conn_id: &str, password: &str) -> Result<()> {
             let _ = delete_legacy_keyring_password(conn_id);
             Ok(())
         }
-        Some(_) => Err(anyhow!("OS keychain verification failed for connection {conn_id}")),
-        None => Err(anyhow!("OS keychain verification found no credential for connection {conn_id}")),
+        Some(_) => Err(anyhow!(
+            "OS keychain verification failed for connection {conn_id}"
+        )),
+        None => Err(anyhow!(
+            "OS keychain verification found no credential for connection {conn_id}"
+        )),
     }
 }
 
@@ -234,6 +238,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_target_name_is_stable() {
-        assert_eq!(super::windows_target_name("abc-123"), "multidb.connection.abc-123");
+        assert_eq!(
+            super::windows_target_name("abc-123"),
+            "multidb.connection.abc-123"
+        );
     }
 }

@@ -1,27 +1,7 @@
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "./bridge.js";
 
 export function EventsOn(eventName, callback) {
-  let disposed = false;
-  let unlisten = null;
-
-  listen(eventName, ({ payload }) => {
-    if (!disposed) {
-      callback(payload);
-    }
-  }).then((fn) => {
-    if (disposed) {
-      fn();
-    } else {
-      unlisten = fn;
-    }
-  });
-
-  return () => {
-    disposed = true;
-    if (unlisten) {
-      unlisten();
-    }
-  };
+  return listen(eventName, callback);
 }
 
 export function EventsOnMultiple(eventName, callback, maxCallbacks) {
@@ -45,5 +25,5 @@ export function EventsOff() {}
 export function EventsOffAll() {}
 
 export function EventsEmit() {
-  throw new Error("EventsEmit is not implemented in the Tauri compatibility runtime");
+  throw new Error("EventsEmit is not implemented in the multidb desktop runtime");
 }

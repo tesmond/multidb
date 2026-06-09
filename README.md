@@ -46,7 +46,7 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 
 ## Tech Stack
 
-- Desktop framework: Tauri 2
+- Desktop shell: WRY + Tao
 - Backend: Rust
 - Frontend: Svelte + TypeScript + Vite
 - Editor: CodeMirror 6
@@ -56,21 +56,22 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 
 ## Project Structure
 
-- `src-tauri`: Tauri app, Rust backend, command handlers, and packaging config
-- `src-tauri/src/connections.rs`: connection manager, DSN logic, and Kubernetes port-forwarding
-- `src-tauri/src/queries.rs`: query execution, cancellation, result conversion, and non-query handling
-- `src-tauri/src/schema.rs`: schema and primary-key inspection
-- `src-tauri/src/history.rs`: local metadata persistence in `history.db`
-- `src-tauri/src/backup.rs`: table backup, import, pg_dump import, and drop workflows
+- `desktop`: WRY/Tao desktop shell, Rust backend, command handlers, and IPC bridge
+- `desktop/src/desktop.rs`: lightweight window/webview host and static asset protocol
+- `desktop/src/ipc.rs`: JSON IPC dispatcher used by the frontend compatibility bindings
+- `desktop/src/connections.rs`: connection manager, DSN logic, and Kubernetes port-forwarding
+- `desktop/src/queries.rs`: query execution, cancellation, result conversion, and non-query handling
+- `desktop/src/schema.rs`: schema and primary-key inspection
+- `desktop/src/history.rs`: local metadata persistence in `history.db`
+- `desktop/src/backup.rs`: table backup, import, pg_dump import, and drop workflows
 - `frontend/src`: Svelte UI components and stores
-- `src-tauri/gen/`: Tauri-generated frontend bindings (auto-generated during build)
-- `docs/rust-tauri-migration-plan.md`: migration inventory and follow-up hardening plan
+- `frontend/desktop`: lightweight frontend bindings for the WRY IPC bridge
 
 ## Prerequisites
 
 - Rust stable
 - Node.js and npm
-- Platform dependencies for Tauri 2
+- Platform dependencies for WRY/WebKitGTK on Linux
 - Optional tools based on workflow:
   - `kubectl` for Kubernetes port-forwarded connections
 
@@ -91,7 +92,7 @@ Run the desktop app in development mode:
 npm run dev
 ```
 
-This starts the Tauri desktop app and the Vite dev server for frontend updates.
+This builds the frontend once and starts the lightweight WRY/Tao desktop app.
 
 ## Build
 
@@ -100,6 +101,8 @@ Create a production desktop build:
 ```bash
 npm run build
 ```
+
+The build script compiles the Svelte bundle first, then embeds those static assets into the WRY executable so the app can start without loose frontend files beside it.
 
 ## Testing And Checks
 

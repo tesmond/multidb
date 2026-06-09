@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { tabs, activeConnections, selectedConnId, statusMessage, outputTab, requestSchemaRefresh, extractFirstTableName } from '../stores/appStore';
-  import { ExecuteQueryStreamed, CancelQuery, SaveQuery } from '../../tauri/gen/main/App';
-  import { EventsOn, EventsOff } from '../../tauri/runtime/runtime';
+  import { ExecuteQueryStreamed, CancelQuery, SaveQuery } from '../../desktop/gen/main/App';
+  import { EventsOn, EventsOff } from '../../desktop/runtime/runtime';
   import { get } from 'svelte/store';
   import SaveQueryDialog from './SaveQueryDialog.svelte';
 

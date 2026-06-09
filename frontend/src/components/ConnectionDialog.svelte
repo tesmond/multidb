@@ -1,7 +1,7 @@
 <script lang="ts">
   import { showConnectionDialog, editingConnection, activeConnections, selectedConnId, statusMessage, tabs, refreshConnectionSchema, activeServerGroupId, addConnectionToGroup } from '../stores/appStore';
   import type { ConnectionConfig } from '../stores/appStore';
-  import { SaveAndConnect, SelectSqliteFile, TestConnection } from '../../tauri/gen/main/App';
+  import { SaveAndConnect, SelectSqliteFile, TestConnection } from '../../desktop/gen/main/App';
 
   let form: ConnectionConfig = emptyForm();
   let testing = false;

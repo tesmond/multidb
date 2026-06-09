@@ -41,7 +41,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: desktop
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -61,14 +61,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
-      - name: Build app with Tauri
+      - name: Build desktop app
         run: npm run build
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
-          path: src-tauri/target/release/bundle/**/*
+          path: desktop/target/release/multidb*
           if-no-files-found: ignore
 
   release:
@@ -104,7 +104,8 @@ jobs:
                 -iname '*.deb' -o \
                 -iname '*.rpm' -o \
                 -iname '*.zip' -o \
-                -iname '*.tar.gz' \
+                -iname '*.tar.gz' -o \
+                -name 'multidb' \
               \) \
               ! -iname '*.sig' \
               -print0

@@ -9,10 +9,9 @@ Thumbs.db
 .idea/
 
 # =========================
-# Rust / Tauri backend
+# Rust desktop backend
 # =========================
-src-tauri/target/
-src-tauri/gen/
+desktop/target/
 
 # Binaries
 *.exe

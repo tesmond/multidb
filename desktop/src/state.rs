@@ -1,33 +1,22 @@
-use crate::{
-    connections::ConnectionManager,
-    history::HistoryStore,
-    models::ConnectionConfig,
-};
+use crate::{connections::ConnectionManager, history::HistoryStore, models::ConnectionConfig};
 use anyhow::{anyhow, Result};
 use std::{collections::HashMap, path::PathBuf};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OnceCell};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 pub struct AppState {
     pub connections: ConnectionManager,
-    pub store: RwLock<Option<HistoryStore>>,
+    pub store: OnceCell<HistoryStore>,
     pub query_cancels: Mutex<HashMap<String, CancellationToken>>,
 }
 
 impl AppState {
-    pub async fn initialise(&self) -> Result<()> {
-        let store = HistoryStore::open(history_db_path()).await?;
-        *self.store.write().await = Some(store);
-        Ok(())
-    }
-
     pub async fn store(&self) -> Result<HistoryStore> {
         self.store
-            .read()
+            .get_or_try_init(|| async { HistoryStore::open(history_db_path()).await })
             .await
-            .clone()
-            .ok_or_else(|| anyhow!("store not initialised"))
+            .cloned()
     }
 
     pub async fn get_config_or_saved(&self, conn_id: &str) -> Result<ConnectionConfig> {

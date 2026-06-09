@@ -1,11 +1,11 @@
 // Shared CSV export utilities used by ResultsGrid and StatusBar.
 //
 // On macOS WKWebView, blob URL downloads via simulated anchor clicks do
-// not work.  All save operations are therefore routed through the native Tauri
+// not work. All save operations are therefore routed through the native
 // SaveCSV backend call which opens a system save-file dialog and writes the
 // file from Rust.
 
-import { SaveCSV } from "../../tauri/gen/main/App";
+import { SaveCSV } from "../../desktop/gen/main/App";
 
 export function escapeCSV(value: any): string {
   if (value === null || value === undefined) return "";
@@ -79,7 +79,7 @@ function rowToCSV(row: any[], expectedCols: number): string {
 }
 
 /**
- * Open the native OS save dialog (via the Wails Go backend) and write the CSV.
+ * Open the native OS save dialog through the Rust backend and write the CSV.
  * This works correctly on macOS where WKWebView does not support blob downloads.
  */
 export async function saveCSVNative(

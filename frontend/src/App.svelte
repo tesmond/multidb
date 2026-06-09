@@ -4,8 +4,6 @@
     import Navigator from "./components/Navigator.svelte";
     import OutputPanel from "./components/OutputPanel.svelte";
     import StatusBar from "./components/StatusBar.svelte";
-    import ConnectionDialog from "./components/ConnectionDialog.svelte";
-    import ImportDialog from "./components/ImportDialog.svelte";
     import {
         tabs,
         activeTabId,
@@ -13,13 +11,19 @@
         selectedConnId,
         setActiveConnectionsOrdered,
     } from "./stores/appStore";
-    import { ListSavedConnections } from "../tauri/gen/main/App";
+    import { ListSavedConnections } from "../desktop/gen/main/App";
     import { get } from "svelte/store";
 
     // Tab context menu state
     let tabContextMenu: { tabId: string; x: number; y: number } | null = null;
     let SqlEditor:
         | typeof import("./components/SqlEditor.svelte").default
+        | null = null;
+    let ConnectionDialogComponent:
+        | typeof import("./components/ConnectionDialog.svelte").default
+        | null = null;
+    let ImportDialogComponent:
+        | typeof import("./components/ImportDialog.svelte").default
         | null = null;
 
     // Inline tab editing state
@@ -193,6 +197,24 @@
         editingTitle = "";
     }
 
+    function markStartup(name: string) {
+        window.__MULTIDB_MARK_STARTUP__?.(name);
+    }
+
+    function reportStartupAfterPaint(afterVisible: () => void) {
+        requestAnimationFrame(() => {
+            markStartup("app_first_animation_frame");
+            requestAnimationFrame(() => {
+                markStartup("app_second_animation_frame");
+                window.setTimeout(() => {
+                    markStartup("app_text_first_visible");
+                    window.__MULTIDB_REPORT_STARTUP__?.();
+                    afterVisible();
+                }, 0);
+            });
+        });
+    }
+
     function getConnectionConfig(connId: string) {
         return $activeConnections.find((c) => c.config.id === connId)?.config;
     }
@@ -248,6 +270,7 @@
     }
 
     onMount(() => {
+        markStartup("app_on_mount_start");
         let mounted = true;
         const onResize = () => updateTabOverflowState();
         window.addEventListener("resize", onResize);
@@ -256,29 +279,43 @@
         const $tabs = get(tabs);
         if ($tabs.length > 0) activeTabId.set($tabs[0].id);
 
-        void (async () => {
+        function loadDeferredStartupWork() {
             void import("./components/SqlEditor.svelte").then((module) => {
                 if (mounted) SqlEditor = module.default;
             });
+            void import("./components/ConnectionDialog.svelte").then((module) => {
+                if (mounted) ConnectionDialogComponent = module.default;
+            });
+            void import("./components/ImportDialog.svelte").then((module) => {
+                if (mounted) ImportDialogComponent = module.default;
+            });
 
-            // Load saved connections
-            try {
-                const saved = await ListSavedConnections();
-                if (mounted && saved && saved.length > 0) {
-                    setActiveConnectionsOrdered(
-                        saved.map((cfg) => ({
-                            config: cfg,
-                            schema: null,
-                            schemaLoading: false,
-                            schemaError: null,
-                        })),
-                    );
-                    selectedConnId.set(saved[0].id);
-                }
-            } catch (_) {}
+            void (async () => {
+                try {
+                    const saved = await ListSavedConnections();
+                    if (mounted && saved && saved.length > 0) {
+                        setActiveConnectionsOrdered(
+                            saved.map((cfg) => ({
+                                config: cfg,
+                                schema: null,
+                                schemaLoading: false,
+                                schemaError: null,
+                            })),
+                        );
+                        selectedConnId.set(saved[0].id);
+                    }
+                } catch (_) {}
+            })();
+        }
+
+        void (async () => {
 
             await tick();
-            if (mounted) updateTabOverflowState();
+            if (mounted) {
+                updateTabOverflowState();
+                markStartup("app_tick_after_mount");
+                reportStartupAfterPaint(loadDeferredStartupWork);
+            }
         })();
 
         return () => {
@@ -472,8 +509,12 @@
     <StatusBar />
 </div>
 
-<ConnectionDialog />
-<ImportDialog />
+{#if ConnectionDialogComponent}
+    <ConnectionDialogComponent />
+{/if}
+{#if ImportDialogComponent}
+    <ImportDialogComponent />
+{/if}
 
 {#if tabContextMenu}
     <div

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../../runtime/bridge.js";
 
 export function BackupTable(connId, tableName, schemaName) {
   return invoke("backup_table", { connId, tableName, schemaName });

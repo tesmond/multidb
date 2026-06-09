@@ -267,24 +267,24 @@ impl HistoryStore {
             };
 
             out.push(ConnectionConfig {
-                    id: row.try_get("id")?,
-                    name: row.try_get("name")?,
-                    driver: row.try_get("driver")?,
-                    tab_color: row.try_get("tab_color")?,
-                    tab_text_black: row.try_get::<i64, _>("tab_text_black")? != 0,
-                    host: row.try_get("host")?,
-                    port: row.try_get::<i64, _>("port")? as i32,
-                    username: row.try_get("username")?,
-                    password,
-                    database: row.try_get("database")?,
-                    dsn: row.try_get("dsn")?,
-                    use_kube_port_forward: row.try_get::<i64, _>("use_kube_port_forward")? != 0,
-                    kube_context: row.try_get("kube_context")?,
-                    kube_namespace: row.try_get("kube_namespace")?,
-                    kube_resource: row.try_get("kube_resource")?,
-                    kube_local_port: row.try_get::<i64, _>("kube_local_port")? as i32,
-                    kube_remote_port: row.try_get::<i64, _>("kube_remote_port")? as i32,
-                });
+                id: row.try_get("id")?,
+                name: row.try_get("name")?,
+                driver: row.try_get("driver")?,
+                tab_color: row.try_get("tab_color")?,
+                tab_text_black: row.try_get::<i64, _>("tab_text_black")? != 0,
+                host: row.try_get("host")?,
+                port: row.try_get::<i64, _>("port")? as i32,
+                username: row.try_get("username")?,
+                password,
+                database: row.try_get("database")?,
+                dsn: row.try_get("dsn")?,
+                use_kube_port_forward: row.try_get::<i64, _>("use_kube_port_forward")? != 0,
+                kube_context: row.try_get("kube_context")?,
+                kube_namespace: row.try_get("kube_namespace")?,
+                kube_resource: row.try_get("kube_resource")?,
+                kube_local_port: row.try_get::<i64, _>("kube_local_port")? as i32,
+                kube_remote_port: row.try_get::<i64, _>("kube_remote_port")? as i32,
+            });
         }
 
         Ok(out)

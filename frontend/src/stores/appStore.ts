@@ -4,8 +4,8 @@ import type {
   schema,
   history,
   main,
-} from "../../tauri/gen/models";
-import { GetSchema, LoadSchema, SaveSchema } from "../../tauri/gen/main/App";
+} from "../../desktop/gen/models";
+import { GetSchema, LoadSchema, SaveSchema } from "../../desktop/gen/main/App";
 
 // -----------------------------------------------------------------------
 // Connection state

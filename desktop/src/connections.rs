@@ -280,10 +280,7 @@ fn build_sqlite_file_dsn(path: &str) -> String {
 
 fn looks_like_windows_absolute_path(path: &str) -> bool {
     let bytes = path.as_bytes();
-    bytes.len() > 2
-        && bytes[1] == b':'
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[2] == b'/'
+    bytes.len() > 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() && bytes[2] == b'/'
 }
 
 fn start_port_forward(cfg: &ConnectionConfig) -> Result<Child> {

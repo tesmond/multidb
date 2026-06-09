@@ -4,14 +4,11 @@
   "version": "0.3.0",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
+    "dev": "npm run frontend:build && cd desktop && cargo run",
+    "build": "npm run frontend:build && cd desktop && cargo build --release",
     "frontend:dev": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",
     "frontend:check": "npm --prefix frontend run check",
-    "rust:check": "cargo check --manifest-path src-tauri/Cargo.toml"
-  },
-  "devDependencies": {
-    "@tauri-apps/cli": "^2.9.0"
+    "rust:check": "cd desktop && cargo check"
   }
 }

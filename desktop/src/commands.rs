@@ -9,12 +9,13 @@ use crate::{
 };
 use anyhow::Result;
 use futures_util::StreamExt;
+use serde::Serialize;
 use sqlx::{Column, Row, TypeInfo};
-use std::{path::PathBuf, time::Instant};
-use tauri::{AppHandle, Emitter, State};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-type CommandResult<T> = std::result::Result<T, String>;
+pub type CommandResult<T> = std::result::Result<T, String>;
+pub type EventEmitter = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync + 'static>;
 
 fn command_err(err: impl Into<anyhow::Error>) -> String {
     let err: anyhow::Error = err.into();
@@ -24,11 +25,7 @@ fn command_err(err: impl Into<anyhow::Error>) -> String {
         .join(": ")
 }
 
-#[tauri::command]
-pub async fn save_and_connect(
-    state: State<'_, AppState>,
-    cfg: ConnectionConfig,
-) -> CommandResult<()> {
+pub async fn save_and_connect(state: Arc<AppState>, cfg: ConnectionConfig) -> CommandResult<()> {
     state
         .connections
         .connect(cfg.clone())
@@ -39,11 +36,7 @@ pub async fn save_and_connect(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn test_connection(
-    state: State<'_, AppState>,
-    cfg: ConnectionConfig,
-) -> CommandResult<()> {
+pub async fn test_connection(state: Arc<AppState>, cfg: ConnectionConfig) -> CommandResult<()> {
     state
         .connections
         .test_connection(cfg)
@@ -51,8 +44,7 @@ pub async fn test_connection(
         .map_err(command_err)
 }
 
-#[tauri::command]
-pub async fn disconnect(state: State<'_, AppState>, id: String) -> CommandResult<()> {
+pub async fn disconnect(state: Arc<AppState>, id: String) -> CommandResult<()> {
     let result = state.connections.disconnect(&id).await;
     let store = state.store().await.map_err(command_err)?;
     let _ = store.delete_connection(&id).await;
@@ -60,22 +52,17 @@ pub async fn disconnect(state: State<'_, AppState>, id: String) -> CommandResult
     result.map_err(command_err)
 }
 
-#[tauri::command]
-pub async fn list_connections(state: State<'_, AppState>) -> CommandResult<Vec<ConnectionConfig>> {
+pub async fn list_connections(state: Arc<AppState>) -> CommandResult<Vec<ConnectionConfig>> {
     Ok(state.connections.list_connections().await)
 }
 
-#[tauri::command]
-pub async fn list_saved_connections(
-    state: State<'_, AppState>,
-) -> CommandResult<Vec<ConnectionConfig>> {
+pub async fn list_saved_connections(state: Arc<AppState>) -> CommandResult<Vec<ConnectionConfig>> {
     let store = state.store().await.map_err(command_err)?;
     store.list_saved_connections().await.map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn execute_query(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
     query_id: String,
     query: String,
@@ -129,18 +116,16 @@ pub async fn execute_query(
     Ok(result)
 }
 
-#[tauri::command]
-pub async fn cancel_query(state: State<'_, AppState>, query_id: String) -> CommandResult<()> {
+pub async fn cancel_query(state: Arc<AppState>, query_id: String) -> CommandResult<()> {
     if let Some(cancel) = state.query_cancels.lock().await.get(&query_id) {
         cancel.cancel();
     }
     Ok(())
 }
 
-#[tauri::command]
 pub async fn execute_query_streamed(
-    app: AppHandle,
-    state: State<'_, AppState>,
+    emitter: EventEmitter,
+    state: Arc<AppState>,
     conn_id: String,
     query_id: String,
     query: String,
@@ -150,7 +135,7 @@ pub async fn execute_query_streamed(
         Ok(cfg) => cfg,
         Err(err) => {
             emit_done(
-                &app,
+                &emitter,
                 QueryStreamDone {
                     query_id,
                     total_rows: 0,
@@ -182,7 +167,7 @@ pub async fn execute_query_streamed(
             Ok(pool) => {
                 if queries::looks_like_row_returning_query(&query) {
                     stream_postgres_rows(
-                        &app,
+                        &emitter,
                         &pool,
                         &query_id,
                         &query,
@@ -209,7 +194,7 @@ pub async fn execute_query_streamed(
             Ok(pool) => {
                 if queries::looks_like_row_returning_query(&query) {
                     stream_mysql_rows(
-                        &app,
+                        &emitter,
                         &pool,
                         &query_id,
                         &query,
@@ -236,7 +221,7 @@ pub async fn execute_query_streamed(
             Ok(pool) => {
                 if queries::looks_like_row_returning_query(&query) {
                     stream_rows(
-                        &app,
+                        &emitter,
                         &pool,
                         &query_id,
                         &query,
@@ -286,12 +271,12 @@ pub async fn execute_query_streamed(
             .await;
     }
 
-    emit_done(&app, done).map_err(command_err)?;
+    emit_done(&emitter, done).map_err(command_err)?;
     Ok(())
 }
 
 async fn stream_mysql_rows(
-    app: &AppHandle,
+    emitter: &EventEmitter,
     pool: &sqlx::MySqlPool,
     query_id: &str,
     query: &str,
@@ -315,7 +300,7 @@ async fn stream_mysql_rows(
 
         let next = tokio::select! {
             _ = cancel.cancelled() => {
-                flush_chunk(app, query_id, &mut chunk, total_rows)?;
+                flush_chunk(emitter, query_id, &mut chunk, total_rows)?;
                 return Ok(QueryStreamDone {
                     query_id: query_id.to_string(),
                     total_rows,
@@ -341,9 +326,10 @@ async fn stream_mysql_rows(
                 .iter()
                 .map(|column| column.type_info().name().to_string())
                 .collect();
-            app.emit(
+            emit_payload(
+                emitter,
                 "query:meta",
-                QueryStreamMeta {
+                &QueryStreamMeta {
                     query_id: query_id.to_string(),
                     columns,
                     column_types,
@@ -361,12 +347,12 @@ async fn stream_mysql_rows(
             FIRST_CHUNK_SIZE
         };
         if chunk.len() >= limit {
-            flush_chunk(app, query_id, &mut chunk, total_rows)?;
+            flush_chunk(emitter, query_id, &mut chunk, total_rows)?;
             first_flush = true;
         }
     }
 
-    flush_chunk(app, query_id, &mut chunk, total_rows)?;
+    flush_chunk(emitter, query_id, &mut chunk, total_rows)?;
     Ok(QueryStreamDone {
         query_id: query_id.to_string(),
         total_rows,
@@ -377,7 +363,7 @@ async fn stream_mysql_rows(
 }
 
 async fn stream_rows(
-    app: &AppHandle,
+    emitter: &EventEmitter,
     pool: &sqlx::AnyPool,
     query_id: &str,
     query: &str,
@@ -401,7 +387,7 @@ async fn stream_rows(
 
         let next = tokio::select! {
             _ = cancel.cancelled() => {
-                flush_chunk(app, query_id, &mut chunk, total_rows)?;
+                flush_chunk(emitter, query_id, &mut chunk, total_rows)?;
                 return Ok(QueryStreamDone {
                     query_id: query_id.to_string(),
                     total_rows,
@@ -427,9 +413,10 @@ async fn stream_rows(
                 .iter()
                 .map(|column| column.type_info().name().to_string())
                 .collect();
-            app.emit(
+            emit_payload(
+                emitter,
                 "query:meta",
-                QueryStreamMeta {
+                &QueryStreamMeta {
                     query_id: query_id.to_string(),
                     columns,
                     column_types,
@@ -447,12 +434,12 @@ async fn stream_rows(
             FIRST_CHUNK_SIZE
         };
         if chunk.len() >= limit {
-            flush_chunk(app, query_id, &mut chunk, total_rows)?;
+            flush_chunk(emitter, query_id, &mut chunk, total_rows)?;
             first_flush = true;
         }
     }
 
-    flush_chunk(app, query_id, &mut chunk, total_rows)?;
+    flush_chunk(emitter, query_id, &mut chunk, total_rows)?;
     Ok(QueryStreamDone {
         query_id: query_id.to_string(),
         total_rows,
@@ -463,7 +450,7 @@ async fn stream_rows(
 }
 
 async fn stream_postgres_rows(
-    app: &AppHandle,
+    emitter: &EventEmitter,
     pool: &sqlx::PgPool,
     query_id: &str,
     query: &str,
@@ -487,7 +474,7 @@ async fn stream_postgres_rows(
 
         let next = tokio::select! {
             _ = cancel.cancelled() => {
-                flush_chunk(app, query_id, &mut chunk, total_rows)?;
+                flush_chunk(emitter, query_id, &mut chunk, total_rows)?;
                 return Ok(QueryStreamDone {
                     query_id: query_id.to_string(),
                     total_rows,
@@ -513,9 +500,10 @@ async fn stream_postgres_rows(
                 .iter()
                 .map(|column| column.type_info().name().to_string())
                 .collect();
-            app.emit(
+            emit_payload(
+                emitter,
                 "query:meta",
-                QueryStreamMeta {
+                &QueryStreamMeta {
                     query_id: query_id.to_string(),
                     columns,
                     column_types,
@@ -533,12 +521,12 @@ async fn stream_postgres_rows(
             FIRST_CHUNK_SIZE
         };
         if chunk.len() >= limit {
-            flush_chunk(app, query_id, &mut chunk, total_rows)?;
+            flush_chunk(emitter, query_id, &mut chunk, total_rows)?;
             first_flush = true;
         }
     }
 
-    flush_chunk(app, query_id, &mut chunk, total_rows)?;
+    flush_chunk(emitter, query_id, &mut chunk, total_rows)?;
     Ok(QueryStreamDone {
         query_id: query_id.to_string(),
         total_rows,
@@ -549,7 +537,7 @@ async fn stream_postgres_rows(
 }
 
 fn flush_chunk(
-    app: &AppHandle,
+    emitter: &EventEmitter,
     query_id: &str,
     chunk: &mut Vec<Vec<serde_json::Value>>,
     total_rows: usize,
@@ -559,9 +547,10 @@ fn flush_chunk(
     }
     let rows = std::mem::take(chunk);
     let offset = total_rows.saturating_sub(rows.len());
-    app.emit(
+    emit_payload(
+        emitter,
         "query:chunk",
-        QueryStreamChunk {
+        &QueryStreamChunk {
             query_id: query_id.to_string(),
             rows,
             offset,
@@ -570,14 +559,18 @@ fn flush_chunk(
     Ok(())
 }
 
-fn emit_done(app: &AppHandle, done: QueryStreamDone) -> Result<()> {
-    app.emit("query:done", done)?;
+fn emit_done(emitter: &EventEmitter, done: QueryStreamDone) -> Result<()> {
+    emit_payload(emitter, "query:done", &done)?;
     Ok(())
 }
 
-#[tauri::command]
+fn emit_payload<T: Serialize>(emitter: &EventEmitter, event: &str, payload: &T) -> Result<()> {
+    emitter(event, serde_json::to_value(payload)?);
+    Ok(())
+}
+
 pub async fn get_table_primary_keys(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
     driver: String,
     schema_name: String,
@@ -592,8 +585,7 @@ pub async fn get_table_primary_keys(
         .map_err(command_err)
 }
 
-#[tauri::command]
-pub async fn get_schema(state: State<'_, AppState>, conn_id: String) -> CommandResult<SchemaTree> {
+pub async fn get_schema(state: Arc<AppState>, conn_id: String) -> CommandResult<SchemaTree> {
     let pool = state
         .get_pool_or_reconnect(&conn_id)
         .await
@@ -607,18 +599,13 @@ pub async fn get_schema(state: State<'_, AppState>, conn_id: String) -> CommandR
         .map_err(command_err)
 }
 
-#[tauri::command]
-pub async fn load_schema(
-    state: State<'_, AppState>,
-    conn_id: String,
-) -> CommandResult<SchemaCacheEntry> {
+pub async fn load_schema(state: Arc<AppState>, conn_id: String) -> CommandResult<SchemaCacheEntry> {
     let store = state.store().await.map_err(command_err)?;
     store.load_schema(&conn_id).await.map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn save_schema(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
     schema_json: String,
     hash: String,
@@ -630,9 +617,8 @@ pub async fn save_schema(
         .map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn backup_table(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
     table_name: String,
     schema_name: String,
@@ -663,9 +649,8 @@ pub async fn backup_table(
         .map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn drop_table(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
     table_name: String,
     schema_name: String,
@@ -683,7 +668,6 @@ pub async fn drop_table(
         .map_err(command_err)
 }
 
-#[tauri::command]
 pub fn select_import_file(import_type: String) -> CommandResult<String> {
     let mut dialog = rfd::FileDialog::new();
     dialog = if import_type == "pgdump" {
@@ -701,7 +685,6 @@ pub fn select_import_file(import_type: String) -> CommandResult<String> {
         .unwrap_or_default())
 }
 
-#[tauri::command]
 pub fn select_sqlite_file() -> CommandResult<String> {
     Ok(rfd::FileDialog::new()
         .set_title("Select SQLite database")
@@ -711,9 +694,8 @@ pub fn select_sqlite_file() -> CommandResult<String> {
         .unwrap_or_default())
 }
 
-#[tauri::command]
 pub async fn import_table(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
     import_type: String,
     source_path: String,
@@ -734,7 +716,6 @@ pub async fn import_table(
         .map_err(command_err)
 }
 
-#[tauri::command]
 pub fn save_csv(csv_content: String, default_filename: String) -> CommandResult<()> {
     let filename = if default_filename.is_empty() {
         "query_results.csv".to_string()
@@ -752,7 +733,6 @@ pub fn save_csv(csv_content: String, default_filename: String) -> CommandResult<
     std::fs::write(&path, csv_content).map_err(command_err)
 }
 
-#[tauri::command]
 pub fn save_file(path: String, data: Vec<u8>, perm: u32) -> CommandResult<()> {
     if path.is_empty() {
         return Err("empty path".to_string());
@@ -774,18 +754,16 @@ pub fn save_file(path: String, data: Vec<u8>, perm: u32) -> CommandResult<()> {
     std::fs::rename(&tmp, &path).map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn get_query_history(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     limit: i64,
 ) -> CommandResult<Vec<QueryRecord>> {
     let store = state.store().await.map_err(command_err)?;
     store.get_query_history(limit).await.map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn get_query_history_by_conn_id(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
     limit: i64,
 ) -> CommandResult<Vec<QueryRecord>> {
@@ -796,15 +774,13 @@ pub async fn get_query_history_by_conn_id(
         .map_err(command_err)
 }
 
-#[tauri::command]
-pub async fn clear_query_history(state: State<'_, AppState>) -> CommandResult<()> {
+pub async fn clear_query_history(state: Arc<AppState>) -> CommandResult<()> {
     let store = state.store().await.map_err(command_err)?;
     store.clear_query_history().await.map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn clear_query_history_by_conn_id(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
 ) -> CommandResult<()> {
     let store = state.store().await.map_err(command_err)?;
@@ -814,9 +790,8 @@ pub async fn clear_query_history_by_conn_id(
         .map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn save_query(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
     title: String,
     query: String,
@@ -842,24 +817,21 @@ pub async fn save_query(
         .map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn get_saved_queries(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     conn_id: String,
 ) -> CommandResult<Vec<SavedQuery>> {
     let store = state.store().await.map_err(command_err)?;
     store.get_saved_queries(&conn_id).await.map_err(command_err)
 }
 
-#[tauri::command]
-pub async fn delete_saved_query(state: State<'_, AppState>, id: i64) -> CommandResult<()> {
+pub async fn delete_saved_query(state: Arc<AppState>, id: i64) -> CommandResult<()> {
     let store = state.store().await.map_err(command_err)?;
     store.delete_saved_query(id).await.map_err(command_err)
 }
 
-#[tauri::command]
 pub async fn update_saved_query_title(
-    state: State<'_, AppState>,
+    state: Arc<AppState>,
     id: i64,
     new_title: String,
 ) -> CommandResult<()> {

@@ -441,7 +441,9 @@ async fn string_column(pool: &AnyPool, sql: &str, args: &[&str]) -> Result<Vec<S
         query = query.bind(*arg);
     }
     let rows = query.fetch_all(pool).await?;
-    rows.into_iter().map(|row| decode_any_text(&row, 0)).collect()
+    rows.into_iter()
+        .map(|row| decode_any_text(&row, 0))
+        .collect()
 }
 
 fn decode_any_text<I>(row: &AnyRow, index: I) -> Result<String>
