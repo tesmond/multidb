@@ -22,7 +22,7 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
   - Per-connection tab color and optional black tab text
   - Connection color swatch shown in the left navigator
 - SQL editor experience:
-  - CodeMirror-based SQL editor
+  - Native Slint SQL editor backed by a Rust rope buffer
   - Connection-aware SQL dialect switching
   - Schema-driven SQL autocomplete
   - Query cancellation support
@@ -46,45 +46,32 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 
 ## Tech Stack
 
-- Desktop shell: WRY + Tao
+- Desktop UI: Slint
 - Backend: Rust
-- Frontend: Svelte + TypeScript + Vite
-- Editor: CodeMirror 6
+- Editor: native Slint/Rust editor model
 - Database layer:
   - `sqlx` with MySQL, PostgreSQL, and SQLite support
   - Local metadata stored in SQLite
 
 ## Project Structure
 
-- `desktop`: WRY/Tao desktop shell, Rust backend, command handlers, and IPC bridge
-- `desktop/src/desktop.rs`: lightweight window/webview host and static asset protocol
-- `desktop/src/ipc.rs`: JSON IPC dispatcher used by the frontend compatibility bindings
+- `desktop`: Slint desktop UI, Rust backend, command handlers, and persistence
+- `desktop/ui/main.slint`: native desktop layout and view components
+- `desktop/src/slint_app.rs`: Slint controller and async service wiring
+- `desktop/src/editor.rs`: native SQL editor buffer, visible-line model, and completions
 - `desktop/src/connections.rs`: connection manager, DSN logic, and Kubernetes port-forwarding
 - `desktop/src/queries.rs`: query execution, cancellation, result conversion, and non-query handling
 - `desktop/src/schema.rs`: schema and primary-key inspection
 - `desktop/src/history.rs`: local metadata persistence in `history.db`
 - `desktop/src/backup.rs`: table backup, import, pg_dump import, and drop workflows
-- `frontend/src`: Svelte UI components and stores
-- `frontend/desktop`: lightweight frontend bindings for the WRY IPC bridge
 
 ## Prerequisites
 
 - Rust stable
-- Node.js and npm
-- Platform dependencies for WRY/WebKitGTK on Linux
 - Optional tools based on workflow:
   - `kubectl` for Kubernetes port-forwarded connections
 
 ## Development
-
-Install dependencies:
-
-```bash
-npm install
-cd frontend
-npm install
-cd ..
-```
 
 Run the desktop app in development mode:
 
@@ -92,7 +79,7 @@ Run the desktop app in development mode:
 npm run dev
 ```
 
-This builds the frontend once and starts the lightweight WRY/Tao desktop app.
+This starts the native Slint desktop app.
 
 ## Build
 
@@ -102,7 +89,7 @@ Create a production desktop build:
 npm run build
 ```
 
-The build script compiles the Svelte bundle first, then embeds those static assets into the WRY executable so the app can start without loose frontend files beside it.
+The build script compiles the external Slint UI and embeds the Windows icon resource.
 
 ## Testing And Checks
 
@@ -110,18 +97,6 @@ Run Rust checks:
 
 ```bash
 npm run rust:check
-```
-
-Run frontend checks:
-
-```bash
-npm run frontend:check
-```
-
-Build the frontend:
-
-```bash
-npm run frontend:build
 ```
 
 ## Data Storage
@@ -134,6 +109,7 @@ Stored data includes:
 - Query history
 - Saved queries
 - Cached schema snapshots
+- UI preferences such as connection order, server groups, and font scale
 
 ## App Icons
 

@@ -1,0 +1,5 @@
+[workspace]
+members = ["desktop"]
+resolver = "2"
+
+default-members = ["desktop"]

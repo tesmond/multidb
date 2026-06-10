@@ -1,0 +1,840 @@
+import { Button, ComboBox, LineEdit, ListView, ScrollView, TextEdit } from "std-widgets.slint";
+
+export struct ConnectionView {
+    id: string,
+    name: string,
+    driver: string,
+    color: string,
+    selected: bool,
+    connected: bool,
+    group_name: string,
+}
+
+export struct ServerGroupView {
+    id: string,
+    name: string,
+    expanded: bool,
+}
+
+export struct NavNodeView {
+    id: string,
+    label: string,
+    kind: string,
+    depth: int,
+    expanded: bool,
+    selected: bool,
+}
+
+export struct TabView {
+    id: string,
+    title: string,
+    active: bool,
+    running: bool,
+    dirty: bool,
+    connection_name: string,
+}
+
+export struct ResultColumnView {
+    name: string,
+    type_name: string,
+    width: int,
+    sort: string,
+}
+
+export struct ResultCellView {
+    text: string,
+    pending: bool,
+}
+
+export struct ResultRowView {
+    cells: [ResultCellView],
+    selected: bool,
+}
+
+export struct HistoryItemView {
+    id: int,
+    title: string,
+    conn_id: string,
+    detail: string,
+}
+
+export struct SavedQueryView {
+    id: int,
+    title: string,
+    query: string,
+    detail: string,
+}
+
+export struct EditorLineView {
+    number: int,
+    text: string,
+    class_name: string,
+    active: bool,
+}
+
+export struct CompletionItemView {
+    label: string,
+    detail: string,
+    replacement: string,
+    selected: bool,
+}
+
+component ToolbarButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    height: 28px;
+    min-width: 76px;
+    border-radius: 4px;
+    background: touch.has-hover ? #4f52d9 : #6366f1;
+    Text {
+        text: root.label;
+        color: white;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component GhostButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    height: 28px;
+    min-width: 68px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: #2a2a3a;
+    background: touch.has-hover ? #242436 : #1a1a24;
+    Text {
+        text: root.label;
+        color: #d9def5;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component TopToolbar inherits Rectangle {
+    callback new_tab();
+    callback new_connection();
+    callback save_query();
+    callback new_server_group();
+    callback open_settings();
+    height: 40px;
+    background: #16161f;
+    border-width: 0px;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        alignment: start;
+        Text {
+            text: "multidb";
+            color: #eef2ff;
+            font-size: 14px;
+            font-weight: 700;
+            vertical-alignment: center;
+            width: 72px;
+        }
+        ToolbarButton { label: "New Tab"; clicked => { root.new_tab(); } }
+        GhostButton { label: "Connection"; clicked => { root.new_connection(); } }
+        GhostButton { label: "New Group"; clicked => { root.new_server_group(); } }
+        GhostButton { label: "Save"; clicked => { root.save_query(); } }
+        GhostButton { label: "Settings"; clicked => { root.open_settings(); } }
+    }
+}
+
+component Navigator inherits Rectangle {
+    in property <[ConnectionView]> connections;
+    in property <[ServerGroupView]> groups;
+    in property <[NavNodeView]> nodes;
+    callback select_connection(string);
+    callback edit_connection(string);
+    callback test_connection(string);
+    callback remove_connection(string);
+    callback refresh_schema(string);
+    callback select_node(string);
+    callback drag_connection(string, int);
+    width: 260px;
+    background: #1a1a24;
+    border-width: 0px;
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 36px;
+            background: #16161f;
+            Text {
+                text: "Connections";
+                color: #cbd5e1;
+                font-size: 12px;
+                font-weight: 700;
+                x: 12px;
+                vertical-alignment: center;
+            }
+        }
+        ListView {
+            height: min(260px, connections.length * 42px + groups.length * 28px);
+            for group in groups: Rectangle {
+                height: 28px;
+                background: #15151e;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: (group.expanded ? "v " : "> ") + group.name;
+                    color: #cbd5e1;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+            for conn in connections: Rectangle {
+                height: 42px;
+                background: conn.selected ? #262a47 : (conn.connected ? #202035 : #1a1a24);
+                Rectangle {
+                    x: 8px;
+                    y: 8px;
+                    width: 4px;
+                    height: 26px;
+                    border-radius: 2px;
+                    background: #6366f1;
+                }
+                Text {
+                    x: 18px;
+                    y: 4px;
+                    width: parent.width - 112px;
+                    text: conn.name;
+                    color: conn.connected ? #eef2ff : #a7adbd;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    x: 18px;
+                    y: 22px;
+                    width: parent.width - 112px;
+                    text: conn.group_name == "" ? conn.driver : conn.group_name + " / " + conn.driver;
+                    color: #7d8599;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                GhostButton {
+                    x: parent.width - 88px;
+                    y: 7px;
+                    width: 26px;
+                    min-width: 26px;
+                    label: "*";
+                    clicked => { root.test_connection(conn.id); }
+                }
+                GhostButton {
+                    x: parent.width - 58px;
+                    y: 7px;
+                    width: 26px;
+                    min-width: 26px;
+                    label: "E";
+                    clicked => { root.edit_connection(conn.id); }
+                }
+                GhostButton {
+                    x: parent.width - 28px;
+                    y: 7px;
+                    width: 24px;
+                    min-width: 24px;
+                    label: "R";
+                    clicked => { root.refresh_schema(conn.id); }
+                }
+                TouchArea {
+                    clicked => { root.select_connection(conn.id); }
+                    moved => { root.drag_connection(conn.id, self.mouse-y / 1px); }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: #2a2a3a; }
+        Rectangle {
+            height: 34px;
+            background: #16161f;
+            Text {
+                text: "Schema";
+                color: #cbd5e1;
+                font-size: 12px;
+                font-weight: 700;
+                x: 12px;
+                vertical-alignment: center;
+            }
+        }
+        ListView {
+            for node in nodes: Rectangle {
+                height: 26px;
+                background: node.selected ? #262a47 : #1a1a24;
+                Text {
+                    x: 10px + node.depth * 14px;
+                    width: parent.width - self.x - 8px;
+                    text: (node.kind == "schema" || node.kind == "table" || node.kind == "view") ? (node.expanded ? "v " + node.label : "> " + node.label) : node.label;
+                    color: node.kind == "column" ? #94a3b8 : #d9def5;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                TouchArea { clicked => { root.select_node(node.id); } }
+            }
+        }
+    }
+}
+
+component TabStrip inherits Rectangle {
+    in property <[TabView]> tabs;
+    callback select_tab(string);
+    callback close_tab(string);
+    callback reorder_tab(string, int);
+    height: 34px;
+    background: #16161f;
+    HorizontalLayout {
+        spacing: 0px;
+        for tab[index] in tabs: Rectangle {
+            width: 176px;
+            height: 34px;
+            background: tab.active ? #1e1e2e : #16161f;
+            Rectangle {
+                y: 0px;
+                height: 2px;
+                width: parent.width;
+                background: tab.active ? #6366f1 : transparent;
+            }
+            Text {
+                x: 10px;
+                width: parent.width - 34px;
+                text: tab.running ? tab.title + " ..." : (tab.dirty ? tab.title + " *" : tab.title);
+                color: tab.active ? #eef2ff : #a7adbd;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                x: parent.width - 24px;
+                width: 18px;
+                text: "x";
+                color: close-touch.has-hover ? #f87171 : #7d8599;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                close-touch := TouchArea { clicked => { root.close_tab(tab.id); } }
+            }
+            TouchArea {
+                clicked => { root.select_tab(tab.id); }
+                moved => { root.reorder_tab(tab.id, index); }
+            }
+        }
+    }
+}
+
+component SqlEditor inherits Rectangle {
+    in-out property <string> text;
+    in property <[CompletionItemView]> completions;
+    in property <int> font_scale_percent;
+    callback edited(string);
+    callback key_pressed(string, bool, bool, bool, bool) -> bool;
+    background: #0f0f17;
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 32px;
+            background: #1a1a24;
+            Text {
+                x: 10px;
+                text: "Ctrl+Enter run | Ctrl+S save | Ctrl+. cancel";
+                color: #94a3b8;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle {
+            background: #0f0f17;
+            TextEdit {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                text <=> root.text;
+                placeholder-text: "Type SQL here...";
+                font-family: "Cascadia Code";
+                font-size: 13px * root.font_scale_percent / 100;
+                wrap: no-wrap;
+                edited => { root.edited(root.text); }
+                key-pressed(event) => {
+                    if (root.key_pressed(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+            if completions.length > 0: Rectangle {
+                x: 86px;
+                y: 38px;
+                width: 280px;
+                height: min(220px, completions.length * 30px + 8px);
+                background: #1e1e2e;
+                border-width: 1px;
+                border-color: #33364a;
+                border-radius: 4px;
+                VerticalLayout {
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+                    for item in completions: Rectangle {
+                        height: 28px;
+                        background: item.selected ? #262a47 : #1e1e2e;
+                        Text { x: 10px; width: parent.width - 96px; text: item.label; color: #eef2ff; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                        Text { x: parent.width - 82px; width: 72px; text: item.detail; color: #94a3b8; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ResultGrid inherits Rectangle {
+    in property <[ResultColumnView]> columns;
+    in property <[ResultRowView]> rows;
+    background: #12121a;
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 30px;
+            background: #16161f;
+            HorizontalLayout {
+                spacing: 0px;
+                for col in columns: Rectangle {
+                    width: max(120px, col.width * 1px);
+                    background: #16161f;
+                    border-width: 1px;
+                    border-color: #2a2a3a;
+                    Text { x: 8px; width: parent.width - 16px; text: col.type_name == "" ? col.name : col.name + " : " + col.type_name; color: #d9def5; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                }
+            }
+        }
+        ScrollView {
+            viewport-width: parent.width;
+            viewport-height: parent.height;
+            VerticalLayout {
+                for row in rows: Rectangle {
+                    height: 28px;
+                    background: row.selected ? #262a47 : #12121a;
+                    HorizontalLayout {
+                        spacing: 0px;
+                        for cell in row.cells: Rectangle {
+                            width: 160px;
+                            border-width: 1px;
+                            border-color: cell.pending ? #f59e0b : #232333;
+                            Text { x: 8px; width: parent.width - 16px; text: cell.text; color: #d9def5; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component OutputPanel inherits Rectangle {
+    in property <string> output_tab;
+    in property <[ResultColumnView]> columns;
+    in property <[ResultRowView]> rows;
+    in property <[HistoryItemView]> history;
+    in property <[SavedQueryView]> saved_queries;
+    in property <string> messages;
+    callback set_output_tab(string);
+    background: #12121a;
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 32px;
+            background: #16161f;
+            HorizontalLayout {
+                spacing: 0px;
+                for label in ["results", "messages", "history", "saved"]: Rectangle {
+                    width: 96px;
+                    background: root.output_tab == label ? #1e1e2e : #16161f;
+                    Text { text: label; color: root.output_tab == label ? #eef2ff : #94a3b8; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                    TouchArea { clicked => { root.set_output_tab(label); } }
+                }
+            }
+        }
+        if root.output_tab == "results": ResultGrid { columns: root.columns; rows: root.rows; }
+        if root.output_tab == "messages": ScrollView {
+            Text { x: 12px; y: 12px; width: parent.width - 24px; text: root.messages == "" ? "Messages will appear here." : root.messages; color: #d9def5; font-size: 12px; wrap: word-wrap; }
+        }
+        if root.output_tab == "history": ListView {
+            for item in history: Rectangle {
+                height: 42px;
+                background: #12121a;
+                Text { x: 10px; y: 5px; text: item.title; color: #eef2ff; font-size: 12px; overflow: elide; width: parent.width - 20px; }
+                Text { x: 10px; y: 23px; text: item.detail; color: #94a3b8; font-size: 11px; overflow: elide; width: parent.width - 20px; }
+            }
+        }
+        if root.output_tab == "saved": ListView {
+            for item in saved_queries: Rectangle {
+                height: 42px;
+                background: #12121a;
+                Text { x: 10px; y: 5px; text: item.title; color: #eef2ff; font-size: 12px; overflow: elide; width: parent.width - 20px; }
+                Text { x: 10px; y: 23px; text: item.detail; color: #94a3b8; font-size: 11px; overflow: elide; width: parent.width - 20px; }
+            }
+        }
+    }
+}
+
+component LabeledLineEdit inherits Rectangle {
+    in property <string> label;
+    in property <string> placeholder;
+    in-out property <string> text_value;
+    height: 52px;
+    Text { x: 0px; y: 0px; text: root.label; color: #cbd5e1; font-size: 11px; }
+    LineEdit { x: 0px; y: 18px; width: parent.width; height: 30px; placeholder-text: root.placeholder; text <=> root.text_value; }
+}
+
+component ConnectionDialog inherits Rectangle {
+    in property <bool> open;
+    in property <[string]> driver_options;
+    in-out property <string> name;
+    in-out property <string> driver;
+    in-out property <string> host;
+    in-out property <string> port;
+    in-out property <string> username;
+    in-out property <string> password;
+    in-out property <string> database;
+    in-out property <string> dsn;
+    in-out property <string> tab_color;
+    in-out property <string> kube_context;
+    in-out property <string> kube_namespace;
+    in-out property <string> kube_resource;
+    in-out property <string> kube_local_port;
+    in-out property <string> kube_remote_port;
+    callback close();
+    callback save();
+    callback test();
+    callback pick_sqlite();
+    visible: open;
+    background: #00000080;
+    Rectangle {
+        width: min(720px, parent.width - 48px);
+        height: min(640px, parent.height - 48px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: #1e1e2e;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: #33364a;
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+            Text { text: "Connection"; color: #eef2ff; font-size: 16px; font-weight: 700; }
+            LabeledLineEdit { label: "Name"; placeholder: "Production"; text_value <=> root.name; }
+            Text { text: "Database Type"; color: #cbd5e1; font-size: 11px; }
+            ComboBox { model: root.driver_options; current-value <=> root.driver; }
+            HorizontalLayout {
+                spacing: 10px;
+                LabeledLineEdit { label: "Host"; placeholder: "localhost"; text_value <=> root.host; }
+                LabeledLineEdit { width: 90px; label: "Port"; placeholder: "5432"; text_value <=> root.port; }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                LabeledLineEdit { label: "Username"; placeholder: "user"; text_value <=> root.username; }
+                LabeledLineEdit { label: "Password"; placeholder: "password"; text_value <=> root.password; }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                LabeledLineEdit { label: root.driver == "sqlite" ? "SQLite File" : "Database"; placeholder: root.driver == "sqlite" ? "C:\\data\\app.db" : "database"; text_value <=> root.database; }
+                GhostButton { width: 96px; min-width: 96px; label: "Browse"; clicked => { root.pick_sqlite(); } }
+            }
+            LabeledLineEdit { label: "DSN Override"; placeholder: "postgres://... / mysql://... / sqlite:..."; text_value <=> root.dsn; }
+            LabeledLineEdit { label: "Tab Color"; placeholder: "#6366f1"; text_value <=> root.tab_color; }
+            Text { text: "Kubernetes Port Forward"; color: #cbd5e1; font-size: 11px; }
+            HorizontalLayout {
+                spacing: 10px;
+                LabeledLineEdit { label: "Context"; placeholder: "cluster context"; text_value <=> root.kube_context; }
+                LabeledLineEdit { label: "Namespace"; placeholder: "default"; text_value <=> root.kube_namespace; }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                LabeledLineEdit { label: "Resource"; placeholder: "svc/postgres"; text_value <=> root.kube_resource; }
+                LabeledLineEdit { width: 110px; label: "Local"; placeholder: "15432"; text_value <=> root.kube_local_port; }
+                LabeledLineEdit { width: 110px; label: "Remote"; placeholder: "5432"; text_value <=> root.kube_remote_port; }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button { text: "Cancel"; clicked => { root.close(); } }
+                Button { text: "Test"; clicked => { root.test(); } }
+                Button { text: "Save"; clicked => { root.save(); } }
+            }
+        }
+    }
+}
+
+component SettingsDialog inherits Rectangle {
+    in property <bool> open;
+    in property <int> font_scale_percent;
+    callback close();
+    callback decrease_font();
+    callback increase_font();
+    visible: open;
+    background: #00000080;
+    Rectangle {
+        width: 360px;
+        height: 180px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: #1e1e2e;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: #33364a;
+        VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+            Text { text: "Settings"; color: #eef2ff; font-size: 16px; font-weight: 700; }
+            Text { text: "Editor font size: " + root.font_scale_percent + "%"; color: #d9def5; font-size: 12px; }
+            HorizontalLayout {
+                spacing: 8px;
+                Button { text: "Smaller"; clicked => { root.decrease_font(); } }
+                Button { text: "Larger"; clicked => { root.increase_font(); } }
+                Button { text: "Close"; clicked => { root.close(); } }
+            }
+        }
+    }
+}
+
+component ServerGroupDialog inherits Rectangle {
+    in property <bool> open;
+    in-out property <string> name;
+    callback close();
+    callback save();
+    visible: open;
+    background: #00000080;
+    Rectangle {
+        width: 360px;
+        height: 170px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: #1e1e2e;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: #33364a;
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+            Text { text: "New Server Group"; color: #eef2ff; font-size: 16px; font-weight: 700; }
+            LineEdit { placeholder-text: "Group name"; text <=> root.name; }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button { text: "Cancel"; clicked => { root.close(); } }
+                Button { text: "Create"; clicked => { root.save(); } }
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "multidb";
+    icon: @image-url("../../build/icon.png");
+    width: 1280px;
+    height: 820px;
+    resize-border-width: 8px;
+    background: #12121a;
+
+    in property <[ConnectionView]> connections;
+    in property <[ServerGroupView]> server_groups;
+    in property <[NavNodeView]> nav_nodes;
+    in property <[TabView]> tabs;
+    in-out property <string> editor_text;
+    in property <[CompletionItemView]> completions;
+    in property <[ResultColumnView]> result_columns;
+    in property <[ResultRowView]> result_rows;
+    in property <[HistoryItemView]> history;
+    in property <[SavedQueryView]> saved_queries;
+    in property <string> status_text: "Ready";
+    in property <string> output_tab: "results";
+    in property <string> messages: "";
+    in property <bool> connection_dialog_open;
+    in property <bool> settings_dialog_open;
+    in property <bool> server_group_dialog_open;
+    in property <int> font_scale_percent: 100;
+    in property <[string]> driver_options: ["postgres", "mysql", "sqlite"];
+    in-out property <string> dialog_name;
+    in-out property <string> dialog_driver: "postgres";
+    in-out property <string> dialog_host;
+    in-out property <string> dialog_port;
+    in-out property <string> dialog_username;
+    in-out property <string> dialog_password;
+    in-out property <string> dialog_database;
+    in-out property <string> dialog_dsn;
+    in-out property <string> dialog_tab_color;
+    in-out property <string> dialog_kube_context;
+    in-out property <string> dialog_kube_namespace;
+    in-out property <string> dialog_kube_resource;
+    in-out property <string> dialog_kube_local_port;
+    in-out property <string> dialog_kube_remote_port;
+    in-out property <string> dialog_group_name;
+
+    callback new_tab();
+    callback new_connection();
+    callback edit_connection(string);
+    callback test_connection(string);
+    callback remove_connection(string);
+    callback save_query();
+    callback new_server_group();
+    callback save_server_group();
+    callback select_connection(string);
+    callback select_nav_node(string);
+    callback refresh_schema(string);
+    callback drag_connection(string, int);
+    callback select_tab(string);
+    callback close_tab(string);
+    callback reorder_tab(string, int);
+    callback editor_text_changed(string);
+    callback editor_key_pressed(string, bool, bool, bool, bool) -> bool;
+    callback execute_query();
+    callback cancel_query();
+    callback set_output_tab(string);
+    callback open_settings();
+    callback close_settings();
+    callback increase_font();
+    callback decrease_font();
+    callback close_connection_dialog();
+    callback save_connection_dialog();
+    callback test_connection_dialog();
+    callback pick_sqlite_file();
+    callback close_server_group_dialog();
+
+    TopToolbar {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        new_tab => { root.new_tab(); }
+        new_connection => { root.new_connection(); }
+        new_server_group => { root.new_server_group(); }
+        save_query => { root.save_query(); }
+        open_settings => { root.open_settings(); }
+    }
+
+    Navigator {
+        x: 0px;
+        y: 40px;
+        width: 260px;
+        height: parent.height - 64px;
+        connections: root.connections;
+        groups: root.server_groups;
+        nodes: root.nav_nodes;
+        select_connection(id) => { root.select_connection(id); }
+        edit_connection(id) => { root.edit_connection(id); }
+        test_connection(id) => { root.test_connection(id); }
+        remove_connection(id) => { root.remove_connection(id); }
+        refresh_schema(id) => { root.refresh_schema(id); }
+        select_node(id) => { root.select_nav_node(id); }
+        drag_connection(id, y) => { root.drag_connection(id, y); }
+    }
+
+    Rectangle { x: 260px; y: 40px; width: 4px; height: parent.height - 64px; background: #111118; }
+
+    TabStrip {
+        x: 264px;
+        y: 40px;
+        width: parent.width - 264px;
+        tabs: root.tabs;
+        select_tab(id) => { root.select_tab(id); }
+        close_tab(id) => { root.close_tab(id); }
+        reorder_tab(id, index) => { root.reorder_tab(id, index); }
+    }
+
+    Rectangle {
+        x: 264px;
+        y: 74px;
+        width: parent.width - 264px;
+        height: max(160px, (parent.height - 98px) * 56 / 100);
+        SqlEditor {
+            width: parent.width;
+            height: parent.height;
+            text <=> root.editor_text;
+            completions: root.completions;
+            font_scale_percent: root.font_scale_percent;
+            edited(text) => { root.editor_text_changed(text); }
+            key_pressed(text, ctrl, shift, alt, meta) => { root.editor_key_pressed(text, ctrl, shift, alt, meta) }
+        }
+    }
+
+    Rectangle {
+        x: 264px;
+        y: 74px + max(160px, (parent.height - 98px) * 56 / 100);
+        width: parent.width - 264px;
+        height: 4px;
+        background: #111118;
+    }
+
+    OutputPanel {
+        x: 264px;
+        y: 78px + max(160px, (parent.height - 98px) * 56 / 100);
+        width: parent.width - 264px;
+        height: parent.height - self.y - 24px;
+        output_tab: root.output_tab;
+        columns: root.result_columns;
+        rows: root.result_rows;
+        history: root.history;
+        saved_queries: root.saved_queries;
+        messages: root.messages;
+        set_output_tab(tab) => { root.set_output_tab(tab); }
+    }
+
+    Rectangle {
+        y: parent.height - 24px;
+        height: 24px;
+        width: parent.width;
+        background: #16161f;
+        Text { x: 10px; width: parent.width - 20px; text: root.status_text; color: #94a3b8; font-size: 11px; vertical-alignment: center; overflow: elide; }
+    }
+
+    ConnectionDialog {
+        width: parent.width;
+        height: parent.height;
+        open: root.connection_dialog_open;
+        driver_options: root.driver_options;
+        name <=> root.dialog_name;
+        driver <=> root.dialog_driver;
+        host <=> root.dialog_host;
+        port <=> root.dialog_port;
+        username <=> root.dialog_username;
+        password <=> root.dialog_password;
+        database <=> root.dialog_database;
+        dsn <=> root.dialog_dsn;
+        tab_color <=> root.dialog_tab_color;
+        kube_context <=> root.dialog_kube_context;
+        kube_namespace <=> root.dialog_kube_namespace;
+        kube_resource <=> root.dialog_kube_resource;
+        kube_local_port <=> root.dialog_kube_local_port;
+        kube_remote_port <=> root.dialog_kube_remote_port;
+        close => { root.close_connection_dialog(); }
+        save => { root.save_connection_dialog(); }
+        test => { root.test_connection_dialog(); }
+        pick_sqlite => { root.pick_sqlite_file(); }
+    }
+
+    SettingsDialog {
+        width: parent.width;
+        height: parent.height;
+        open: root.settings_dialog_open;
+        font_scale_percent: root.font_scale_percent;
+        close => { root.close_settings(); }
+        increase_font => { root.increase_font(); }
+        decrease_font => { root.decrease_font(); }
+    }
+
+    ServerGroupDialog {
+        width: parent.width;
+        height: parent.height;
+        open: root.server_group_dialog_open;
+        name <=> root.dialog_group_name;
+        close => { root.close_server_group_dialog(); }
+        save => { root.save_server_group(); }
+    }
+}

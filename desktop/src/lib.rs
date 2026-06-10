@@ -1,16 +1,17 @@
+#![allow(dead_code)]
+
 mod backup;
 mod commands;
 mod connections;
-mod desktop;
+mod editor;
 mod history;
-mod ipc;
 mod models;
 mod password_vault;
 mod queries;
 mod schema;
-mod startup_profile;
+mod slint_app;
 mod state;
 
 pub fn run() {
-    desktop::run().expect("failed to run multidb");
+    slint_app::run().expect("failed to run multidb");
 }

@@ -24,6 +24,7 @@ desktop/target/
 # Output directories
 /bin/
 /dist/
+/target/
 
 # Coverage
 *.out

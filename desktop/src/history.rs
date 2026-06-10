@@ -78,6 +78,10 @@ impl HistoryStore {
                 query TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS ui_preferences (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             "#,
         )
         .execute(&self.pool)
@@ -415,6 +419,29 @@ impl HistoryStore {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    pub async fn get_ui_preference(&self, key: &str) -> Result<Option<String>> {
+        let row = sqlx::query_as::<_, (String,)>("SELECT value FROM ui_preferences WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|(value,)| value))
+    }
+
+    pub async fn set_ui_preference(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO ui_preferences (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            "#,
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
