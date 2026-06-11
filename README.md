@@ -86,10 +86,16 @@ This starts the native Slint desktop app.
 Create a production desktop build:
 
 ```bash
-npm run build
+cargo build --release
 ```
 
-The build script compiles the external Slint UI and embeds the Windows icon resource.
+On macOS, build a launchable app bundle:
+
+```bash
+scripts/build-macos-app.sh
+```
+
+The app bundle is written to `desktop/target/release/multidb.app`. Launch the `.app` bundle from Finder to avoid macOS opening Terminal for the raw `desktop/target/release/multidb` executable.
 
 ## Testing And Checks
 

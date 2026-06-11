@@ -1,4 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+#[cfg(windows)]
+use anyhow::anyhow;
+use anyhow::{Context, Result};
 
 const KEYCHAIN_SERVICE: &str = "multidb";
 const LEGACY_ACCOUNT_PREFIX: &str = "connection:";

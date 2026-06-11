@@ -150,7 +150,7 @@ pub async fn execute_query_streamed(
     };
 
     let max_rows = if max_rows <= 0 {
-        10_000_000
+        usize::MAX
     } else {
         max_rows as usize
     };
@@ -843,4 +843,65 @@ pub async fn update_saved_query_title(
         .update_saved_query_title(id, &new_title)
         .await
         .map_err(command_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn sqlite_stream_returns_more_than_first_visible_page() {
+        sqlx::any::install_default_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create sqlite pool");
+
+        sqlx::query("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create test table");
+        for idx in 0..25_i64 {
+            sqlx::query("INSERT INTO items (name) VALUES (?)")
+                .bind(format!("item-{idx}"))
+                .execute(&pool)
+                .await
+                .expect("insert test row");
+        }
+
+        let events = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let captured = events.clone();
+        let emitter: EventEmitter = Arc::new(move |event, payload| {
+            captured
+                .lock()
+                .expect("events")
+                .push((event.to_string(), payload));
+        });
+
+        let done = stream_rows(
+            &emitter,
+            &pool,
+            "query-test",
+            "SELECT id, name FROM items ORDER BY id",
+            usize::MAX,
+            CancellationToken::new(),
+            Instant::now(),
+        )
+        .await
+        .expect("stream rows");
+
+        let rows_emitted = events
+            .lock()
+            .expect("events")
+            .iter()
+            .filter(|(event, _)| event == "query:chunk")
+            .map(|(_, payload)| payload["rows"].as_array().expect("rows").len())
+            .sum::<usize>();
+
+        assert_eq!(done.total_rows, 25);
+        assert_eq!(rows_emitted, 25);
+    }
 }

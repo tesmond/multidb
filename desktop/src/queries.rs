@@ -30,7 +30,7 @@ pub async fn execute(
     cancel: CancellationToken,
 ) -> ExecuteResult {
     let max_rows = if max_rows <= 0 {
-        1_000_000
+        10_000_000
     } else {
         max_rows as usize
     };

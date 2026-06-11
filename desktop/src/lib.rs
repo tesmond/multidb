@@ -13,5 +13,6 @@ mod slint_app;
 mod state;
 
 pub fn run() {
+    sqlx::any::install_default_drivers();
     slint_app::run().expect("failed to run multidb");
 }
