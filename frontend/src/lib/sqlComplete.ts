@@ -240,13 +240,71 @@ function schemaCompletion(name: string): Completion {
 type TableRef = {
   schema: string;
   table: string;
-  columns: Set<string>;
+  columns: Set<string> | null;
   from: number;
   to: number;
 };
 
+const SYSTEM_SCHEMAS_BY_DRIVER: Record<string, Set<string>> = {
+  mysql: new Set(['information_schema', 'mysql', 'performance_schema', 'sys']),
+  postgres: new Set(['information_schema', 'pg_catalog']),
+};
+
+const SYSTEM_TABLE_COLUMNS_BY_DRIVER: Record<string, Record<string, string[]>> = {
+  mysql: {
+    'information_schema.tables': [
+      'table_catalog',
+      'table_schema',
+      'table_name',
+      'table_type',
+      'engine',
+      'version',
+      'row_format',
+      'table_rows',
+      'avg_row_length',
+      'data_length',
+      'max_data_length',
+      'index_length',
+      'data_free',
+      'auto_increment',
+      'create_time',
+      'update_time',
+      'check_time',
+      'table_collation',
+      'checksum',
+      'create_options',
+      'table_comment',
+    ],
+  },
+  postgres: {
+    'information_schema.tables': [
+      'table_catalog',
+      'table_schema',
+      'table_name',
+      'table_type',
+      'self_referencing_column_name',
+      'reference_generation',
+      'user_defined_type_catalog',
+      'user_defined_type_schema',
+      'user_defined_type_name',
+      'is_insertable_into',
+      'is_typed',
+      'commit_action',
+    ],
+  },
+};
+
 function normalizeIdent(id: string): string {
   return id.replace(/^["'`\[]+|["'`\]]+$/g, '').toLowerCase();
+}
+
+function isSystemSchema(db: DbSchema, schemaName: string): boolean {
+  return SYSTEM_SCHEMAS_BY_DRIVER[db.driver]?.has(schemaName.toLowerCase()) ?? false;
+}
+
+function getSystemTableColumns(db: DbSchema, schemaName: string, tableName: string): Set<string> | null {
+  const columns = SYSTEM_TABLE_COLUMNS_BY_DRIVER[db.driver]?.[`${schemaName}.${tableName}`];
+  return columns ? new Set(columns) : null;
 }
 
 function flattenDbSchema(db: DbSchema): {
@@ -415,6 +473,17 @@ function resolveTableReferences(sqlText: string, db: DbSchema, diagnostics: SqlS
       const hasTableInSchema = !!tablesInSchema?.has(secondLower);
 
       if (!hasSchema || !hasTableInSchema) {
+        if (isSystemSchema(db, firstLower)) {
+          refs.push({
+            schema: firstLower,
+            table: secondLower,
+            columns: getSystemTableColumns(db, firstLower, secondLower),
+            from,
+            to,
+          });
+          continue;
+        }
+
         diagnostics.push({ from, to, message: `Unknown table ${first}.${second}` });
         continue;
       }
@@ -431,6 +500,56 @@ function resolveTableReferences(sqlText: string, db: DbSchema, diagnostics: SqlS
     }
 
     refs.push({ schema: '', table: firstLower, columns: cols, from, to });
+  }
+
+  return refs;
+}
+
+function removeSelectAlias(expression: string): string {
+  const withoutAs = expression.replace(/\s+AS\s+[A-Za-z_][\w$]*$/i, '');
+  if (withoutAs !== expression) return withoutAs;
+
+  const implicitAlias = /\s+[A-Za-z_][\w$]*$/.exec(expression);
+  if (!implicitAlias) return expression;
+
+  const beforeAlias = expression.slice(0, implicitAlias.index).trimEnd();
+  return beforeAlias || expression;
+}
+
+function findColumnReferences(expression: string): Array<{
+  table?: string;
+  column: string;
+  from: number;
+  to: number;
+}> {
+  const refs: Array<{ table?: string; column: string; from: number; to: number }> = [];
+  const tokenRe = /([A-Za-z_][\w$]*)(?:\s*\.\s*([A-Za-z_][\w$]*))?/g;
+
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(expression)) !== null) {
+    const first = m[1];
+    const second = m[2];
+    const afterMatch = expression.slice(tokenRe.lastIndex);
+    const isFunctionName = !second && /^\s*\(/.test(afterMatch);
+
+    if (isFunctionName || RESERVED.has(first.toUpperCase())) continue;
+
+    if (second) {
+      const secondOffset = m[0].lastIndexOf(second);
+      refs.push({
+        table: normalizeIdent(first),
+        column: normalizeIdent(second),
+        from: m.index + secondOffset,
+        to: m.index + secondOffset + second.length,
+      });
+      continue;
+    }
+
+    refs.push({
+      column: normalizeIdent(first),
+      from: m.index,
+      to: m.index + first.length,
+    });
   }
 
   return refs;
@@ -456,49 +575,39 @@ export function findSqlSemanticDiagnostics(sqlText: string, db: DbSchema): SqlSe
     const trimmed = expr.text.trim();
     if (!trimmed || trimmed === '*' || /\bDISTINCT\b\s*\*?/i.test(trimmed)) continue;
 
-    const aliasRemoved = trimmed
-      .replace(/\s+AS\s+[A-Za-z_][\w$]*$/i, '')
-      .replace(/\s+[A-Za-z_][\w$]*$/, '');
+    const aliasRemoved = removeSelectAlias(trimmed);
+    const columnRefs = findColumnReferences(aliasRemoved);
 
-    const qualified = /([A-Za-z_][\w$]*)\s*\.\s*([A-Za-z_][\w$]*)$/.exec(aliasRemoved);
-    if (qualified) {
-      const tableToken = normalizeIdent(qualified[1]);
-      const colToken = normalizeIdent(qualified[2]);
-      const ref = refByTable.get(tableToken);
+    for (const columnRef of columnRefs) {
+      if (columnRef.table) {
+        const ref = refByTable.get(columnRef.table);
+        if (ref?.columns && !ref.columns.has(columnRef.column)) {
+          const from = selectStart + expr.from + columnRef.from;
+          diagnostics.push({
+            from,
+            to: selectStart + expr.from + columnRef.to,
+            message: `Unknown column ${aliasRemoved.slice(columnRef.from, columnRef.to)}`,
+          });
+        }
+        continue;
+      }
 
-      if (ref && !ref.columns.has(colToken)) {
-        const colIdx = aliasRemoved.lastIndexOf(qualified[2]);
-        const from = selectStart + expr.from + colIdx;
+      let foundInAny = false;
+      for (const r of refs) {
+        if (r.columns === null || r.columns.has(columnRef.column)) {
+          foundInAny = true;
+          break;
+        }
+      }
+
+      if (!foundInAny && refs.length > 0) {
+        const from = selectStart + expr.from + columnRef.from;
         diagnostics.push({
           from,
-          to: from + qualified[2].length,
-          message: `Unknown column ${qualified[2]}`,
+          to: selectStart + expr.from + columnRef.to,
+          message: `Unknown column ${aliasRemoved.slice(columnRef.from, columnRef.to)}`,
         });
       }
-      continue;
-    }
-
-    const bareCol = /[A-Za-z_][\w$]*/.exec(aliasRemoved);
-    if (!bareCol) continue;
-
-    const token = normalizeIdent(bareCol[0]);
-    if (RESERVED.has(token.toUpperCase())) continue;
-
-    let foundInAny = false;
-    for (const r of refs) {
-      if (r.columns.has(token)) {
-        foundInAny = true;
-        break;
-      }
-    }
-
-    if (!foundInAny && refs.length > 0) {
-      const from = selectStart + expr.from + bareCol.index;
-      diagnostics.push({
-        from,
-        to: from + bareCol[0].length,
-        message: `Unknown column ${bareCol[0]}`,
-      });
     }
   }
 

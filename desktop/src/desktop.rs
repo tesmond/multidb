@@ -28,6 +28,9 @@ pub fn run() -> Result<()> {
     let profiler = StartupProfiler::from_env();
     profiler.mark("run_start");
 
+    install_platform_edit_menu();
+    profiler.mark("platform_edit_menu_installed");
+
     sqlx::any::install_default_drivers();
     profiler.mark("sqlx_drivers_installed");
 
@@ -138,6 +141,7 @@ pub fn run() -> Result<()> {
         })
         .with_url(APP_URL)
         .with_background_color((18, 18, 23, 255))
+        .with_clipboard(true)
         .with_hotkeys_zoom(false)
         .with_devtools(cfg!(debug_assertions));
     profiler.mark("webview_builder_configured");
@@ -193,6 +197,115 @@ pub fn run() -> Result<()> {
             _ => {}
         }
     });
+}
+
+#[cfg(target_os = "macos")]
+fn install_platform_edit_menu() {
+    macos::install_edit_menu();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_platform_edit_menu() {}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+    use objc2_foundation::{MainThreadMarker, NSSelectorFromString, NSString};
+
+    pub fn install_edit_menu() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+
+        let app = NSApplication::sharedApplication(mtm);
+        let main_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(""));
+        let app_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("multidb"));
+        let edit_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("Edit"));
+
+        let app_item = NSMenuItem::new(mtm);
+        app_item.setTitle(&NSString::from_str("multidb"));
+        app_item.setSubmenu(Some(&app_menu));
+        main_menu.addItem(&app_item);
+
+        app_menu.addItem(&menu_item(
+            mtm,
+            "Quit multidb",
+            "terminate:",
+            "q",
+            NSEventModifierFlags::Command,
+        ));
+
+        let edit_item = NSMenuItem::new(mtm);
+        edit_item.setTitle(&NSString::from_str("Edit"));
+        edit_item.setSubmenu(Some(&edit_menu));
+        main_menu.addItem(&edit_item);
+
+        edit_menu.addItem(&menu_item(
+            mtm,
+            "Undo",
+            "undo:",
+            "z",
+            NSEventModifierFlags::Command,
+        ));
+        edit_menu.addItem(&menu_item(
+            mtm,
+            "Redo",
+            "redo:",
+            "z",
+            NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+        ));
+        edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        edit_menu.addItem(&menu_item(
+            mtm,
+            "Cut",
+            "cut:",
+            "x",
+            NSEventModifierFlags::Command,
+        ));
+        edit_menu.addItem(&menu_item(
+            mtm,
+            "Copy",
+            "copy:",
+            "c",
+            NSEventModifierFlags::Command,
+        ));
+        edit_menu.addItem(&menu_item(
+            mtm,
+            "Paste",
+            "paste:",
+            "v",
+            NSEventModifierFlags::Command,
+        ));
+        edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        edit_menu.addItem(&menu_item(
+            mtm,
+            "Select All",
+            "selectAll:",
+            "a",
+            NSEventModifierFlags::Command,
+        ));
+
+        app.setMainMenu(Some(&main_menu));
+    }
+
+    fn menu_item(
+        mtm: MainThreadMarker,
+        title: &str,
+        action: &str,
+        key: &str,
+        modifiers: NSEventModifierFlags,
+    ) -> objc2::rc::Retained<NSMenuItem> {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str(title),
+                Some(NSSelectorFromString(&NSString::from_str(action))),
+                &NSString::from_str(key),
+            )
+        };
+        item.setKeyEquivalentModifierMask(modifiers);
+        item
+    }
 }
 
 fn build_runtime() -> tokio::runtime::Runtime {

@@ -303,8 +303,10 @@ pub fn value_at(row: &sqlx::any::AnyRow, idx: usize) -> Result<Value> {
         .map(|col| col.type_info().name().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    if let Ok(value) = row.try_get::<bool, _>(idx) {
-        return Ok(Value::Bool(value));
+    if is_boolean_type(&ty) {
+        if let Ok(value) = row.try_get::<bool, _>(idx) {
+            return Ok(Value::Bool(value));
+        }
     }
     if let Ok(value) = row.try_get::<i64, _>(idx) {
         return Ok(Value::Number(Number::from(value)));
@@ -313,6 +315,9 @@ pub fn value_at(row: &sqlx::any::AnyRow, idx: usize) -> Result<Value> {
         if let Some(number) = Number::from_f64(value) {
             return Ok(Value::Number(number));
         }
+    }
+    if let Ok(value) = row.try_get::<bool, _>(idx) {
+        return Ok(Value::Bool(value));
     }
     if let Ok(value) = row.try_get::<String, _>(idx) {
         return Ok(Value::String(format_text_value(&ty, value)));
@@ -344,8 +349,10 @@ pub fn pg_value_at(row: &PgRow, idx: usize) -> Result<Value> {
         .map(|col| col.type_info().name().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    if let Ok(value) = row.try_get::<bool, _>(idx) {
-        return Ok(Value::Bool(value));
+    if is_boolean_type(&ty) {
+        if let Ok(value) = row.try_get::<bool, _>(idx) {
+            return Ok(Value::Bool(value));
+        }
     }
     if let Ok(value) = row.try_get::<i64, _>(idx) {
         return Ok(Value::Number(Number::from(value)));
@@ -355,6 +362,9 @@ pub fn pg_value_at(row: &PgRow, idx: usize) -> Result<Value> {
     }
     if let Ok(value) = row.try_get::<i16, _>(idx) {
         return Ok(Value::Number(Number::from(value)));
+    }
+    if let Ok(value) = row.try_get::<bool, _>(idx) {
+        return Ok(Value::Bool(value));
     }
     if let Ok(value) = row.try_get::<f64, _>(idx) {
         if let Some(number) = Number::from_f64(value) {
@@ -443,8 +453,10 @@ pub fn mysql_value_at(row: &MySqlRow, idx: usize) -> Result<Value> {
         .map(|col| col.type_info().name().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    if let Ok(value) = row.try_get::<bool, _>(idx) {
-        return Ok(Value::Bool(value));
+    if is_boolean_type(&ty) {
+        if let Ok(value) = row.try_get::<bool, _>(idx) {
+            return Ok(Value::Bool(value));
+        }
     }
     if let Ok(value) = row.try_get::<i64, _>(idx) {
         return Ok(Value::Number(Number::from(value)));
@@ -469,6 +481,9 @@ pub fn mysql_value_at(row: &MySqlRow, idx: usize) -> Result<Value> {
     }
     if let Ok(value) = row.try_get::<u8, _>(idx) {
         return Ok(Value::Number(Number::from(value)));
+    }
+    if let Ok(value) = row.try_get::<bool, _>(idx) {
+        return Ok(Value::Bool(value));
     }
     if let Ok(value) = row.try_get::<f64, _>(idx) {
         if let Some(number) = Number::from_f64(value) {
@@ -587,6 +602,10 @@ fn is_mysql_binary_type(type_name: &str) -> bool {
 
 fn is_bytea_type(type_name: &str) -> bool {
     type_name.eq_ignore_ascii_case("bytea")
+}
+
+fn is_boolean_type(type_name: &str) -> bool {
+    matches!(type_name.to_ascii_lowercase().as_str(), "bool" | "boolean")
 }
 
 // ─── Postgres binary-format value decoders ───────────────────────────────────
@@ -1427,7 +1446,7 @@ pub fn elapsed_ms(start: Instant) -> i64 {
 mod tests {
     use super::{
         decode_pg_numeric, format_binary_value, format_pg_array_binary, format_pg_binary_value,
-        format_text_value, geometry_bytes_to_text, json_value_to_text,
+        format_text_value, geometry_bytes_to_text, is_boolean_type, json_value_to_text,
     };
     use serde_json::json;
 
@@ -1437,6 +1456,44 @@ mod tests {
             json_value_to_text(&json!({"name":"demo","ok":true})),
             r#"{"name":"demo","ok":true}"#
         );
+    }
+
+    #[test]
+    fn boolean_type_detection_is_strict() {
+        assert!(is_boolean_type("bool"));
+        assert!(is_boolean_type("BOOLEAN"));
+        assert!(!is_boolean_type("BIGINT"));
+        assert!(!is_boolean_type("INTEGER"));
+        assert!(!is_boolean_type("TINYINT"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_count_result_stays_numeric() {
+        sqlx::any::install_default_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create in-memory sqlite pool");
+
+        sqlx::query("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create test table");
+        sqlx::query("INSERT INTO items DEFAULT VALUES")
+            .execute(&pool)
+            .await
+            .expect("insert test row");
+
+        let result = super::execute(
+            &pool,
+            "SELECT COUNT(*) FROM items",
+            100,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(result.rows, vec![vec![json!(1)]]);
     }
 
     #[test]

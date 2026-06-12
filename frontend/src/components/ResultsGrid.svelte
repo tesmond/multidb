@@ -14,6 +14,7 @@
   const BASE_CELL_PAD_X = 10;
   // Average character width at 12px sans-serif — used for content-width estimation
   const BASE_AVG_CHAR_W = 5.6;
+  const EXPLAIN_DEFAULT_TEXT_LEN = 120;
   const FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
   const EDGE_ZONE = 50;       // px from scroll edge to start auto-scrolling
   const MAX_EDGE_SPEED = 15;  // max px per frame during edge auto-scroll
@@ -66,14 +67,20 @@
   let colMaxTextLen: number[] = [];
   let _colMaxTextLenRowCount = 0; // how many rows have already been scanned
 
+  function initialColumnTextLen(columnName: string): number {
+    return columnName.toLowerCase() === 'explain'
+      ? Math.max(columnName.length, EXPLAIN_DEFAULT_TEXT_LEN)
+      : columnName.length;
+  }
+
   // Reset column state when the column set changes (new query).
   $: {
     const key = result?.columns ? result.columns.join('\x00') : '';
     if (key !== _colWidthsKey) {
       _colWidthsKey = key;
       if (result?.columns) {
-        colMaxTextLen = result.columns.map(c => c.length);
-        colWidths = result.columns.map(c => Math.max(c.length * avgCharW + cellPadX * 2 + 16 * fontScale, 100 * fontScale));
+        colMaxTextLen = result.columns.map(initialColumnTextLen);
+        colWidths = colMaxTextLen.map(len => textLenToWidth(len));
         _colWidthsFontScale = fontScale;
       } else {
         colMaxTextLen = [];

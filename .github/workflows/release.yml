@@ -24,10 +24,13 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: linux-x64
+            artifact: desktop/target/release/multidb
           - os: windows-latest
             target: windows-x64
+            artifact: desktop/target/release/multidb.exe
           - os: macos-latest
             target: macos-x64
+            artifact: desktop/target/release/MultiDB-macos.zip
 
     steps:
       - name: Check out repository
@@ -68,7 +71,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
-          path: desktop/target/release/multidb*
+          path: ${{ matrix.artifact }}
           if-no-files-found: ignore
 
   release:

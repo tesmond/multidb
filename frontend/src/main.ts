@@ -63,18 +63,19 @@ window.__MULTIDB_REPORT_STARTUP__ = startupReport
 startupMark('main_module_evaluated')
 
 document.addEventListener('contextmenu', e => {
+  const target = e.target as HTMLElement | null
+  const insideSqlEditor = !!target?.closest('.cm-editor')
+
+  if (insideSqlEditor) {
+    return
+  }
+
   if (!import.meta.env.DEV) {
     e.preventDefault()
     return
   }
 
-  const target = e.target as HTMLElement | null
-  const insideSqlEditor = !!target?.closest('.cm-editor')
-
-  // In dev, allow native context menu (Inspect) inside SQL editor only.
-  if (!insideSqlEditor) {
-    e.preventDefault()
-  }
+  e.preventDefault()
 })
 
 const target = document.getElementById('app')
