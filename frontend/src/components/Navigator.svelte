@@ -1,6 +1,6 @@
 <script lang="ts">
   import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, loadCachedSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup } from '../stores/appStore';
-  import type { ActiveConnection, ServerGroup } from '../stores/appStore';
+  import type { ActiveConnection, SchemaTree, ServerGroup } from '../stores/appStore';
   import { Disconnect, TestConnection, BackupTable, DropTable } from '../../desktop/gen/main/App';
   import { get } from 'svelte/store';
 
@@ -25,6 +25,12 @@
   let showServerGroupDialog = false;
   let serverGroupTitle = '';
   let serverGroupError = '';
+  let tableFilter = '';
+  let normalizedTableFilter = '';
+  let hasTableFilter = false;
+  let lastFilterSchemaLoadKey = '';
+
+  type SchemaTable = NonNullable<SchemaTree['tables']>[number];
 
   type NavItem =
     | { kind: 'group'; group: ServerGroup }
@@ -32,30 +38,58 @@
 
   let navItems: NavItem[] = [];
 
+  $: fontScaleInput = String($fontScalePercent);
+  $: normalizedTableFilter = tableFilter.trim().toLowerCase();
+  $: hasTableFilter = normalizedTableFilter.length > 0;
+
   $: {
     const connById = new Map($activeConnections.map((conn) => [conn.config.id, conn]));
     const groupedIds = new Set<string>();
     const items: NavItem[] = [];
+    const filterText = normalizedTableFilter;
+    const filtering = filterText.length > 0;
 
     for (const group of $serverGroups) {
-      items.push({ kind: 'group', group });
       for (const connId of group.connectionIds) groupedIds.add(connId);
-      if (expandedGroups[group.id]) {
-        for (const connId of group.connectionIds) {
-          const conn = connById.get(connId);
-          if (conn) items.push({ kind: 'conn', conn, groupId: group.id });
-        }
+
+      const groupConns = group.connectionIds
+        .map((connId) => connById.get(connId))
+        .filter((conn): conn is ActiveConnection => !!conn)
+        .filter((conn) => connectionMatchesFilter(conn, filterText));
+
+      if (!filtering || groupConns.length > 0) {
+        items.push({ kind: 'group', group });
+      }
+
+      if (expandedGroups[group.id] || filtering) {
+        for (const conn of groupConns) items.push({ kind: 'conn', conn, groupId: group.id });
       }
     }
 
     for (const conn of $activeConnections) {
-      if (!groupedIds.has(conn.config.id)) items.push({ kind: 'conn', conn });
+      if (!groupedIds.has(conn.config.id) && connectionMatchesFilter(conn, filterText)) {
+        items.push({ kind: 'conn', conn });
+      }
     }
 
     navItems = items;
   }
 
-  $: fontScaleInput = String($fontScalePercent);
+  $: {
+    const missingSchemaIds = hasTableFilter
+      ? $activeConnections
+          .filter((conn) => !conn.schema && !conn.schemaLoading)
+          .map((conn) => conn.config.id)
+          .sort()
+      : [];
+    const loadKey = missingSchemaIds.join('|');
+    if (loadKey && loadKey !== lastFilterSchemaLoadKey) {
+      lastFilterSchemaLoadKey = loadKey;
+      void loadCachedSchemasForFilter(missingSchemaIds);
+    } else if (!hasTableFilter) {
+      lastFilterSchemaLoadKey = '';
+    }
+  }
 
   function toggleConn(id: string, conn: ActiveConnection) {
     expanded[id] = !expanded[id];
@@ -106,9 +140,57 @@
     return `${value.toFixed(precision)} ${units[unitIndex]}`;
   }
 
+  function matchesTableFilter(table: SchemaTable, filterText = normalizedTableFilter): boolean {
+    if (!filterText) return true;
+    if (table.name.toLowerCase().includes(filterText)) return true;
+    return (table.columns ?? []).some((col) =>
+      col.name.toLowerCase().includes(filterText),
+    );
+  }
+
+  function filterTables(tables: SchemaTable[] | undefined | null, filterText = normalizedTableFilter): SchemaTable[] {
+    const list = tables ?? [];
+    return filterText ? list.filter((table) => matchesTableFilter(table, filterText)) : list;
+  }
+
+  function schemaHasMatchingTables(schema: SchemaTree, filterText = normalizedTableFilter): boolean {
+    if (schema.schemas?.length) {
+      return schema.schemas.some((pgSchema) => filterTables(pgSchema.tables, filterText).length > 0);
+    }
+    return filterTables(schema.tables, filterText).length > 0;
+  }
+
+  function connectionMatchesFilter(conn: ActiveConnection, filterText = normalizedTableFilter): boolean {
+    return !filterText || (!!conn.schema && schemaHasMatchingTables(conn.schema, filterText));
+  }
+
   function groupConnectionCount(group: ServerGroup): number {
     const connIds = new Set($activeConnections.map((conn) => conn.config.id));
-    return group.connectionIds.filter((id) => connIds.has(id)).length;
+    const connById = new Map($activeConnections.map((conn) => [conn.config.id, conn]));
+    return group.connectionIds.filter((id) => {
+      const conn = connById.get(id);
+      return conn && connIds.has(id) && connectionMatchesFilter(conn);
+    }).length;
+  }
+
+  async function loadCachedSchemasForFilter(connIds: string[]) {
+    await Promise.all(connIds.map((connId) => loadCachedSchema(connId)));
+  }
+
+  function clearTableFilter() {
+    tableFilter = '';
+    normalizedTableFilter = '';
+    hasTableFilter = false;
+    lastFilterSchemaLoadKey = '';
+  }
+
+  function updateTableFilter(e: Event) {
+    const nextValue = (e.currentTarget as HTMLInputElement).value;
+    if (!nextValue) {
+      clearTableFilter();
+      return;
+    }
+    tableFilter = nextValue;
   }
 
   async function disconnectConn(id: string) {
@@ -523,6 +605,23 @@
     {/if}
   </div>
 
+  <div class="nav-filter">
+    <input
+      class="nav-filter-input"
+      type="search"
+      value={tableFilter}
+      placeholder="Filter tables or columns"
+      autocomplete="off"
+      autocapitalize="none"
+      spellcheck="false"
+      aria-label="Filter tables or columns"
+      on:input={updateTableFilter}
+    />
+    {#if tableFilter}
+      <button class="nav-filter-clear" type="button" on:click={clearTableFilter} aria-label="Clear table filter">Clear</button>
+    {/if}
+  </div>
+
   <div
     class="nav-content"
     role="tree"
@@ -545,11 +644,11 @@
             }}
             role="treeitem"
             aria-selected={$activeServerGroupId === item.group.id}
-            aria-expanded={!!expandedGroups[item.group.id]}
+            aria-expanded={hasTableFilter || !!expandedGroups[item.group.id]}
             tabindex="0"
             on:keydown={e => e.key === 'Enter' && toggleGroup(item.group.id)}
           >
-            <span class="chevron">{expandedGroups[item.group.id] ? '▾' : '▸'}</span>
+            <span class="chevron">{hasTableFilter || expandedGroups[item.group.id] ? '▾' : '▸'}</span>
             <span class="table-icon">▣</span>
             <span class="node-name">{item.group.title}</span>
             <span class="count">({groupConnectionCount(item.group)})</span>
@@ -574,11 +673,11 @@
           }}
           on:contextmenu={e => openDatabaseContextMenu(e, conn.config.id)}
           role="treeitem" aria-selected={false}
-          aria-expanded={!!expanded[conn.config.id]}
+          aria-expanded={hasTableFilter || !!expanded[conn.config.id]}
           tabindex="0"
           on:keydown={e => e.key === 'Enter' && toggleConn(conn.config.id, conn)}
         >
-          <span class="chevron">{expanded[conn.config.id] ? '▾' : '▸'}</span>
+          <span class="chevron">{hasTableFilter || expanded[conn.config.id] ? '▾' : '▸'}</span>
           <span class="conn-icon">🔌</span>
           <span
             class="conn-color-swatch"
@@ -600,7 +699,7 @@
           </div>
         </div>
 
-        {#if expanded[conn.config.id]}
+        {#if hasTableFilter || expanded[conn.config.id]}
           <div class="conn-children">
             {#if conn.schemaLoading}
               <div class="nav-info">Loading schema…</div>
@@ -610,38 +709,43 @@
               {#if conn.schema.schemas?.length}
                 <!-- Postgres: schema-grouped hierarchy -->
                 {#each conn.schema.schemas as pgSchema}
+                  {@const schemaKey = `${conn.config.id}-schema-${pgSchema.name}`}
+                  {@const tablesKey = `${conn.config.id}-${pgSchema.name}-tables`}
+                  {@const filteredPgTables = filterTables(pgSchema.tables)}
+                  {#if !hasTableFilter || filteredPgTables.length > 0}
                   <div class="schema-section">
                     <div
                       class="section-label schema-node"
-                      on:click={() => toggleTable(`${conn.config.id}-schema-${pgSchema.name}`)}
+                      on:click={() => toggleTable(schemaKey)}
                       role="treeitem" aria-selected={false}
-                      aria-expanded={!!expandedTables[`${conn.config.id}-schema-${pgSchema.name}`]}
+                      aria-expanded={hasTableFilter || !!expandedTables[schemaKey]}
                       tabindex="0"
-                      on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-schema-${pgSchema.name}`)}
+                      on:keydown={e => e.key === 'Enter' && toggleTable(schemaKey)}
                     >
-                      <span class="chevron">{expandedTables[`${conn.config.id}-schema-${pgSchema.name}`] ? '▾' : '▸'}</span>
+                      <span class="chevron">{hasTableFilter || expandedTables[schemaKey] ? '▾' : '▸'}</span>
                       <span class="table-icon">🗂</span>
                       <span class="node-name">{pgSchema.name}</span>
                       {#if formatBytes(pgSchema.sizeBytes)}
                         <span class="size-label">{formatBytes(pgSchema.sizeBytes)}</span>
                       {/if}
                     </div>
-                    {#if expandedTables[`${conn.config.id}-schema-${pgSchema.name}`]}
+                    {#if hasTableFilter || expandedTables[schemaKey]}
                       <div class="conn-children">
                         <!-- Tables -->
                         <div class="schema-section">
                           <div
                             class="section-label"
-                            on:click={() => toggleTable(`${conn.config.id}-${pgSchema.name}-tables`)}
+                            on:click={() => toggleTable(tablesKey)}
                             role="treeitem" aria-selected={false}
+                            aria-expanded={hasTableFilter || !!expandedTables[tablesKey]}
                             tabindex="0"
-                            on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-${pgSchema.name}-tables`)}
+                            on:keydown={e => e.key === 'Enter' && toggleTable(tablesKey)}
                           >
-                            <span class="chevron">{expandedTables[`${conn.config.id}-${pgSchema.name}-tables`] ? '▾' : '▸'}</span>
-                            Tables <span class="count">({pgSchema.tables?.length ?? 0})</span>
+                            <span class="chevron">{hasTableFilter || expandedTables[tablesKey] ? '▾' : '▸'}</span>
+                            Tables <span class="count">({filteredPgTables.length})</span>
                           </div>
-                          {#if expandedTables[`${conn.config.id}-${pgSchema.name}-tables`]}
-                            {#each pgSchema.tables ?? [] as table}
+                          {#if hasTableFilter || expandedTables[tablesKey]}
+                            {#each filteredPgTables as table}
                               <div class="table-node">
                                 <div
                                   class="table-label"
@@ -674,7 +778,7 @@
                           {/if}
                         </div>
                         <!-- Views -->
-                        {#if pgSchema.views?.length > 0}
+                        {#if !hasTableFilter && pgSchema.views?.length > 0}
                         <div class="schema-section">
                           <div
                             class="section-label"
@@ -696,7 +800,7 @@
                         </div>
                         {/if}
                         <!-- Indexes -->
-                        {#if pgSchema.indexes?.length > 0}
+                        {#if !hasTableFilter && pgSchema.indexes?.length > 0}
                         <div class="schema-section">
                           <div
                             class="section-label"
@@ -720,24 +824,28 @@
                       </div>
                     {/if}
                   </div>
+                  {/if}
                 {/each}
               {:else}
               <!-- MySQL / SQLite: flat hierarchy -->
               <!-- Tables -->
+              {@const tablesKey = `${conn.config.id}-tables`}
+              {@const filteredTables = filterTables(conn.schema.tables)}
+              {#if !hasTableFilter || filteredTables.length > 0}
               <div class="schema-section">
                 <div
                   class="section-label"
-                  on:click={() => toggleTable(`${conn.config.id}-tables`)}
+                  on:click={() => toggleTable(tablesKey)}
                   role="treeitem" aria-selected={false}
-                  aria-expanded={!!expandedTables[`${conn.config.id}-tables`]}
+                  aria-expanded={hasTableFilter || !!expandedTables[tablesKey]}
                   tabindex="0"
-                  on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-tables`)}
+                  on:keydown={e => e.key === 'Enter' && toggleTable(tablesKey)}
                 >
-                  <span class="chevron">{expandedTables[`${conn.config.id}-tables`] ? '▾' : '▸'}</span>
-                  Tables <span class="count">({conn.schema.tables?.length ?? 0})</span>
+                  <span class="chevron">{hasTableFilter || expandedTables[tablesKey] ? '▾' : '▸'}</span>
+                  Tables <span class="count">({filteredTables.length})</span>
                 </div>
-                {#if expandedTables[`${conn.config.id}-tables`]}
-                  {#each conn.schema.tables ?? [] as table}
+                {#if hasTableFilter || expandedTables[tablesKey]}
+                  {#each filteredTables as table}
                     <div class="table-node">
                       <div
                         class="table-label"
@@ -769,9 +877,10 @@
                   {/each}
                 {/if}
               </div>
+              {/if}
 
               <!-- Views -->
-              {#if conn.schema.views?.length > 0}
+              {#if !hasTableFilter && conn.schema.views?.length > 0}
               <div class="schema-section">
                 <div
                   class="section-label"
@@ -794,7 +903,7 @@
               {/if}
 
               <!-- Indexes -->
-              {#if conn.schema.indexes?.length > 0}
+              {#if !hasTableFilter && conn.schema.indexes?.length > 0}
               <div class="schema-section">
                 <div
                   class="section-label"
@@ -1007,6 +1116,39 @@
     text-align: center;
   }
   .nav-content { flex: 1; overflow-y: auto; padding: 4px 0 40px; }
+  .nav-filter {
+    position: relative;
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-filter-input {
+    width: 100%;
+    height: 28px;
+    padding: 5px 50px 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text);
+    box-sizing: border-box;
+    font-size: calc(12px * var(--app-font-scale));
+  }
+  .nav-filter-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .nav-filter-clear {
+    position: absolute;
+    top: 50%;
+    right: 14px;
+    transform: translateY(-50%);
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: calc(11px * var(--app-font-scale));
+    padding: 2px 4px;
+  }
+  .nav-filter-clear:hover { color: var(--text); }
 
   .group-label {
     display: flex; align-items: center; gap: 4px;
