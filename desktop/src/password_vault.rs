@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 const KEYCHAIN_SERVICE: &str = "multidb";
 const LEGACY_ACCOUNT_PREFIX: &str = "connection:";
