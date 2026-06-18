@@ -2,7 +2,7 @@ use crate::{
     models::{ConnectionConfig, QueryRecord, SavedQuery, SchemaCacheEntry},
     password_vault,
 };
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Row, SqlitePool,
@@ -55,7 +55,7 @@ impl HistoryStore {
                 host TEXT NOT NULL DEFAULT '',
                 port INTEGER NOT NULL DEFAULT 0,
                 username TEXT NOT NULL DEFAULT '',
-                password TEXT NOT NULL DEFAULT '',
+                has_keychain_password INTEGER NOT NULL DEFAULT 0,
                 database TEXT NOT NULL DEFAULT '',
                 dsn TEXT NOT NULL DEFAULT '',
                 use_kube_port_forward INTEGER NOT NULL DEFAULT 0,
@@ -87,6 +87,7 @@ impl HistoryStore {
             "ALTER TABLE query_history ADD COLUMN result_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE saved_connections ADD COLUMN tab_color TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN tab_text_black INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE saved_connections ADD COLUMN has_keychain_password INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE saved_connections ADD COLUMN use_kube_port_forward INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE saved_connections ADD COLUMN kube_context TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN kube_namespace TEXT NOT NULL DEFAULT ''",
@@ -191,18 +192,19 @@ impl HistoryStore {
 
     pub async fn save_connection(&self, cfg: &ConnectionConfig) -> Result<()> {
         password_vault::save_connection_password(&cfg.id, &cfg.password)?;
+        let has_keychain_password = !cfg.password.is_empty();
 
         sqlx::query(
             r#"
             INSERT INTO saved_connections (
-                id, name, driver, tab_color, tab_text_black, host, port, username, password, database, dsn,
+                id, name, driver, tab_color, tab_text_black, host, port, username, has_keychain_password, database, dsn,
                 use_kube_port_forward, kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, driver=excluded.driver, tab_color=excluded.tab_color,
                 tab_text_black=excluded.tab_text_black, host=excluded.host, port=excluded.port,
-                username=excluded.username, password=excluded.password, database=excluded.database,
+                username=excluded.username, has_keychain_password=excluded.has_keychain_password, database=excluded.database,
                 dsn=excluded.dsn, use_kube_port_forward=excluded.use_kube_port_forward,
                 kube_context=excluded.kube_context, kube_namespace=excluded.kube_namespace,
                 kube_resource=excluded.kube_resource, kube_local_port=excluded.kube_local_port,
@@ -217,7 +219,7 @@ impl HistoryStore {
         .bind(&cfg.host)
         .bind(cfg.port as i64)
         .bind(&cfg.username)
-        .bind("")
+        .bind(has_keychain_password as i64)
         .bind(&cfg.database)
         .bind(&cfg.dsn)
         .bind(cfg.use_kube_port_forward as i64)
@@ -243,7 +245,7 @@ impl HistoryStore {
     pub async fn list_saved_connections(&self) -> Result<Vec<ConnectionConfig>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, name, driver, tab_color, tab_text_black, host, port, username, password, database, dsn,
+            SELECT id, name, driver, tab_color, tab_text_black, host, port, username, has_keychain_password, database, dsn,
                    use_kube_port_forward, kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             FROM saved_connections
             ORDER BY name
@@ -255,20 +257,21 @@ impl HistoryStore {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let id: String = row.try_get("id")?;
-            let legacy_password: String = row.try_get("password")?;
-            let password = match password_vault::load_connection_password(&id)? {
-                Some(password) => password,
-                None if !legacy_password.is_empty() => {
-                    password_vault::save_connection_password(&id, &legacy_password)?;
-                    self.clear_legacy_password(&id).await?;
-                    legacy_password
-                }
-                None => String::new(),
+            let name: String = row.try_get("name")?;
+            let has_keychain_password = row.try_get::<i64, _>("has_keychain_password")? != 0;
+            let password = if has_keychain_password {
+                password_vault::load_connection_password(&id)?.ok_or_else(|| {
+                    anyhow!(
+                        "Saved password for connection \"{name}\" ({id}) is missing from the OS keychain"
+                    )
+                })?
+            } else {
+                String::new()
             };
 
             out.push(ConnectionConfig {
                 id: row.try_get("id")?,
-                name: row.try_get("name")?,
+                name,
                 driver: row.try_get("driver")?,
                 tab_color: row.try_get("tab_color")?,
                 tab_text_black: row.try_get::<i64, _>("tab_text_black")? != 0,
@@ -291,38 +294,161 @@ impl HistoryStore {
     }
 
     async fn migrate_connection_passwords_to_keychain(&self) -> Result<()> {
-        let rows = sqlx::query("SELECT id, password FROM saved_connections WHERE password <> ''")
+        if self.column_exists("saved_connections", "password").await? {
+            let rows =
+                sqlx::query("SELECT id, password FROM saved_connections WHERE password <> ''")
+                    .fetch_all(&self.pool)
+                    .await?;
+
+            for row in rows {
+                let id: String = row.try_get("id")?;
+                let legacy_password: String = row.try_get("password")?;
+                if legacy_password.is_empty() {
+                    continue;
+                }
+                password_vault::save_connection_password(&id, &legacy_password)?;
+                self.set_has_keychain_password(&id, true).await?;
+            }
+
+            self.drop_saved_connection_password_column().await?;
+        }
+
+        let rows = sqlx::query("SELECT id, has_keychain_password FROM saved_connections")
             .fetch_all(&self.pool)
             .await?;
 
         for row in rows {
             let id: String = row.try_get("id")?;
-            let legacy_password: String = row.try_get("password")?;
-            if legacy_password.is_empty() {
-                continue;
+            let has_keychain_password = row.try_get::<i64, _>("has_keychain_password")? != 0;
+            if !has_keychain_password && password_vault::load_connection_password(&id)?.is_some() {
+                self.set_has_keychain_password(&id, true).await?;
             }
-            if password_vault::load_connection_password(&id)?.is_none() {
-                password_vault::save_connection_password(&id, &legacy_password)?;
-            }
-            self.clear_legacy_password(&id).await?;
         }
 
         Ok(())
     }
 
-    async fn clear_legacy_password(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE saved_connections SET password = '' WHERE id = ?")
+    async fn set_has_keychain_password(&self, id: &str, has_keychain_password: bool) -> Result<()> {
+        sqlx::query("UPDATE saved_connections SET has_keychain_password = ? WHERE id = ?")
+            .bind(has_keychain_password as i64)
             .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
+    async fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let rows = sqlx::query(&pragma).fetch_all(&self.pool).await?;
+        for row in rows {
+            let name: String = row.try_get("name")?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn drop_saved_connection_password_column(&self) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query("DROP TABLE IF EXISTS saved_connections_without_password")
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE saved_connections_without_password (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                driver TEXT NOT NULL,
+                tab_color TEXT NOT NULL DEFAULT '',
+                tab_text_black INTEGER NOT NULL DEFAULT 0,
+                host TEXT NOT NULL DEFAULT '',
+                port INTEGER NOT NULL DEFAULT 0,
+                username TEXT NOT NULL DEFAULT '',
+                has_keychain_password INTEGER NOT NULL DEFAULT 0,
+                database TEXT NOT NULL DEFAULT '',
+                dsn TEXT NOT NULL DEFAULT '',
+                use_kube_port_forward INTEGER NOT NULL DEFAULT 0,
+                kube_context TEXT NOT NULL DEFAULT '',
+                kube_namespace TEXT NOT NULL DEFAULT '',
+                kube_resource TEXT NOT NULL DEFAULT '',
+                kube_local_port INTEGER NOT NULL DEFAULT 0,
+                kube_remote_port INTEGER NOT NULL DEFAULT 0
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO saved_connections_without_password (
+                id, name, driver, tab_color, tab_text_black, host, port, username,
+                has_keychain_password, database, dsn, use_kube_port_forward,
+                kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
+            )
+            SELECT
+                id, name, driver, tab_color, tab_text_black, host, port, username,
+                has_keychain_password, database, dsn, use_kube_port_forward,
+                kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
+            FROM saved_connections
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("DROP TABLE saved_connections")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("ALTER TABLE saved_connections_without_password RENAME TO saved_connections")
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn save_schema(&self, conn_id: &str, schema_json: &str, hash: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            CREATE TEMP TABLE IF NOT EXISTS schema_cache_refresh (
+                conn_id TEXT PRIMARY KEY,
+                schema_json TEXT NOT NULL,
+                last_refreshed_at TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("DELETE FROM schema_cache_refresh WHERE conn_id = ?")
+            .bind(conn_id)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO schema_cache_refresh (conn_id, schema_json, last_refreshed_at, hash)
+            VALUES (?, ?, datetime('now'), ?)
+            "#,
+        )
+        .bind(conn_id)
+        .bind(schema_json)
+        .bind(hash)
+        .execute(&mut *tx)
+        .await?;
+
         sqlx::query(
             r#"
             INSERT INTO schema_cache (conn_id, schema_json, last_refreshed_at, hash)
-            VALUES (?, ?, datetime('now'), ?)
+            SELECT conn_id, schema_json, last_refreshed_at, hash
+            FROM schema_cache_refresh
+            WHERE conn_id = ?
             ON CONFLICT(conn_id) DO UPDATE SET
                 schema_json=excluded.schema_json,
                 last_refreshed_at=excluded.last_refreshed_at,
@@ -330,10 +456,15 @@ impl HistoryStore {
             "#,
         )
         .bind(conn_id)
-        .bind(schema_json)
-        .bind(hash)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        sqlx::query("DELETE FROM schema_cache_refresh WHERE conn_id = ?")
+            .bind(conn_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
         Ok(())
     }
 

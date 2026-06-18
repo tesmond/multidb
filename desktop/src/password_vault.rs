@@ -1,4 +1,5 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::anyhow;
+use anyhow::{Context, Result};
 
 const KEYCHAIN_SERVICE: &str = "multidb";
 const LEGACY_ACCOUNT_PREFIX: &str = "connection:";
@@ -24,7 +25,17 @@ pub fn save_connection_password(conn_id: &str, password: &str) -> Result<()> {
     }
     entry
         .set_password(password)
-        .with_context(|| format!("save password to OS keychain for connection {conn_id}"))
+        .with_context(|| format!("save password to OS keychain for connection {conn_id}"))?;
+
+    match load_connection_password(conn_id)? {
+        Some(saved) if saved == password => Ok(()),
+        Some(_) => Err(anyhow!(
+            "OS keychain verification failed for connection {conn_id}"
+        )),
+        None => Err(anyhow!(
+            "OS keychain verification found no credential for connection {conn_id}"
+        )),
+    }
 }
 
 #[cfg(not(windows))]
