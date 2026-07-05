@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, loadCachedSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup, showRelationshipDiagramForConnection } from '../stores/appStore';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, loadCachedSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup, showRelationshipDiagramForConnection, showDatabaseConnectionsForConnection } from '../stores/appStore';
   import type { ActiveConnection, SchemaTree, ServerGroup } from '../stores/appStore';
   import { Disconnect, TestConnection, BackupTable, DropTable } from '../../desktop/gen/main/App';
   import { get } from 'svelte/store';
@@ -453,7 +453,7 @@
   function clampMenuPosition(x: number, y: number, kind: 'table' | 'database' | 'dropConfirm') {
     const pad = 8;
     const estimatedWidth = 220;
-    const estimatedHeight = kind === 'database' ? 210 : kind === 'dropConfirm' ? 120 : 165;
+    const estimatedHeight = kind === 'database' ? 245 : kind === 'dropConfirm' ? 120 : 165;
     const maxX = Math.max(pad, window.innerWidth - estimatedWidth - pad);
     const maxY = Math.max(pad, window.innerHeight - estimatedHeight - pad);
     return {
@@ -476,7 +476,7 @@
     contextMenu = { kind: 'database', x: pos.x, y: pos.y, connId };
   }
 
-  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'dropTable' | 'import' | 'refresh' | 'relationships' | 'test' | 'delete') {
+  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'dropTable' | 'import' | 'refresh' | 'relationships' | 'connections' | 'test' | 'delete') {
     if (!contextMenu) return;
     const menu = contextMenu;
     contextMenu = null;
@@ -491,6 +491,10 @@
         }
         if (action === 'relationships') {
           await showRelationshipDiagramForConnection(menu.connId);
+          return;
+        }
+        if (action === 'connections') {
+          showDatabaseConnectionsForConnection(menu.connId);
           return;
         }
         if (action === 'import') {
@@ -980,6 +984,9 @@
       </button>
       <button role="menuitem" on:click={() => handleContextAction('relationships')}>
         Show Relationships
+      </button>
+      <button role="menuitem" on:click={() => handleContextAction('connections')}>
+        Show Connections
       </button>
       <button role="menuitem" on:click={() => handleContextAction('import')}>
         Import...

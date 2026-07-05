@@ -16,6 +16,7 @@ export type SchemaTree = schema.SchemaTree;
 export type QueryRecord = history.QueryRecord;
 export type SavedQuery = history.SavedQuery;
 export type ExecuteResult = main.ExecuteResult;
+export type DatabaseConnection = main.DatabaseConnection;
 
 export interface ActiveConnection {
   config: ConnectionConfig;
@@ -271,7 +272,7 @@ export interface TabBase {
   id: string;
   title: string;
   connId: string;
-  kind: "sql" | "relationshipDiagram";
+  kind: "sql" | "relationshipDiagram" | "databaseConnections";
   manuallyRenamed: boolean;
 }
 
@@ -291,7 +292,11 @@ export interface RelationshipDiagramTab extends TabBase {
   kind: "relationshipDiagram";
 }
 
-export type Tab = SqlTab | RelationshipDiagramTab;
+export interface DatabaseConnectionsTab extends TabBase {
+  kind: "databaseConnections";
+}
+
+export type Tab = SqlTab | RelationshipDiagramTab | DatabaseConnectionsTab;
 
 export function isSqlTab(tab: Tab | null | undefined): tab is SqlTab {
   return tab?.kind === "sql";
@@ -301,6 +306,12 @@ export function isRelationshipDiagramTab(
   tab: Tab | null | undefined,
 ): tab is RelationshipDiagramTab {
   return tab?.kind === "relationshipDiagram";
+}
+
+export function isDatabaseConnectionsTab(
+  tab: Tab | null | undefined,
+): tab is DatabaseConnectionsTab {
+  return tab?.kind === "databaseConnections";
 }
 
 function makeSqlTab(connId = ""): SqlTab {
@@ -335,6 +346,19 @@ function makeRelationshipDiagramTab(
   };
 }
 
+function makeDatabaseConnectionsTab(
+  connId: string,
+  connectionName: string,
+): DatabaseConnectionsTab {
+  return {
+    id: crypto.randomUUID(),
+    title: `${connectionName} Connections`,
+    connId,
+    kind: "databaseConnections",
+    manuallyRenamed: false,
+  };
+}
+
 function createTabStore() {
   const { subscribe, update, set } = writable<Tab[]>([makeSqlTab()]);
 
@@ -354,7 +378,8 @@ function createTabStore() {
       id: string,
       patch: Partial<
         Omit<SqlTab, "id" | "kind"> &
-          Omit<RelationshipDiagramTab, "id" | "kind">
+          Omit<RelationshipDiagramTab, "id" | "kind"> &
+          Omit<DatabaseConnectionsTab, "id" | "kind">
       >,
     ) {
       update((tabs) =>
@@ -480,6 +505,37 @@ export async function showRelationshipDiagramForConnection(
 
   selectedConnId.set(connId);
   return openRelationshipDiagramTab(connId, conn.config.name);
+}
+
+export function openDatabaseConnectionsTab(
+  connId: string,
+  connectionName: string,
+): string {
+  const existing = get(tabs).find(
+    (tab) => tab.connId === connId && tab.kind === "databaseConnections",
+  );
+  if (existing) {
+    activeTabId.set(existing.id);
+    return existing.id;
+  }
+
+  const nextTab = makeDatabaseConnectionsTab(connId, connectionName);
+  tabs.update((currentTabs) => [...currentTabs, nextTab]);
+  activeTabId.set(nextTab.id);
+  return nextTab.id;
+}
+
+export function showDatabaseConnectionsForConnection(
+  connId: string,
+): string | null {
+  const conn = get(activeConnections).find((entry) => entry.config.id === connId);
+  if (!conn) {
+    statusMessage.set("Connection not found.");
+    return null;
+  }
+
+  selectedConnId.set(connId);
+  return openDatabaseConnectionsTab(connId, conn.config.name);
 }
 
 // -----------------------------------------------------------------------

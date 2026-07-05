@@ -143,6 +143,20 @@ pub struct SavedQuery {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseConnection {
+    pub id: String,
+    pub user: String,
+    pub database: String,
+    pub client: String,
+    pub state: String,
+    pub opened_at: String,
+    pub last_active_at: String,
+    pub most_recent_command: String,
+    pub can_terminate: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryStreamMeta {

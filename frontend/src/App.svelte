@@ -4,6 +4,7 @@
     import Navigator from "./components/Navigator.svelte";
     import OutputPanel from "./components/OutputPanel.svelte";
     import RelationshipDiagram from "./components/RelationshipDiagram.svelte";
+    import DatabaseConnections from "./components/DatabaseConnections.svelte";
     import StatusBar from "./components/StatusBar.svelte";
     import {
         tabs,
@@ -485,6 +486,8 @@
                                 <SqlEditor tabId={tab.id} />
                             {:else if tab.kind === "relationshipDiagram"}
                                 <RelationshipDiagram tabId={tab.id} />
+                            {:else if tab.kind === "databaseConnections"}
+                                <DatabaseConnections tabId={tab.id} />
                             {:else}
                                 <div class="editor-loading">Loading editor...</div>
                             {/if}

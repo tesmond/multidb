@@ -42,6 +42,13 @@ struct ConnIdArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TerminateConnectionArgs {
+    conn_id: String,
+    connection_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DisconnectArgs {
     id: String,
 }
@@ -194,6 +201,17 @@ pub async fn dispatch(
         "cancel_query" => {
             let args: CancelArgs = parse(args)?;
             to_value(commands::cancel_query(state, args.query_id).await?)
+        }
+        "list_database_connections" => {
+            let args: ConnIdArgs = parse(args)?;
+            to_value(commands::list_database_connections(state, args.conn_id).await?)
+        }
+        "terminate_database_connection" => {
+            let args: TerminateConnectionArgs = parse(args)?;
+            to_value(
+                commands::terminate_database_connection(state, args.conn_id, args.connection_id)
+                    .await?,
+            )
         }
         "get_table_primary_keys" => {
             let args: PrimaryKeyArgs = parse(args)?;

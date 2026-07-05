@@ -38,6 +38,8 @@ export function ImportTable(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function ListConnections():Promise<Array<connections.ConnectionConfig>>;
 
+export function ListDatabaseConnections(arg1:string):Promise<Array<main.DatabaseConnection>>;
+
 export function ListSavedConnections():Promise<Array<connections.ConnectionConfig>>;
 
 export function LoadSchema(arg1:string):Promise<main.SchemaCacheEntry>;
@@ -57,5 +59,7 @@ export function SelectImportFile(arg1:string):Promise<string>;
 export function SelectSqliteFile():Promise<string>;
 
 export function TestConnection(arg1:connections.ConnectionConfig):Promise<void>;
+
+export function TerminateDatabaseConnection(arg1:string,arg2:string):Promise<void>;
 
 export function UpdateSavedQueryTitle(arg1:number,arg2:string):Promise<void>;

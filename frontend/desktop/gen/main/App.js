@@ -69,6 +69,10 @@ export function ListConnections() {
   return invoke("list_connections");
 }
 
+export function ListDatabaseConnections(connId) {
+  return invoke("list_database_connections", { connId });
+}
+
 export function ListSavedConnections() {
   return invoke("list_saved_connections");
 }
@@ -107,6 +111,10 @@ export function SelectSqliteFile() {
 
 export function TestConnection(cfg) {
   return invoke("test_connection", { cfg });
+}
+
+export function TerminateDatabaseConnection(connId, connectionId) {
+  return invoke("terminate_database_connection", { connId, connectionId });
 }
 
 export function UpdateSavedQueryTitle(id, newTitle) {

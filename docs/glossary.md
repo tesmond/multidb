@@ -47,3 +47,19 @@ The stable details area in the diagram tab that shows metadata for a selected re
 ## Loopback Edge
 
 A self-referencing relationship rendered as an edge that leaves and returns to the same table.
+
+## Database Connection Manager
+
+A right-pane tab that lists server-side sessions for one database connection and allows eligible sessions to be terminated.
+
+## Database Connections Tab
+
+A right-pane tab variant with kind `databaseConnections`, distinct from SQL editor and relationship diagram tabs.
+
+## Managed Database Session
+
+One server-side backend process or process-list row reported by a database engine for the selected connection.
+
+## Terminate Connection
+
+An operator action that asks the database engine to close a selected managed database session after confirmation.

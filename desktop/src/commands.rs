@@ -1,13 +1,13 @@
 use crate::{
     backup,
     models::{
-        ConnectionConfig, ExecuteResult, QueryRecord, QueryStreamChunk, QueryStreamDone,
-        QueryStreamMeta, SavedQuery, SchemaCacheEntry, SchemaTree,
+        ConnectionConfig, DatabaseConnection, ExecuteResult, QueryRecord, QueryStreamChunk,
+        QueryStreamDone, QueryStreamMeta, SavedQuery, SchemaCacheEntry, SchemaTree,
     },
     queries, schema,
     state::AppState,
 };
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use serde::Serialize;
 use sqlx::{Column, Row, TypeInfo};
@@ -121,6 +121,53 @@ pub async fn cancel_query(state: Arc<AppState>, query_id: String) -> CommandResu
         cancel.cancel();
     }
     Ok(())
+}
+
+pub async fn list_database_connections(
+    state: Arc<AppState>,
+    conn_id: String,
+) -> CommandResult<Vec<DatabaseConnection>> {
+    let cfg = state
+        .get_config_or_saved(&conn_id)
+        .await
+        .map_err(command_err)?;
+
+    match cfg.driver.as_str() {
+        "postgres" => list_postgres_connections(state, conn_id)
+            .await
+            .map_err(command_err),
+        "mysql" => list_mysql_connections(state, conn_id)
+            .await
+            .map_err(command_err),
+        "sqlite" => Ok(Vec::new()),
+        other => Err(format!(
+            "unsupported driver for connection management: {other}"
+        )),
+    }
+}
+
+pub async fn terminate_database_connection(
+    state: Arc<AppState>,
+    conn_id: String,
+    connection_id: String,
+) -> CommandResult<()> {
+    let cfg = state
+        .get_config_or_saved(&conn_id)
+        .await
+        .map_err(command_err)?;
+
+    match cfg.driver.as_str() {
+        "postgres" => terminate_postgres_connection(state, conn_id, connection_id)
+            .await
+            .map_err(command_err),
+        "mysql" => terminate_mysql_connection(state, conn_id, connection_id)
+            .await
+            .map_err(command_err),
+        "sqlite" => Err("SQLite does not expose server-side database connections".to_string()),
+        other => Err(format!(
+            "unsupported driver for connection management: {other}"
+        )),
+    }
 }
 
 pub async fn execute_query_streamed(
@@ -272,6 +319,135 @@ pub async fn execute_query_streamed(
     }
 
     emit_done(&emitter, done).map_err(command_err)?;
+    Ok(())
+}
+
+async fn list_postgres_connections(
+    state: Arc<AppState>,
+    conn_id: String,
+) -> Result<Vec<DatabaseConnection>> {
+    let pool = state.get_pg_pool_or_reconnect(&conn_id).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            pid::text AS id,
+            COALESCE(usename, '') AS user_name,
+            COALESCE(datname, '') AS database_name,
+            COALESCE(client_addr::text, '') AS client,
+            COALESCE(state, '') AS state,
+            COALESCE(to_char(backend_start, 'YYYY-MM-DD HH24:MI:SS TZ'), '') AS opened_at,
+            COALESCE(to_char(state_change, 'YYYY-MM-DD HH24:MI:SS TZ'), '') AS last_active_at,
+            COALESCE(query, '') AS most_recent_command,
+            pid <> pg_backend_pid() AS can_terminate
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+        ORDER BY backend_start DESC NULLS LAST
+        "#,
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| DatabaseConnection {
+            id: row.try_get("id").unwrap_or_default(),
+            user: row.try_get("user_name").unwrap_or_default(),
+            database: row.try_get("database_name").unwrap_or_default(),
+            client: row.try_get("client").unwrap_or_default(),
+            state: row.try_get("state").unwrap_or_default(),
+            opened_at: row.try_get("opened_at").unwrap_or_default(),
+            last_active_at: row.try_get("last_active_at").unwrap_or_default(),
+            most_recent_command: row.try_get("most_recent_command").unwrap_or_default(),
+            can_terminate: row.try_get("can_terminate").unwrap_or(false),
+        })
+        .collect())
+}
+
+async fn list_mysql_connections(
+    state: Arc<AppState>,
+    conn_id: String,
+) -> Result<Vec<DatabaseConnection>> {
+    let pool = state.get_mysql_pool_or_reconnect(&conn_id).await?;
+    let current_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+        .fetch_one(&pool)
+        .await?;
+    let rows = sqlx::query("SHOW FULL PROCESSLIST")
+        .fetch_all(&pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let id = row.try_get::<u64, _>("Id").unwrap_or_default();
+            let command = row.try_get::<String, _>("Info").unwrap_or_default();
+            let state = row.try_get::<String, _>("State").unwrap_or_default();
+            let command_type = row.try_get::<String, _>("Command").unwrap_or_default();
+            DatabaseConnection {
+                id: id.to_string(),
+                user: row.try_get("User").unwrap_or_default(),
+                database: row.try_get("db").unwrap_or_default(),
+                client: row.try_get("Host").unwrap_or_default(),
+                state: if state.is_empty() {
+                    command_type
+                } else {
+                    state
+                },
+                opened_at: String::new(),
+                last_active_at: row
+                    .try_get::<i64, _>("Time")
+                    .map(|seconds| format!("{seconds}s ago"))
+                    .unwrap_or_default(),
+                most_recent_command: command,
+                can_terminate: id != current_id,
+            }
+        })
+        .collect())
+}
+
+async fn terminate_postgres_connection(
+    state: Arc<AppState>,
+    conn_id: String,
+    connection_id: String,
+) -> Result<()> {
+    let pid: i32 = connection_id
+        .parse()
+        .with_context(|| format!("invalid postgres connection id {connection_id:?}"))?;
+    let pool = state.get_pg_pool_or_reconnect(&conn_id).await?;
+    let terminated: bool = sqlx::query_scalar(
+        "SELECT CASE WHEN $1 = pg_backend_pid() THEN false ELSE pg_terminate_backend($1) END",
+    )
+    .bind(pid)
+    .fetch_one(&pool)
+    .await?;
+
+    if terminated {
+        Ok(())
+    } else {
+        Err(anyhow!("postgres connection {pid} was not terminated"))
+    }
+}
+
+async fn terminate_mysql_connection(
+    state: Arc<AppState>,
+    conn_id: String,
+    connection_id: String,
+) -> Result<()> {
+    let target_id: u64 = connection_id
+        .parse()
+        .with_context(|| format!("invalid mysql connection id {connection_id:?}"))?;
+    let pool = state.get_mysql_pool_or_reconnect(&conn_id).await?;
+    let current_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+        .fetch_one(&pool)
+        .await?;
+    if target_id == current_id {
+        return Err(anyhow!(
+            "refusing to terminate the current management session"
+        ));
+    }
+
+    sqlx::query(&format!("KILL {target_id}"))
+        .execute(&pool)
+        .await?;
     Ok(())
 }
 

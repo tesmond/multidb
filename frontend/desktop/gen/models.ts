@@ -98,6 +98,35 @@ export namespace history {
 
 export namespace main {
 	
+	export class DatabaseConnection {
+	    id: string;
+	    user: string;
+	    database: string;
+	    client: string;
+	    state: string;
+	    openedAt: string;
+	    lastActiveAt: string;
+	    mostRecentCommand: string;
+	    canTerminate: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new DatabaseConnection(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.user = source["user"];
+	        this.database = source["database"];
+	        this.client = source["client"];
+	        this.state = source["state"];
+	        this.openedAt = source["openedAt"];
+	        this.lastActiveAt = source["lastActiveAt"];
+	        this.mostRecentCommand = source["mostRecentCommand"];
+	        this.canTerminate = source["canTerminate"];
+	    }
+	}
+	
 	export class ExecuteResult {
 	    columns: string[];
 	    columnTypes: string[];
@@ -345,4 +374,3 @@ export namespace schema {
 	}
 
 }
-
