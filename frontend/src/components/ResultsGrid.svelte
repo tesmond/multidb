@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import type { ExecuteResult, TabEditInfo } from '../stores/appStore';
-  import { fontScalePercent, tabs } from '../stores/appStore';
+  import { fontScalePercent, tabs, isSqlTab } from '../stores/appStore';
   import { escapeTsvCell, formatValueForClipboard } from '../lib/resultClipboard';
 
   export let result: ExecuteResult | null = null;
@@ -137,8 +137,12 @@
   let didResize = false;
 
   // ─── Sort state (persisted per tab via the store) ─────────────────────────────
-  $: sortCol = $tabs.find(t => t.id === tabId)?.sortCol ?? -1;
-  $: sortDirection = ($tabs.find(t => t.id === tabId)?.sortDirection ?? 'asc') as 'asc' | 'desc';
+  $: currentSqlTab = (() => {
+    const currentTab = $tabs.find(t => t.id === tabId);
+    return isSqlTab(currentTab) ? currentTab : null;
+  })();
+  $: sortCol = currentSqlTab?.sortCol ?? -1;
+  $: sortDirection = currentSqlTab?.sortDirection ?? 'asc';
 
   $: sortIndex = (() => {
     if (sortCol < 0 || rows.length === 0) return null;
@@ -226,7 +230,7 @@
   let hoveredRow = -1;
 
   // ─── Pending edits (from store) ───────────────────────────────────────────────
-  $: pendingEdits = $tabs.find(t => t.id === tabId)?.pendingEdits ?? {};
+  $: pendingEdits = currentSqlTab?.pendingEdits ?? {};
 
   // ─── Cell edit overlay ────────────────────────────────────────────────────────
   let editOverlay: { row: number; col: number; rowDataIdx: number; value: string; x: number; y: number; w: number } | null = null;
@@ -884,7 +888,7 @@
     const { rowDataIdx, col, value } = editOverlay;
     editOverlay = null;
 
-    const tab = $tabs.find(t => t.id === tabId);
+    const tab = currentSqlTab;
     const currentPending = tab?.pendingEdits ?? {};
     const originalVal = rows[rowDataIdx]?.[col] ?? null;
     const originalStr = originalVal === null ? '' : String(originalVal);

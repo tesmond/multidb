@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { tabs, activeConnections, selectedConnId, statusMessage, outputTab, requestSchemaRefresh, extractFirstTableName } from '../stores/appStore';
+  import { tabs, activeConnections, selectedConnId, statusMessage, outputTab, requestSchemaRefresh, extractFirstTableName, isSqlTab } from '../stores/appStore';
   import { ExecuteQueryStreamed, CancelQuery, SaveQuery } from '../../desktop/gen/main/App';
   import { EventsOn, EventsOff } from '../../desktop/runtime/runtime';
   import { get } from 'svelte/store';
@@ -21,8 +21,12 @@
   import ConnectionSelect from './ConnectionSelect.svelte';
 
   export let tabId: string;
+  let tab: import('../stores/appStore').SqlTab | null = null;
 
-  $: tab = $tabs.find(t => t.id === tabId);
+  $: {
+    const currentTab = $tabs.find(t => t.id === tabId);
+    tab = isSqlTab(currentTab) ? currentTab : null;
+  }
   $: connectionOptions = [
     { value: '', label: '— select connection —' },
     ...$activeConnections.map((conn) => ({ value: conn.config.id, label: conn.config.name })),
@@ -402,7 +406,7 @@
     // Keep CM in sync when the tab SQL is changed externally (e.g. from Navigator)
     const unsubscribe = tabs.subscribe($tabs => {
       const t = $tabs.find(t => t.id === tabId);
-      if (!view || !t) return;
+      if (!view || !isSqlTab(t)) return;
       const current = view.state.doc.toString();
       if (t.sql !== current) {
         view.dispatch({ changes: { from: 0, to: current.length, insert: t.sql } });
@@ -413,7 +417,7 @@
     const unsubConn = activeConnections.subscribe(() => {
       if (!view) return;
       const t = get(tabs).find(t => t.id === tabId);
-      if (!t) return;
+      if (!isSqlTab(t)) return;
       view.dispatch({ effects: sqlCompartment.reconfigure(makeSqlExtension(t.connId)) });
     });
 

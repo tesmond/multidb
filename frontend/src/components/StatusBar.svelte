@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { statusMessage, activeTab } from '../stores/appStore';
+  import { statusMessage, activeTab, isSqlTab } from '../stores/appStore';
   import { exportResultToCSV } from '../lib/csv';
+
+  $: activeSqlTab = isSqlTab($activeTab) ? $activeTab : null;
 
   async function onExport() {
     try {
-      await exportResultToCSV($activeTab?.result, 'query_results.csv');
+      await exportResultToCSV(activeSqlTab?.result, 'query_results.csv');
     } catch (e: any) {
       statusMessage.set('Export failed: ' + String(e));
     }
@@ -13,11 +15,11 @@
 
 <footer class="status-bar">
   <span class="status-msg">{$statusMessage}</span>
-  {#if $activeTab?.result}
+  {#if activeSqlTab?.result}
     <span class="status-sep">|</span>
-    <span class="status-stat">{$activeTab.result.rows?.length ?? 0} rows</span>
+    <span class="status-stat">{activeSqlTab.result.rows?.length ?? 0} rows</span>
     <span class="status-sep">|</span>
-    <span class="status-stat">{$activeTab.result.duration}ms</span>
+    <span class="status-stat">{activeSqlTab.result.duration}ms</span>
     <span class="status-sep">|</span>
     <button class="export-btn" on:click={onExport} title="Export results to CSV">
       Export data

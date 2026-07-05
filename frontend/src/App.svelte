@@ -3,6 +3,7 @@
     import TopToolbar from "./components/TopToolbar.svelte";
     import Navigator from "./components/Navigator.svelte";
     import OutputPanel from "./components/OutputPanel.svelte";
+    import RelationshipDiagram from "./components/RelationshipDiagram.svelte";
     import StatusBar from "./components/StatusBar.svelte";
     import {
         tabs,
@@ -10,6 +11,7 @@
         activeConnections,
         selectedConnId,
         setActiveConnectionsOrdered,
+        isSqlTab,
     } from "./stores/appStore";
     import { ListSavedConnections } from "../desktop/gen/main/App";
     import { get } from "svelte/store";
@@ -417,7 +419,7 @@
                             {:else}
                                 <span class="tab-title">{tab.title}</span>
                             {/if}
-                            {#if tab.running}
+                            {#if isSqlTab(tab) && tab.running}
                                 <span class="tab-spinner">⟳</span>
                             {/if}
                             <span
@@ -479,8 +481,10 @@
                             class="tab-panel"
                             class:active={$activeTabId === tab.id}
                         >
-                            {#if SqlEditor}
+                            {#if isSqlTab(tab) && SqlEditor}
                                 <SqlEditor tabId={tab.id} />
+                            {:else if tab.kind === "relationshipDiagram"}
+                                <RelationshipDiagram tabId={tab.id} />
                             {:else}
                                 <div class="editor-loading">Loading editor...</div>
                             {/if}

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { outputTab, activeTab, tabs, activeTabId, selectedConnId, activeConnections } from '../stores/appStore';
+  import { outputTab, activeTab, tabs, activeTabId, selectedConnId, activeConnections, isSqlTab } from '../stores/appStore';
+
+  $: activeSqlTab = isSqlTab($activeTab) ? $activeTab : null;
 
   // Derive connection ID from the active tab
   $: activeTabConnId = $activeTab?.connId ?? '';
@@ -72,7 +74,7 @@
   }
 
   function generateUpdateSQL(): string {
-    const tab = $activeTab;
+    const tab = activeSqlTab;
     if (!tab?.editInfo || !tab.result) return '';
     const { editInfo, pendingEdits, result, connId } = tab;
     const conn = $activeConnections.find(c => c.config.id === connId);
@@ -107,7 +109,7 @@
   }
 
   function saveEdits() {
-    const tab = $activeTab;
+    const tab = activeSqlTab;
     if (!tab) return;
     const sql = generateUpdateSQL();
     if (!sql) return;
@@ -122,7 +124,7 @@
   let _lastEditCheckKey = '';
 
   $: {
-    const tab = $activeTab;
+    const tab = activeSqlTab;
     // Re-run when result or SQL changes
     const key = tab ? `${tab.id}:${tab.result?.columns?.join(',') ?? ''}:${tab.sql}` : '';
     if (key !== _lastEditCheckKey) {
@@ -160,8 +162,8 @@
     }
   }
 
-  $: hasPendingEdits = Object.keys($activeTab?.pendingEdits ?? {}).length > 0;
-  $: if ($activeTab?.result && !ResultsGridComponent) {
+  $: hasPendingEdits = Object.keys(activeSqlTab?.pendingEdits ?? {}).length > 0;
+  $: if (activeSqlTab?.result && !ResultsGridComponent) {
     void loadResultsGrid();
   }
 
@@ -390,7 +392,7 @@
     {/each}
     {#if $outputTab === 'results' && hasPendingEdits}
       <button class="save-edits-btn" on:click={saveEdits} title="Generate UPDATE statements in a new tab">
-        Save Changes ({Object.keys($activeTab?.pendingEdits ?? {}).length})
+        Save Changes ({Object.keys(activeSqlTab?.pendingEdits ?? {}).length})
       </button>
     {/if}
   </div>
@@ -398,8 +400,8 @@
   <div class="output-content">
     {#if $outputTab === 'results'}
       {#if ResultsGridComponent}
-        <ResultsGridComponent result={$activeTab?.result ?? null} tabId={$activeTab?.id ?? ''} editInfo={$activeTab?.editInfo ?? null} />
-      {:else if $activeTab?.result}
+        <ResultsGridComponent result={activeSqlTab?.result ?? null} tabId={activeSqlTab?.id ?? ''} editInfo={activeSqlTab?.editInfo ?? null} />
+      {:else if activeSqlTab?.result}
         <div class="msg muted">Loading results...</div>
       {:else}
         <div class="msg muted">No results.</div>
@@ -407,12 +409,12 @@
 
     {:else if $outputTab === 'messages'}
       <div class="messages">
-        {#if $activeTab?.result}
-          {#if $activeTab.result.error}
-            <div class="msg error">ERROR: {$activeTab.result.error}</div>
+        {#if activeSqlTab?.result}
+          {#if activeSqlTab.result.error}
+            <div class="msg error">ERROR: {activeSqlTab.result.error}</div>
           {:else}
             <div class="msg success">
-              Query OK — {$activeTab.result.rowsAffected} row(s) affected, {$activeTab.result.rows?.length ?? 0} row(s) returned in {$activeTab.result.duration}ms
+              Query OK — {activeSqlTab.result.rowsAffected} row(s) affected, {activeSqlTab.result.rows?.length ?? 0} row(s) returned in {activeSqlTab.result.duration}ms
             </div>
           {/if}
         {:else}

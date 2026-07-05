@@ -267,27 +267,49 @@ export interface TabEditInfo {
   primaryKeyCols: string[];
 }
 
-export interface Tab {
+export interface TabBase {
   id: string;
   title: string;
   connId: string;
+  kind: "sql" | "relationshipDiagram";
+  manuallyRenamed: boolean;
+}
+
+export interface SqlTab extends TabBase {
+  kind: "sql";
   sql: string;
   result: ExecuteResult | null;
   running: boolean;
   queryId: string;
   sortCol: number;
   sortDirection: "asc" | "desc";
-  manuallyRenamed: boolean;
   editInfo: TabEditInfo | null;
   pendingEdits: Record<string, Record<string, any>>;
 }
 
-function makeTab(connId = ""): Tab {
+export interface RelationshipDiagramTab extends TabBase {
+  kind: "relationshipDiagram";
+}
+
+export type Tab = SqlTab | RelationshipDiagramTab;
+
+export function isSqlTab(tab: Tab | null | undefined): tab is SqlTab {
+  return tab?.kind === "sql";
+}
+
+export function isRelationshipDiagramTab(
+  tab: Tab | null | undefined,
+): tab is RelationshipDiagramTab {
+  return tab?.kind === "relationshipDiagram";
+}
+
+function makeSqlTab(connId = ""): SqlTab {
   const id = crypto.randomUUID();
   return {
     id,
     title: "Query",
     connId,
+    kind: "sql",
     sql: "",
     result: null,
     running: false,
@@ -300,22 +322,44 @@ function makeTab(connId = ""): Tab {
   };
 }
 
+function makeRelationshipDiagramTab(
+  connId: string,
+  connectionName: string,
+): RelationshipDiagramTab {
+  return {
+    id: crypto.randomUUID(),
+    title: `${connectionName} Relationships`,
+    connId,
+    kind: "relationshipDiagram",
+    manuallyRenamed: false,
+  };
+}
+
 function createTabStore() {
-  const { subscribe, update, set } = writable<Tab[]>([makeTab()]);
+  const { subscribe, update, set } = writable<Tab[]>([makeSqlTab()]);
 
   return {
     subscribe,
+    update,
     add(connId: string) {
-      update((tabs) => [...tabs, makeTab(connId)]);
+      update((tabs) => [...tabs, makeSqlTab(connId)]);
     },
     remove(id: string) {
       update((tabs) => {
         const next = tabs.filter((t) => t.id !== id);
-        return next.length > 0 ? next : [makeTab()];
+        return next.length > 0 ? next : [makeSqlTab()];
       });
     },
-    updateTab(id: string, patch: Partial<Tab>) {
-      update((tabs) => tabs.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    updateTab(
+      id: string,
+      patch: Partial<
+        Omit<SqlTab, "id" | "kind"> &
+          Omit<RelationshipDiagramTab, "id" | "kind">
+      >,
+    ) {
+      update((tabs) =>
+        tabs.map((t) => (t.id === id ? ({ ...t, ...patch } as Tab) : t)),
+      );
     },
     renameTab(id: string, newTitle: string) {
       update((tabs) =>
@@ -329,7 +373,8 @@ function createTabStore() {
         const index = tabs.findIndex((t) => t.id === id);
         if (index === -1) return tabs;
         const original = tabs[index];
-        const duplicate: Tab = {
+        if (!isSqlTab(original)) return tabs;
+        const duplicate: SqlTab = {
           ...original,
           id: crypto.randomUUID(),
           title: original.title + " (Copy)",
@@ -368,7 +413,7 @@ function createTabStore() {
     closeTabsForConn(connId: string) {
       update((tabs) => {
         const remaining = tabs.filter((t) => t.connId !== connId);
-        return remaining.length > 0 ? remaining : [makeTab()];
+        return remaining.length > 0 ? remaining : [makeSqlTab()];
       });
     },
     set,
@@ -390,6 +435,52 @@ export const activeTab = derived(
   [tabs, activeTabId],
   ([$tabs, $id]) => $tabs.find((t) => t.id === $id) ?? null,
 );
+
+export function openRelationshipDiagramTab(
+  connId: string,
+  connectionName: string,
+): string {
+  const existing = get(tabs).find(
+    (tab) => tab.connId === connId && tab.kind === "relationshipDiagram",
+  );
+  if (existing) {
+    activeTabId.set(existing.id);
+    return existing.id;
+  }
+
+  const nextTab = makeRelationshipDiagramTab(connId, connectionName);
+  tabs.update((currentTabs) => [...currentTabs, nextTab]);
+  activeTabId.set(nextTab.id);
+  return nextTab.id;
+}
+
+export async function showRelationshipDiagramForConnection(
+  connId: string,
+): Promise<string | null> {
+  let conn = get(activeConnections).find((entry) => entry.config.id === connId);
+  if (!conn) {
+    statusMessage.set("Connection not found.");
+    return null;
+  }
+
+  if (!conn.schema) {
+    await loadCachedSchema(connId);
+    conn = get(activeConnections).find((entry) => entry.config.id === connId);
+  }
+
+  if (conn && !conn.schema) {
+    await refreshConnectionSchema(connId);
+    conn = get(activeConnections).find((entry) => entry.config.id === connId);
+  }
+
+  if (!conn?.schema) {
+    statusMessage.set("Schema is not available for this connection.");
+    return null;
+  }
+
+  selectedConnId.set(connId);
+  return openRelationshipDiagramTab(connId, conn.config.name);
+}
 
 // -----------------------------------------------------------------------
 // UI state

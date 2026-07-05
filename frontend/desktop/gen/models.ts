@@ -161,6 +161,74 @@ export namespace schema {
 	        this.key = source["key"];
 	    }
 	}
+	export class RelationshipTableRef {
+	    schemaName?: string;
+	    tableName: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RelationshipTableRef(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.schemaName = source["schemaName"];
+	        this.tableName = source["tableName"];
+	    }
+	}
+	export class RelationshipColumnPair {
+	    sourceColumn: string;
+	    targetColumn: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RelationshipColumnPair(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceColumn = source["sourceColumn"];
+	        this.targetColumn = source["targetColumn"];
+	    }
+	}
+	export class Relationship {
+	    constraintName: string;
+	    sourceTable: RelationshipTableRef;
+	    targetTable: RelationshipTableRef;
+	    columnPairs?: RelationshipColumnPair[];
+	    onUpdate?: string;
+	    onDelete?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Relationship(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.constraintName = source["constraintName"];
+	        this.sourceTable = this.convertValues(source["sourceTable"], RelationshipTableRef);
+	        this.targetTable = this.convertValues(source["targetTable"], RelationshipTableRef);
+	        this.columnPairs = this.convertValues(source["columnPairs"], RelationshipColumnPair);
+	        this.onUpdate = source["onUpdate"];
+	        this.onDelete = source["onDelete"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class Table {
 	    name: string;
 	    type: string;
@@ -240,6 +308,7 @@ export namespace schema {
 	    tables: Table[];
 	    views: Table[];
 	    indexes: string[];
+	    relationships?: Relationship[];
 	    schemas?: Schema[];
 	
 	    static createFrom(source: any = {}) {
@@ -252,6 +321,7 @@ export namespace schema {
 	        this.tables = this.convertValues(source["tables"], Table);
 	        this.views = this.convertValues(source["views"], Table);
 	        this.indexes = source["indexes"];
+	        this.relationships = this.convertValues(source["relationships"], Relationship);
 	        this.schemas = this.convertValues(source["schemas"], Schema);
 	    }
 	

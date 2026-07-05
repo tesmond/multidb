@@ -6,6 +6,12 @@ vi.mock('../../desktop/gen/models', () => ({
   main: { ExecuteResult: class {} },
 }));
 
+vi.mock('../../desktop/gen/main/App', () => ({
+  GetSchema: vi.fn(),
+  LoadSchema: vi.fn(),
+  SaveSchema: vi.fn(),
+}));
+
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
 import type { Tab } from './appStore';
@@ -17,6 +23,9 @@ let activeTab: any;
 let activeConnections: any;
 let statusMessage: any;
 let outputTab: any;
+let openRelationshipDiagramTab: any;
+let showRelationshipDiagramForConnection: any;
+let backendApp: any;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -27,12 +36,26 @@ beforeEach(async () => {
   activeConnections = mod.activeConnections;
   statusMessage = mod.statusMessage;
   outputTab = mod.outputTab;
+  openRelationshipDiagramTab = mod.openRelationshipDiagramTab;
+  showRelationshipDiagramForConnection = mod.showRelationshipDiagramForConnection;
+  backendApp = await import('../../desktop/gen/main/App');
+  vi.mocked(backendApp.LoadSchema).mockResolvedValue(null);
+  vi.mocked(backendApp.GetSchema).mockResolvedValue({
+    sizeBytes: undefined,
+    tables: [],
+    views: [],
+    indexes: [],
+    relationships: [],
+    schemas: [],
+  });
 });
 
 describe('tabs store', () => {
   it('starts with one empty tab', () => {
     const $tabs = get(tabs) as Tab[];
     expect($tabs).toHaveLength(1);
+    expect($tabs[0].kind).toBe('sql');
+    if ($tabs[0].kind !== 'sql') throw new Error('expected sql tab');
     expect($tabs[0].sql).toBe('');
     expect($tabs[0].title).toBe('Query');
   });
@@ -63,6 +86,118 @@ describe('tabs store', () => {
     const tab = (get(tabs) as any[]).find((t: any) => t.id === id);
     expect(tab?.sql).toBe('SELECT 1');
     expect(tab?.running).toBe(true);
+  });
+
+  it('openRelationshipDiagramTab() creates one diagram tab per connection and focuses it', () => {
+    const firstTabId = (get(tabs) as Tab[])[0].id;
+
+    const createdId = openRelationshipDiagramTab('conn-1', 'Sales DB');
+    let $tabs = get(tabs) as any[];
+    expect($tabs).toHaveLength(2);
+    expect($tabs[1].id).toBe(createdId);
+    expect($tabs[1].kind).toBe('relationshipDiagram');
+    expect($tabs[1].connId).toBe('conn-1');
+    expect($tabs[1].title).toBe('Sales DB Relationships');
+    expect(get(activeTabId)).toBe(createdId);
+
+    const focusedId = openRelationshipDiagramTab('conn-1', 'Ignored Title');
+    $tabs = get(tabs) as any[];
+    expect($tabs).toHaveLength(2);
+    expect(focusedId).toBe(createdId);
+    expect(get(activeTabId)).toBe(createdId);
+    expect($tabs[0].id).toBe(firstTabId);
+  });
+
+  it('showRelationshipDiagramForConnection() loads schema before opening the diagram tab', async () => {
+    activeConnections.set([
+      {
+        config: {
+          id: 'conn-1',
+          name: 'Sales DB',
+          driver: 'sqlite',
+          tabColor: '',
+          tabTextBlack: false,
+          host: '',
+          port: 0,
+          username: '',
+          password: '',
+          database: '',
+          dsn: '',
+          useKubePortForward: false,
+          kubeContext: '',
+          kubeNamespace: '',
+          kubeResource: '',
+          kubeLocalPort: 0,
+          kubeRemotePort: 0,
+        },
+        schema: null,
+        schemaLoading: false,
+        schemaError: null,
+      },
+    ]);
+
+    const openedId = await showRelationshipDiagramForConnection('conn-1');
+
+    expect(backendApp.LoadSchema).toHaveBeenCalledWith('conn-1');
+    expect(backendApp.GetSchema).toHaveBeenCalledWith('conn-1');
+    expect(openedId).toEqual(expect.any(String));
+    expect(get(tabs)).toContainEqual(
+      expect.objectContaining({
+        id: openedId,
+        kind: 'relationshipDiagram',
+        connId: 'conn-1',
+        title: 'Sales DB Relationships',
+      }),
+    );
+    expect(get(activeTabId)).toBe(openedId);
+  });
+
+  it('showRelationshipDiagramForConnection() reuses the existing relationship tab when schema is already loaded', async () => {
+    activeConnections.set([
+      {
+        config: {
+          id: 'conn-1',
+          name: 'Sales DB',
+          driver: 'sqlite',
+          tabColor: '',
+          tabTextBlack: false,
+          host: '',
+          port: 0,
+          username: '',
+          password: '',
+          database: '',
+          dsn: '',
+          useKubePortForward: false,
+          kubeContext: '',
+          kubeNamespace: '',
+          kubeResource: '',
+          kubeLocalPort: 0,
+          kubeRemotePort: 0,
+        },
+        schema: {
+          sizeBytes: 0,
+          tables: [],
+          views: [],
+          indexes: [],
+          relationships: [],
+          schemas: [],
+        },
+        schemaLoading: false,
+        schemaError: null,
+      },
+    ]);
+
+    vi.mocked(backendApp.LoadSchema).mockClear();
+    vi.mocked(backendApp.GetSchema).mockClear();
+
+    const firstId = await showRelationshipDiagramForConnection('conn-1');
+    const secondId = await showRelationshipDiagramForConnection('conn-1');
+
+    expect(backendApp.LoadSchema).not.toHaveBeenCalled();
+    expect(backendApp.GetSchema).not.toHaveBeenCalled();
+    expect(firstId).toBe(secondId);
+    expect((get(tabs) as Tab[]).filter((tab) => tab.kind === 'relationshipDiagram')).toHaveLength(1);
+    expect(get(activeTabId)).toBe(firstId);
   });
 });
 

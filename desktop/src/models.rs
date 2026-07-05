@@ -48,6 +48,35 @@ pub struct Column {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RelationshipTableRef {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub schema_name: String,
+    pub table_name: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationshipColumnPair {
+    pub source_column: String,
+    pub target_column: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Relationship {
+    pub constraint_name: String,
+    pub source_table: RelationshipTableRef,
+    pub target_table: RelationshipTableRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_pairs: Vec<RelationshipColumnPair>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub on_update: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub on_delete: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Table {
     pub name: String,
     #[serde(rename = "type")]
@@ -77,6 +106,8 @@ pub struct SchemaTree {
     pub tables: Vec<Table>,
     pub views: Vec<Table>,
     pub indexes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relationships: Vec<Relationship>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<Schema>,
 }

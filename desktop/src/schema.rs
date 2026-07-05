@@ -1,6 +1,10 @@
-use crate::models::{Column as DbColumn, Schema, SchemaTree, Table};
+use crate::models::{
+    Column as DbColumn, Relationship, RelationshipColumnPair, RelationshipTableRef, Schema,
+    SchemaTree, Table,
+};
 use anyhow::{anyhow, Result};
 use sqlx::{any::AnyRow, AnyPool, ColumnIndex, Row, ValueRef};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 pub async fn get_schema(pool: &AnyPool, driver: &str) -> Result<SchemaTree> {
@@ -79,6 +83,7 @@ pub async fn get_primary_keys(
 
 async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
     let sizes = mysql_table_sizes(pool).await.unwrap_or_default();
+    let relationships = mysql_relationships(pool).await.unwrap_or_default();
     let db_rows = sqlx::query(
         r#"
         SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
@@ -154,6 +159,7 @@ async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
         tree.schemas.push(schema);
     }
     tree.size_bytes = Some(total_size);
+    tree.relationships = relationships;
     Ok(tree)
 }
 
@@ -206,6 +212,7 @@ async fn mysql_columns(pool: &AnyPool, db_name: &str, table: &str) -> Result<Vec
 
 async fn postgres_schema(pool: &AnyPool) -> Result<SchemaTree> {
     let sizes = postgres_table_sizes(pool).await.unwrap_or_default();
+    let relationships = postgres_relationships(pool).await.unwrap_or_default();
     let schema_names = string_column(
         pool,
         r#"
@@ -277,6 +284,7 @@ async fn postgres_schema(pool: &AnyPool) -> Result<SchemaTree> {
         tree.schemas.push(schema);
     }
     tree.size_bytes = Some(total_size);
+    tree.relationships = relationships;
     Ok(tree)
 }
 
@@ -363,6 +371,16 @@ async fn sqlite_schema(pool: &AnyPool) -> Result<SchemaTree> {
         }
     }
 
+    tree.relationships = sqlite_relationships(
+        pool,
+        &tree
+            .tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+
     tree.indexes = string_column(
         pool,
         "SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name",
@@ -372,6 +390,209 @@ async fn sqlite_schema(pool: &AnyPool) -> Result<SchemaTree> {
     .unwrap_or_default();
 
     Ok(tree)
+}
+
+#[derive(Debug, Clone)]
+struct ForeignKeyRow {
+    constraint_name: String,
+    source_schema: String,
+    source_table: String,
+    source_column: String,
+    target_schema: String,
+    target_table: String,
+    target_column: String,
+    on_update: String,
+    on_delete: String,
+    position: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ForeignKeyGroupKey {
+    constraint_name: String,
+    source_schema: String,
+    source_table: String,
+    target_schema: String,
+    target_table: String,
+    on_update: String,
+    on_delete: String,
+}
+
+async fn mysql_relationships(pool: &AnyPool) -> Result<Vec<Relationship>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            kcu.CONSTRAINT_NAME,
+            kcu.TABLE_SCHEMA,
+            kcu.TABLE_NAME,
+            kcu.COLUMN_NAME,
+            kcu.REFERENCED_TABLE_SCHEMA,
+            kcu.REFERENCED_TABLE_NAME,
+            kcu.REFERENCED_COLUMN_NAME,
+            COALESCE(rc.UPDATE_RULE, ''),
+            COALESCE(rc.DELETE_RULE, ''),
+            kcu.ORDINAL_POSITION
+        FROM information_schema.KEY_COLUMN_USAGE kcu
+        JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+          ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+         AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+        WHERE kcu.REFERENCED_TABLE_NAME IS NOT NULL
+          AND kcu.TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql')
+        ORDER BY kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let fk_rows = rows
+        .into_iter()
+        .map(|row| {
+            Ok(ForeignKeyRow {
+                constraint_name: decode_any_text(&row, 0)?,
+                source_schema: decode_any_text(&row, 1)?,
+                source_table: decode_any_text(&row, 2)?,
+                source_column: decode_any_text(&row, 3)?,
+                target_schema: decode_any_text(&row, 4)?,
+                target_table: decode_any_text(&row, 5)?,
+                target_column: decode_any_text(&row, 6)?,
+                on_update: decode_any_text(&row, 7)?,
+                on_delete: decode_any_text(&row, 8)?,
+                position: row.try_get(9)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(group_foreign_key_rows(fk_rows))
+}
+
+async fn postgres_relationships(pool: &AnyPool) -> Result<Vec<Relationship>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            tc.constraint_name::text,
+            kcu.table_schema::text,
+            kcu.table_name::text,
+            kcu.column_name::text,
+            target_kcu.table_schema::text,
+            target_kcu.table_name::text,
+            target_kcu.column_name::text,
+            COALESCE(rc.update_rule::text, ''),
+            COALESCE(rc.delete_rule::text, ''),
+            kcu.ordinal_position
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.constraint_schema = kcu.constraint_schema
+        JOIN information_schema.referential_constraints rc
+          ON rc.constraint_name = tc.constraint_name
+         AND rc.constraint_schema = tc.constraint_schema
+        JOIN information_schema.key_column_usage target_kcu
+          ON target_kcu.constraint_name = rc.unique_constraint_name
+         AND target_kcu.constraint_schema = rc.unique_constraint_schema
+         AND target_kcu.ordinal_position = kcu.position_in_unique_constraint
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND kcu.table_schema NOT IN ('pg_catalog', 'information_schema')
+          AND kcu.table_schema NOT LIKE 'pg_%'
+        ORDER BY kcu.table_schema, kcu.table_name, tc.constraint_name, kcu.ordinal_position
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let fk_rows = rows
+        .into_iter()
+        .map(|row| {
+            Ok(ForeignKeyRow {
+                constraint_name: decode_any_text(&row, 0)?,
+                source_schema: decode_any_text(&row, 1)?,
+                source_table: decode_any_text(&row, 2)?,
+                source_column: decode_any_text(&row, 3)?,
+                target_schema: decode_any_text(&row, 4)?,
+                target_table: decode_any_text(&row, 5)?,
+                target_column: decode_any_text(&row, 6)?,
+                on_update: decode_any_text(&row, 7)?,
+                on_delete: decode_any_text(&row, 8)?,
+                position: row.try_get(9)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(group_foreign_key_rows(fk_rows))
+}
+
+async fn sqlite_relationships(pool: &AnyPool, table_names: &[String]) -> Result<Vec<Relationship>> {
+    let mut fk_rows = Vec::new();
+
+    for table_name in table_names {
+        let rows = sqlx::query(&format!(
+            "PRAGMA foreign_key_list({})",
+            quote_sqlite_pragma(table_name)
+        ))
+        .fetch_all(pool)
+        .await?;
+
+        for row in rows {
+            let fk_id: i64 = row.try_get("id")?;
+            let sequence: i64 = row.try_get("seq")?;
+            fk_rows.push(ForeignKeyRow {
+                constraint_name: format!("{table_name}_fk_{fk_id}"),
+                source_schema: String::new(),
+                source_table: table_name.clone(),
+                source_column: decode_any_text(&row, "from")?,
+                target_schema: String::new(),
+                target_table: decode_any_text(&row, "table")?,
+                target_column: decode_any_text(&row, "to")?,
+                on_update: decode_any_text(&row, "on_update")?,
+                on_delete: decode_any_text(&row, "on_delete")?,
+                position: sequence,
+            });
+        }
+    }
+
+    Ok(group_foreign_key_rows(fk_rows))
+}
+
+fn group_foreign_key_rows(rows: Vec<ForeignKeyRow>) -> Vec<Relationship> {
+    let mut grouped = BTreeMap::<ForeignKeyGroupKey, Vec<(i64, RelationshipColumnPair)>>::new();
+
+    for row in rows {
+        let key = ForeignKeyGroupKey {
+            constraint_name: row.constraint_name,
+            source_schema: row.source_schema,
+            source_table: row.source_table,
+            target_schema: row.target_schema,
+            target_table: row.target_table,
+            on_update: row.on_update,
+            on_delete: row.on_delete,
+        };
+        grouped
+            .entry(key)
+            .or_default()
+            .push((row.position, RelationshipColumnPair {
+                source_column: row.source_column,
+                target_column: row.target_column,
+            }));
+    }
+
+    grouped
+        .into_iter()
+        .map(|(key, mut pairs)| {
+            pairs.sort_by_key(|(position, _)| *position);
+            Relationship {
+                constraint_name: key.constraint_name,
+                source_table: RelationshipTableRef {
+                    schema_name: key.source_schema,
+                    table_name: key.source_table,
+                },
+                target_table: RelationshipTableRef {
+                    schema_name: key.target_schema,
+                    table_name: key.target_table,
+                },
+                column_pairs: pairs.into_iter().map(|(_, pair)| pair).collect(),
+                on_update: key.on_update,
+                on_delete: key.on_delete,
+            }
+        })
+        .collect()
 }
 
 async fn sqlite_columns(pool: &AnyPool, table: &str) -> Result<Vec<DbColumn>> {
@@ -494,7 +715,7 @@ fn quote_sqlite_pragma(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_any_text;
+    use super::{decode_any_text, get_schema};
     use sqlx::any::AnyPoolOptions;
 
     #[tokio::test]
@@ -540,6 +761,177 @@ mod tests {
 
         let name = decode_any_text(&row, "name").expect("decode pragma column name");
         assert_eq!(name, "id");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_schema_includes_single_column_foreign_keys() {
+        sqlx::any::install_default_drivers();
+
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create in-memory sqlite pool");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE parents (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create parents table");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE children (
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER NOT NULL,
+                FOREIGN KEY(parent_id) REFERENCES parents(id)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create children table");
+
+        let schema = get_schema(&pool, "sqlite").await.expect("load schema");
+
+        assert_eq!(schema.relationships.len(), 1);
+        let relationship = &schema.relationships[0];
+        assert_eq!(relationship.constraint_name, "children_fk_0");
+        assert_eq!(relationship.source_table.schema_name, "");
+        assert_eq!(relationship.source_table.table_name, "children");
+        assert_eq!(relationship.target_table.schema_name, "");
+        assert_eq!(relationship.target_table.table_name, "parents");
+        assert_eq!(relationship.column_pairs.len(), 1);
+        assert_eq!(relationship.column_pairs[0].source_column, "parent_id");
+        assert_eq!(relationship.column_pairs[0].target_column, "id");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_schema_groups_composite_foreign_keys_into_one_relationship() {
+        sqlx::any::install_default_drivers();
+
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create in-memory sqlite pool");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE parents (
+                first_id INTEGER NOT NULL,
+                second_id INTEGER NOT NULL,
+                PRIMARY KEY(first_id, second_id)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create parents table");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE children (
+                id INTEGER PRIMARY KEY,
+                parent_first_id INTEGER NOT NULL,
+                parent_second_id INTEGER NOT NULL,
+                FOREIGN KEY(parent_first_id, parent_second_id)
+                    REFERENCES parents(first_id, second_id)
+                    ON DELETE CASCADE
+                    ON UPDATE RESTRICT
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create children table");
+
+        let schema = get_schema(&pool, "sqlite").await.expect("load schema");
+
+        assert_eq!(schema.relationships.len(), 1);
+        let relationship = &schema.relationships[0];
+        assert_eq!(relationship.column_pairs.len(), 2);
+        assert_eq!(relationship.column_pairs[0].source_column, "parent_first_id");
+        assert_eq!(relationship.column_pairs[0].target_column, "first_id");
+        assert_eq!(relationship.column_pairs[1].source_column, "parent_second_id");
+        assert_eq!(relationship.column_pairs[1].target_column, "second_id");
+        assert_eq!(relationship.on_delete, "CASCADE");
+        assert_eq!(relationship.on_update, "RESTRICT");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_schema_includes_self_referential_foreign_keys() {
+        sqlx::any::install_default_drivers();
+
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create in-memory sqlite pool");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE employees (
+                id INTEGER PRIMARY KEY,
+                manager_id INTEGER,
+                FOREIGN KEY(manager_id) REFERENCES employees(id)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create employees table");
+
+        let schema = get_schema(&pool, "sqlite").await.expect("load schema");
+
+        assert_eq!(schema.relationships.len(), 1);
+        let relationship = &schema.relationships[0];
+        assert_eq!(relationship.source_table.table_name, "employees");
+        assert_eq!(relationship.target_table.table_name, "employees");
+        assert_eq!(relationship.column_pairs.len(), 1);
+        assert_eq!(relationship.column_pairs[0].source_column, "manager_id");
+        assert_eq!(relationship.column_pairs[0].target_column, "id");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_schema_has_no_relationships_when_none_exist() {
+        sqlx::any::install_default_drivers();
+
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create in-memory sqlite pool");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE notes (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create notes table");
+
+        let schema = get_schema(&pool, "sqlite").await.expect("load schema");
+
+        assert!(schema.relationships.is_empty());
 
         pool.close().await;
     }

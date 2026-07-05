@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, loadCachedSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup } from '../stores/appStore';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, loadCachedSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup, showRelationshipDiagramForConnection } from '../stores/appStore';
   import type { ActiveConnection, SchemaTree, ServerGroup } from '../stores/appStore';
   import { Disconnect, TestConnection, BackupTable, DropTable } from '../../desktop/gen/main/App';
   import { get } from 'svelte/store';
@@ -476,7 +476,7 @@
     contextMenu = { kind: 'database', x: pos.x, y: pos.y, connId };
   }
 
-  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'dropTable' | 'import' | 'refresh' | 'test' | 'delete') {
+  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'dropTable' | 'import' | 'refresh' | 'relationships' | 'test' | 'delete') {
     if (!contextMenu) return;
     const menu = contextMenu;
     contextMenu = null;
@@ -487,6 +487,10 @@
           statusMessage.set('Refreshing schema…');
           await refreshSchema(menu.connId);
           statusMessage.set('Schema refreshed');
+          return;
+        }
+        if (action === 'relationships') {
+          await showRelationshipDiagramForConnection(menu.connId);
           return;
         }
         if (action === 'import') {
@@ -973,6 +977,9 @@
       <div class="context-separator"></div>
       <button role="menuitem" on:click={() => handleContextAction('refresh')}>
         Refresh Schema
+      </button>
+      <button role="menuitem" on:click={() => handleContextAction('relationships')}>
+        Show Relationships
       </button>
       <button role="menuitem" on:click={() => handleContextAction('import')}>
         Import...
