@@ -83,7 +83,7 @@ pub async fn get_primary_keys(
 
 async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
     let sizes = mysql_table_sizes(pool).await.unwrap_or_default();
-    let relationships = mysql_relationships(pool).await.unwrap_or_default();
+    let relationships = mysql_relationships(pool).await?;
     let db_rows = sqlx::query(
         r#"
         SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
@@ -166,7 +166,10 @@ async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
 async fn mysql_table_sizes(pool: &AnyPool) -> Result<HashMap<String, i64>> {
     let rows = sqlx::query(
         r#"
-        SELECT TABLE_SCHEMA, TABLE_NAME, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)
+        SELECT
+            TABLE_SCHEMA,
+            TABLE_NAME,
+            CAST(COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS CHAR)
         FROM information_schema.TABLES
         WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql')
           AND TABLE_TYPE = 'BASE TABLE'
@@ -178,7 +181,7 @@ async fn mysql_table_sizes(pool: &AnyPool) -> Result<HashMap<String, i64>> {
     for row in rows {
         let schema = decode_any_text(&row, 0)?;
         let table = decode_any_text(&row, 1)?;
-        let size: i64 = row.try_get(2)?;
+        let size = decode_any_i64(&row, 2)?;
         out.insert(format!("{schema}.{table}"), size);
     }
     Ok(out)
@@ -212,7 +215,7 @@ async fn mysql_columns(pool: &AnyPool, db_name: &str, table: &str) -> Result<Vec
 
 async fn postgres_schema(pool: &AnyPool) -> Result<SchemaTree> {
     let sizes = postgres_table_sizes(pool).await.unwrap_or_default();
-    let relationships = postgres_relationships(pool).await.unwrap_or_default();
+    let relationships = postgres_relationships(pool).await?;
     let schema_names = string_column(
         pool,
         r#"
@@ -564,13 +567,13 @@ fn group_foreign_key_rows(rows: Vec<ForeignKeyRow>) -> Vec<Relationship> {
             on_update: row.on_update,
             on_delete: row.on_delete,
         };
-        grouped
-            .entry(key)
-            .or_default()
-            .push((row.position, RelationshipColumnPair {
+        grouped.entry(key).or_default().push((
+            row.position,
+            RelationshipColumnPair {
                 source_column: row.source_column,
                 target_column: row.target_column,
-            }));
+            },
+        ));
     }
 
     grouped
@@ -698,6 +701,36 @@ where
     Err(anyhow!("failed to decode text value"))
 }
 
+fn decode_any_i64<I>(row: &AnyRow, index: I) -> Result<i64>
+where
+    I: ColumnIndex<AnyRow> + Copy,
+{
+    if let Ok(value) = row.try_get::<i64, _>(index) {
+        return Ok(value);
+    }
+    if let Ok(value) = row.try_get::<i32, _>(index) {
+        return Ok(i64::from(value));
+    }
+    if let Some(value) = decode_optional_any_text(row, index)? {
+        return parse_integral_i64(&value);
+    }
+
+    Err(anyhow!("failed to decode integer value"))
+}
+
+fn parse_integral_i64(value: &str) -> Result<i64> {
+    let trimmed = value.trim();
+    let Some((integer, fractional)) = trimmed.split_once('.') else {
+        return trimmed.parse::<i64>().map_err(Into::into);
+    };
+
+    if fractional.chars().all(|ch| ch == '0') {
+        return integer.parse::<i64>().map_err(Into::into);
+    }
+
+    Err(anyhow!("expected integral value, got {trimmed:?}"))
+}
+
 fn decode_optional_any_text<I>(row: &AnyRow, index: I) -> Result<Option<String>>
 where
     I: ColumnIndex<AnyRow> + Copy,
@@ -715,7 +748,7 @@ fn quote_sqlite_pragma(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_any_text, get_schema};
+    use super::{decode_any_i64, decode_any_text, get_schema};
     use sqlx::any::AnyPoolOptions;
 
     #[tokio::test]
@@ -735,6 +768,27 @@ mod tests {
 
         let decoded = decode_any_text(&row, 0).expect("decode blob text");
         assert_eq!(decoded, "hello");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn decode_any_i64_handles_text_values() {
+        sqlx::any::install_default_drivers();
+
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create in-memory sqlite pool");
+
+        let row = sqlx::query("SELECT '4096.0000'")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch text row");
+
+        let decoded = decode_any_i64(&row, 0).expect("decode text integer");
+        assert_eq!(decoded, 4096);
 
         pool.close().await;
     }
@@ -861,9 +915,15 @@ mod tests {
         assert_eq!(schema.relationships.len(), 1);
         let relationship = &schema.relationships[0];
         assert_eq!(relationship.column_pairs.len(), 2);
-        assert_eq!(relationship.column_pairs[0].source_column, "parent_first_id");
+        assert_eq!(
+            relationship.column_pairs[0].source_column,
+            "parent_first_id"
+        );
         assert_eq!(relationship.column_pairs[0].target_column, "first_id");
-        assert_eq!(relationship.column_pairs[1].source_column, "parent_second_id");
+        assert_eq!(
+            relationship.column_pairs[1].source_column,
+            "parent_second_id"
+        );
         assert_eq!(relationship.column_pairs[1].target_column, "second_id");
         assert_eq!(relationship.on_delete, "CASCADE");
         assert_eq!(relationship.on_update, "RESTRICT");

@@ -199,6 +199,7 @@ impl ConnectionManager {
             .map(|conn| {
                 let mut cfg = conn.config.clone();
                 cfg.password.clear();
+                cfg.has_saved_password = false;
                 cfg
             })
             .collect()

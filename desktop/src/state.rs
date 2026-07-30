@@ -25,12 +25,7 @@ impl AppState {
         }
 
         let store = self.store().await?;
-        store
-            .list_saved_connections()
-            .await?
-            .into_iter()
-            .find(|cfg| cfg.id == conn_id)
-            .ok_or_else(|| anyhow!("connection {conn_id:?} not found"))
+        store.load_saved_connection(conn_id).await
     }
 
     pub async fn get_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::AnyPool> {
@@ -38,11 +33,7 @@ impl AppState {
             Ok(pool) => Ok(pool),
             Err(original) => {
                 let store = self.store().await?;
-                let saved = store.list_saved_connections().await?;
-                let cfg = saved
-                    .into_iter()
-                    .find(|cfg| cfg.id == conn_id)
-                    .ok_or_else(|| anyhow!("connection {conn_id:?} not found"))?;
+                let cfg = store.load_saved_connection(conn_id).await?;
                 self.connections.connect(cfg).await?;
                 self.connections
                     .get_pool(conn_id)
@@ -57,11 +48,7 @@ impl AppState {
             Ok(pool) => Ok(pool),
             Err(original) => {
                 let store = self.store().await?;
-                let saved = store.list_saved_connections().await?;
-                let cfg = saved
-                    .into_iter()
-                    .find(|cfg| cfg.id == conn_id)
-                    .ok_or_else(|| anyhow!("connection {conn_id:?} not found"))?;
+                let cfg = store.load_saved_connection(conn_id).await?;
                 self.connections.connect(cfg).await?;
                 self.connections
                     .get_pg_pool(conn_id)
@@ -76,11 +63,7 @@ impl AppState {
             Ok(pool) => Ok(pool),
             Err(original) => {
                 let store = self.store().await?;
-                let saved = store.list_saved_connections().await?;
-                let cfg = saved
-                    .into_iter()
-                    .find(|cfg| cfg.id == conn_id)
-                    .ok_or_else(|| anyhow!("connection {conn_id:?} not found"))?;
+                let cfg = store.load_saved_connection(conn_id).await?;
                 self.connections.connect(cfg).await?;
                 self.connections
                     .get_mysql_pool(conn_id)

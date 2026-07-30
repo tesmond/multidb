@@ -13,6 +13,8 @@ pub struct ConnectionConfig {
     pub port: i32,
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub has_saved_password: bool,
     pub database: String,
     pub dsn: String,
     pub use_kube_port_forward: bool,

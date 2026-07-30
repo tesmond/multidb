@@ -191,8 +191,12 @@ impl HistoryStore {
     }
 
     pub async fn save_connection(&self, cfg: &ConnectionConfig) -> Result<()> {
-        password_vault::save_connection_password(&cfg.id, &cfg.password)?;
-        let has_keychain_password = !cfg.password.is_empty();
+        let has_keychain_password = if cfg.password.is_empty() && cfg.has_saved_password {
+            true
+        } else {
+            password_vault::save_connection_password(&cfg.id, &cfg.password)?;
+            !cfg.password.is_empty()
+        };
 
         sqlx::query(
             r#"
@@ -256,18 +260,8 @@ impl HistoryStore {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let id: String = row.try_get("id")?;
             let name: String = row.try_get("name")?;
             let has_keychain_password = row.try_get::<i64, _>("has_keychain_password")? != 0;
-            let password = if has_keychain_password {
-                password_vault::load_connection_password(&id)?.ok_or_else(|| {
-                    anyhow!(
-                        "Saved password for connection \"{name}\" ({id}) is missing from the OS keychain"
-                    )
-                })?
-            } else {
-                String::new()
-            };
 
             out.push(ConnectionConfig {
                 id: row.try_get("id")?,
@@ -278,7 +272,8 @@ impl HistoryStore {
                 host: row.try_get("host")?,
                 port: row.try_get::<i64, _>("port")? as i32,
                 username: row.try_get("username")?,
-                password,
+                password: String::new(),
+                has_saved_password: has_keychain_password,
                 database: row.try_get("database")?,
                 dsn: row.try_get("dsn")?,
                 use_kube_port_forward: row.try_get::<i64, _>("use_kube_port_forward")? != 0,
@@ -291,6 +286,28 @@ impl HistoryStore {
         }
 
         Ok(out)
+    }
+
+    pub async fn load_saved_connection(&self, id: &str) -> Result<ConnectionConfig> {
+        let mut matches = self
+            .list_saved_connections()
+            .await?
+            .into_iter()
+            .filter(|cfg| cfg.id == id);
+        let mut cfg = matches
+            .next()
+            .ok_or_else(|| anyhow!("connection {id:?} not found"))?;
+
+        if cfg.has_saved_password {
+            cfg.password = password_vault::load_connection_password(id)?.ok_or_else(|| {
+                anyhow!(
+                    "Saved password for connection \"{}\" ({id}) is missing from the OS keychain",
+                    cfg.name
+                )
+            })?;
+        }
+
+        Ok(cfg)
     }
 
     async fn migrate_connection_passwords_to_keychain(&self) -> Result<()> {
@@ -311,18 +328,6 @@ impl HistoryStore {
             }
 
             self.drop_saved_connection_password_column().await?;
-        }
-
-        let rows = sqlx::query("SELECT id, has_keychain_password FROM saved_connections")
-            .fetch_all(&self.pool)
-            .await?;
-
-        for row in rows {
-            let id: String = row.try_get("id")?;
-            let has_keychain_password = row.try_get::<i64, _>("has_keychain_password")? != 0;
-            if !has_keychain_password && password_vault::load_connection_password(&id)?.is_some() {
-                self.set_has_keychain_password(&id, true).await?;
-            }
         }
 
         Ok(())

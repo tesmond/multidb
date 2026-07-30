@@ -26,9 +26,12 @@ fn command_err(err: impl Into<anyhow::Error>) -> String {
 }
 
 pub async fn save_and_connect(state: Arc<AppState>, cfg: ConnectionConfig) -> CommandResult<()> {
+    let connect_cfg = resolve_connection_password(state.clone(), cfg.clone())
+        .await
+        .map_err(command_err)?;
     state
         .connections
-        .connect(cfg.clone())
+        .connect(connect_cfg)
         .await
         .map_err(command_err)?;
     let store = state.store().await.map_err(command_err)?;
@@ -37,11 +40,26 @@ pub async fn save_and_connect(state: Arc<AppState>, cfg: ConnectionConfig) -> Co
 }
 
 pub async fn test_connection(state: Arc<AppState>, cfg: ConnectionConfig) -> CommandResult<()> {
+    let cfg = resolve_connection_password(state.clone(), cfg)
+        .await
+        .map_err(command_err)?;
     state
         .connections
         .test_connection(cfg)
         .await
         .map_err(command_err)
+}
+
+async fn resolve_connection_password(
+    state: Arc<AppState>,
+    mut cfg: ConnectionConfig,
+) -> Result<ConnectionConfig> {
+    if cfg.password.is_empty() && cfg.has_saved_password {
+        let store = state.store().await?;
+        let saved = store.load_saved_connection(&cfg.id).await?;
+        cfg.password = saved.password;
+    }
+    Ok(cfg)
 }
 
 pub async fn disconnect(state: Arc<AppState>, id: String) -> CommandResult<()> {
