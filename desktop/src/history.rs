@@ -56,8 +56,12 @@ impl HistoryStore {
                 port INTEGER NOT NULL DEFAULT 0,
                 username TEXT NOT NULL DEFAULT '',
                 has_keychain_password INTEGER NOT NULL DEFAULT 0,
+                auth_mode TEXT NOT NULL DEFAULT 'password',
                 database TEXT NOT NULL DEFAULT '',
                 dsn TEXT NOT NULL DEFAULT '',
+                aws_region TEXT NOT NULL DEFAULT '',
+                aws_profile TEXT NOT NULL DEFAULT '',
+                ssl_ca_path TEXT NOT NULL DEFAULT '',
                 use_kube_port_forward INTEGER NOT NULL DEFAULT 0,
                 kube_context TEXT NOT NULL DEFAULT '',
                 kube_namespace TEXT NOT NULL DEFAULT '',
@@ -88,6 +92,10 @@ impl HistoryStore {
             "ALTER TABLE saved_connections ADD COLUMN tab_color TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN tab_text_black INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE saved_connections ADD COLUMN has_keychain_password INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE saved_connections ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'password'",
+            "ALTER TABLE saved_connections ADD COLUMN aws_region TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE saved_connections ADD COLUMN aws_profile TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE saved_connections ADD COLUMN ssl_ca_path TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN use_kube_port_forward INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE saved_connections ADD COLUMN kube_context TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN kube_namespace TEXT NOT NULL DEFAULT ''",
@@ -191,7 +199,10 @@ impl HistoryStore {
     }
 
     pub async fn save_connection(&self, cfg: &ConnectionConfig) -> Result<()> {
-        let has_keychain_password = if cfg.password.is_empty() && cfg.has_saved_password {
+        let has_keychain_password = if cfg.uses_aws_iam_auth() {
+            password_vault::delete_connection_password(&cfg.id)?;
+            false
+        } else if cfg.password.is_empty() && cfg.has_saved_password {
             true
         } else {
             password_vault::save_connection_password(&cfg.id, &cfg.password)?;
@@ -201,15 +212,18 @@ impl HistoryStore {
         sqlx::query(
             r#"
             INSERT INTO saved_connections (
-                id, name, driver, tab_color, tab_text_black, host, port, username, has_keychain_password, database, dsn,
+                id, name, driver, tab_color, tab_text_black, host, port, username, has_keychain_password, auth_mode, database, dsn,
+                aws_region, aws_profile, ssl_ca_path,
                 use_kube_port_forward, kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, driver=excluded.driver, tab_color=excluded.tab_color,
                 tab_text_black=excluded.tab_text_black, host=excluded.host, port=excluded.port,
-                username=excluded.username, has_keychain_password=excluded.has_keychain_password, database=excluded.database,
-                dsn=excluded.dsn, use_kube_port_forward=excluded.use_kube_port_forward,
+                username=excluded.username, has_keychain_password=excluded.has_keychain_password,
+                auth_mode=excluded.auth_mode, database=excluded.database,
+                dsn=excluded.dsn, aws_region=excluded.aws_region, aws_profile=excluded.aws_profile,
+                ssl_ca_path=excluded.ssl_ca_path, use_kube_port_forward=excluded.use_kube_port_forward,
                 kube_context=excluded.kube_context, kube_namespace=excluded.kube_namespace,
                 kube_resource=excluded.kube_resource, kube_local_port=excluded.kube_local_port,
                 kube_remote_port=excluded.kube_remote_port
@@ -224,8 +238,12 @@ impl HistoryStore {
         .bind(cfg.port as i64)
         .bind(&cfg.username)
         .bind(has_keychain_password as i64)
+        .bind(&cfg.auth_mode)
         .bind(&cfg.database)
         .bind(&cfg.dsn)
+        .bind(&cfg.aws_region)
+        .bind(&cfg.aws_profile)
+        .bind(&cfg.ssl_ca_path)
         .bind(cfg.use_kube_port_forward as i64)
         .bind(&cfg.kube_context)
         .bind(&cfg.kube_namespace)
@@ -249,7 +267,8 @@ impl HistoryStore {
     pub async fn list_saved_connections(&self) -> Result<Vec<ConnectionConfig>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, name, driver, tab_color, tab_text_black, host, port, username, has_keychain_password, database, dsn,
+             SELECT id, name, driver, tab_color, tab_text_black, host, port, username, has_keychain_password, auth_mode, database, dsn,
+                 aws_region, aws_profile, ssl_ca_path,
                    use_kube_port_forward, kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             FROM saved_connections
             ORDER BY name
@@ -274,8 +293,12 @@ impl HistoryStore {
                 username: row.try_get("username")?,
                 password: String::new(),
                 has_saved_password: has_keychain_password,
+                auth_mode: row.try_get("auth_mode")?,
                 database: row.try_get("database")?,
                 dsn: row.try_get("dsn")?,
+                aws_region: row.try_get("aws_region")?,
+                aws_profile: row.try_get("aws_profile")?,
+                ssl_ca_path: row.try_get("ssl_ca_path")?,
                 use_kube_port_forward: row.try_get::<i64, _>("use_kube_port_forward")? != 0,
                 kube_context: row.try_get("kube_context")?,
                 kube_namespace: row.try_get("kube_namespace")?,
@@ -373,8 +396,12 @@ impl HistoryStore {
                 port INTEGER NOT NULL DEFAULT 0,
                 username TEXT NOT NULL DEFAULT '',
                 has_keychain_password INTEGER NOT NULL DEFAULT 0,
+                auth_mode TEXT NOT NULL DEFAULT 'password',
                 database TEXT NOT NULL DEFAULT '',
                 dsn TEXT NOT NULL DEFAULT '',
+                aws_region TEXT NOT NULL DEFAULT '',
+                aws_profile TEXT NOT NULL DEFAULT '',
+                ssl_ca_path TEXT NOT NULL DEFAULT '',
                 use_kube_port_forward INTEGER NOT NULL DEFAULT 0,
                 kube_context TEXT NOT NULL DEFAULT '',
                 kube_namespace TEXT NOT NULL DEFAULT '',
@@ -391,12 +418,13 @@ impl HistoryStore {
             r#"
             INSERT INTO saved_connections_without_password (
                 id, name, driver, tab_color, tab_text_black, host, port, username,
-                has_keychain_password, database, dsn, use_kube_port_forward,
+                has_keychain_password, auth_mode, database, dsn, aws_region, aws_profile, ssl_ca_path, use_kube_port_forward,
                 kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             )
             SELECT
                 id, name, driver, tab_color, tab_text_black, host, port, username,
-                has_keychain_password, database, dsn, use_kube_port_forward,
+                has_keychain_password, COALESCE(auth_mode, 'password'), database, dsn,
+                COALESCE(aws_region, ''), COALESCE(aws_profile, ''), COALESCE(ssl_ca_path, ''), use_kube_port_forward,
                 kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             FROM saved_connections
             "#,

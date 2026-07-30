@@ -1,8 +1,12 @@
 use crate::models::ConnectionConfig;
 use anyhow::{anyhow, Context, Result};
+use aws_config::{BehaviorVersion, Region};
+use aws_sdk_rds::auth_token::{AuthTokenGenerator, Config as AuthTokenConfig};
 use sqlx::{
-    any::AnyPoolOptions, mysql::MySqlPoolOptions, postgres::PgPoolOptions, AnyPool, MySqlPool,
-    PgPool,
+    any::AnyPoolOptions,
+    mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
+    postgres::PgPoolOptions,
+    AnyPool, ConnectOptions, MySqlPool, PgPool,
 };
 use std::{
     collections::HashMap,
@@ -21,7 +25,12 @@ struct ManagedConnection {
     mysql_pool: Option<MySqlPool>,
     config: ConnectionConfig,
     port_forward: Option<Child>,
+    connected_at: Instant,
 }
+
+const DEFAULT_MAX_CONNECTIONS: u32 = 10;
+const IAM_MAX_CONNECTIONS: u32 = 1;
+const AWS_IAM_REFRESH_AGE: Duration = Duration::from_secs(14 * 60);
 
 #[derive(Default, Clone)]
 pub struct ConnectionManager {
@@ -30,53 +39,38 @@ pub struct ConnectionManager {
 
 impl ConnectionManager {
     pub async fn connect(&self, cfg: ConnectionConfig) -> Result<()> {
-        let mut effective = cfg.clone();
-        let mut port_forward = None;
-
-        if cfg.use_kube_port_forward {
-            let child = start_port_forward(&cfg)?;
-            wait_for_local_port(cfg.kube_local_port, Duration::from_secs(30))?;
-            effective.host = "127.0.0.1".to_string();
-            effective.port = cfg.kube_local_port;
-            port_forward = Some(child);
-        }
-
-        let dsn = build_dsn(&effective)?;
+        let (effective, mut port_forward) = prepare_runtime_connection_config(&cfg).await?;
         let connection_result = async {
-            let pool = AnyPoolOptions::new()
-                .max_connections(10)
-                .min_connections(0)
-                .connect(&dsn)
-                .await
-                .with_context(|| format!("connect {}", cfg.name))?;
-
-            validate_connection_access(&pool)
-                .await
-                .with_context(|| format!("validate {}", cfg.name))?;
-
-            let pg_pool = if effective.driver == "postgres" {
-                Some(
-                    PgPoolOptions::new()
-                        .max_connections(10)
-                        .min_connections(0)
-                        .connect(&dsn)
-                        .await
-                        .with_context(|| format!("connect postgres {}", cfg.name))?,
-                )
+            let max_connections = max_connections_for(&effective);
+            let (pool, pg_pool, mysql_pool) = if effective.driver == "mysql" {
+                let (pool, mysql_pool) = connect_mysql_pools(&effective, max_connections, &cfg.name).await?;
+                (pool, None, Some(mysql_pool))
             } else {
-                None
-            };
-            let mysql_pool = if effective.driver == "mysql" {
-                Some(
-                    MySqlPoolOptions::new()
-                        .max_connections(10)
-                        .min_connections(0)
-                        .connect(&dsn)
-                        .await
-                        .with_context(|| format!("connect mysql {}", cfg.name))?,
-                )
-            } else {
-                None
+                let dsn = build_dsn(&effective)?;
+                let pool = AnyPoolOptions::new()
+                    .max_connections(max_connections)
+                    .min_connections(0)
+                    .connect(&dsn)
+                    .await
+                    .with_context(|| format!("connect {}", cfg.name))?;
+
+                validate_connection_access(&pool)
+                    .await
+                    .with_context(|| format!("validate {}", cfg.name))?;
+
+                let pg_pool = if effective.driver == "postgres" {
+                    Some(
+                        PgPoolOptions::new()
+                            .max_connections(max_connections)
+                            .min_connections(0)
+                            .connect(&dsn)
+                            .await
+                            .with_context(|| format!("connect postgres {}", cfg.name))?,
+                    )
+                } else {
+                    None
+                };
+                (pool, pg_pool, None)
             };
 
             Result::<(AnyPool, Option<PgPool>, Option<MySqlPool>)>::Ok((pool, pg_pool, mysql_pool))
@@ -110,38 +104,40 @@ impl ConnectionManager {
                 mysql_pool,
                 config: cfg,
                 port_forward,
+                connected_at: Instant::now(),
             },
         );
         Ok(())
     }
 
     pub async fn test_connection(&self, cfg: ConnectionConfig) -> Result<()> {
-        let mut effective = cfg.clone();
-        let mut port_forward = None;
-
-        if cfg.use_kube_port_forward {
-            let child = start_port_forward(&cfg)?;
-            wait_for_local_port(cfg.kube_local_port, Duration::from_secs(30))?;
-            effective.host = "127.0.0.1".to_string();
-            effective.port = cfg.kube_local_port;
-            port_forward = Some(child);
-        }
-
-        let dsn = build_dsn(&effective)?;
-        let test_result = match AnyPoolOptions::new()
-            .max_connections(1)
-            .connect(&dsn)
-            .await
-            .with_context(|| format!("test connection {}", cfg.name))
-        {
-            Ok(pool) => {
-                let result = validate_connection_access(&pool)
-                    .await
-                    .with_context(|| format!("validate connection {}", cfg.name));
-                pool.close().await;
-                result
+        let (effective, mut port_forward) = prepare_runtime_connection_config(&cfg).await?;
+        let test_result = if effective.driver == "mysql" {
+            match connect_mysql_pools(&effective, IAM_MAX_CONNECTIONS, &cfg.name).await {
+                Ok((pool, mysql_pool)) => {
+                    mysql_pool.close().await;
+                    pool.close().await;
+                    Ok(())
+                }
+                Err(err) => Err(err),
             }
-            Err(err) => Err(err),
+        } else {
+            let dsn = build_dsn(&effective)?;
+            match AnyPoolOptions::new()
+                .max_connections(1)
+                .connect(&dsn)
+                .await
+                .with_context(|| format!("test connection {}", cfg.name))
+            {
+                Ok(pool) => {
+                    let result = validate_connection_access(&pool)
+                        .await
+                        .with_context(|| format!("validate connection {}", cfg.name));
+                    pool.close().await;
+                    result
+                }
+                Err(err) => Err(err),
+            }
         };
         kill_port_forward(&mut port_forward);
         test_result
@@ -192,6 +188,13 @@ impl ConnectionManager {
         inner.get(id).map(|conn| conn.config.clone())
     }
 
+    pub async fn should_refresh_iam_connection(&self, id: &str) -> bool {
+        let inner = self.inner.read().await;
+        inner.get(id).is_some_and(|conn| {
+            conn.config.uses_aws_iam_auth() && conn.connected_at.elapsed() >= AWS_IAM_REFRESH_AGE
+        })
+    }
+
     pub async fn list_connections(&self) -> Vec<ConnectionConfig> {
         let inner = self.inner.read().await;
         inner
@@ -207,26 +210,12 @@ impl ConnectionManager {
 }
 
 pub fn build_dsn(cfg: &ConnectionConfig) -> Result<String> {
-    if !cfg.dsn.trim().is_empty() {
+    if !cfg.dsn.trim().is_empty() && !cfg.uses_aws_iam_auth() {
         return Ok(cfg.dsn.clone());
     }
 
     match cfg.driver.as_str() {
-        "mysql" => {
-            let mut url = Url::parse("mysql://localhost").expect("static mysql url");
-            url.set_host(Some(&cfg.host))?;
-            url.set_port(Some(cfg.port as u16))
-                .map_err(|_| anyhow!("invalid mysql port {}", cfg.port))?;
-            url.set_path(&cfg.database);
-            if !cfg.username.is_empty() {
-                url.set_username(&cfg.username)
-                    .map_err(|_| anyhow!("invalid mysql username"))?;
-                url.set_password(Some(&cfg.password))
-                    .map_err(|_| anyhow!("invalid mysql password"))?;
-            }
-            url.query_pairs_mut().append_pair("ssl-mode", "PREFERRED");
-            Ok(url.to_string())
-        }
+        "mysql" => Ok(build_mysql_connect_options(cfg)?.to_url_lossy().to_string()),
         "postgres" => {
             let mut url = Url::parse("postgres://localhost").expect("static postgres url");
             url.set_host(Some(&cfg.host))?;
@@ -254,6 +243,157 @@ pub fn build_dsn(cfg: &ConnectionConfig) -> Result<String> {
             }
         }
         other => Err(anyhow!("unsupported driver: {other}")),
+    }
+}
+
+async fn prepare_runtime_connection_config(
+    cfg: &ConnectionConfig,
+) -> Result<(ConnectionConfig, Option<Child>)> {
+    validate_connection_config(cfg)?;
+
+    let mut effective = cfg.clone();
+    let mut port_forward = None;
+
+    if cfg.use_kube_port_forward {
+        let child = start_port_forward(cfg)?;
+        wait_for_local_port(cfg.kube_local_port, Duration::from_secs(30))?;
+        effective.host = "127.0.0.1".to_string();
+        effective.port = cfg.kube_local_port;
+        port_forward = Some(child);
+    }
+
+    if effective.uses_aws_iam_auth() {
+        effective.password = generate_mysql_aws_iam_token(&effective).await?;
+        effective.has_saved_password = false;
+        effective.dsn.clear();
+    }
+
+    Ok((effective, port_forward))
+}
+
+fn validate_connection_config(cfg: &ConnectionConfig) -> Result<()> {
+    if cfg.uses_aws_iam_auth() {
+        if !cfg.dsn.trim().is_empty() {
+            return Err(anyhow!(
+                "AWS IAM MySQL connections require host, port, username, database, and AWS region fields instead of a DSN"
+            ));
+        }
+        if cfg.use_kube_port_forward {
+            return Err(anyhow!(
+                "AWS IAM MySQL authentication is not supported with Kubernetes port forwarding"
+            ));
+        }
+        if cfg.host.trim().is_empty() {
+            return Err(anyhow!("mysql host is required for AWS IAM authentication"));
+        }
+        if cfg.port <= 0 {
+            return Err(anyhow!("mysql port is required for AWS IAM authentication"));
+        }
+        if cfg.username.trim().is_empty() {
+            return Err(anyhow!("mysql username is required for AWS IAM authentication"));
+        }
+        if cfg.database.trim().is_empty() {
+            return Err(anyhow!("mysql database is required for AWS IAM authentication"));
+        }
+        if cfg.aws_region.trim().is_empty() {
+            return Err(anyhow!("AWS region is required for AWS IAM authentication"));
+        }
+    }
+
+    Ok(())
+}
+
+async fn generate_mysql_aws_iam_token(cfg: &ConnectionConfig) -> Result<String> {
+    let mut loader = aws_config::defaults(BehaviorVersion::latest())
+        .region(Region::new(cfg.aws_region.trim().to_string()));
+
+    if !cfg.aws_profile.trim().is_empty() {
+        loader = loader.profile_name(cfg.aws_profile.trim().to_string());
+    }
+
+    let sdk_config = loader.load().await;
+    let token_config = AuthTokenConfig::builder()
+        .hostname(cfg.host.trim())
+        .port(cfg.port as u64)
+        .username(cfg.username.trim())
+        .expires_in(900)
+        .build()
+        .map_err(|err| anyhow!("build AWS RDS auth token config: {err}"))?;
+
+    let token = AuthTokenGenerator::new(token_config)
+        .auth_token(&sdk_config)
+        .await
+        .map_err(|err| anyhow!("generate AWS RDS auth token: {err}"))?;
+
+    Ok(token.to_string())
+}
+
+async fn connect_mysql_pools(
+    cfg: &ConnectionConfig,
+    max_connections: u32,
+    connection_name: &str,
+) -> Result<(AnyPool, MySqlPool)> {
+    let options = build_mysql_connect_options(cfg)?;
+    let dsn = options.to_url_lossy().to_string();
+
+    let pool = AnyPoolOptions::new()
+        .max_connections(max_connections)
+        .min_connections(0)
+        .connect(&dsn)
+        .await
+        .with_context(|| format!("connect {}", connection_name))?;
+
+    validate_connection_access(&pool)
+        .await
+        .with_context(|| format!("validate {}", connection_name))?;
+
+    let mysql_pool = MySqlPoolOptions::new()
+        .max_connections(max_connections)
+        .min_connections(0)
+        .connect_with(options)
+        .await
+        .with_context(|| format!("connect mysql {}", connection_name))?;
+
+    Ok((pool, mysql_pool))
+}
+
+fn build_mysql_connect_options(cfg: &ConnectionConfig) -> Result<MySqlConnectOptions> {
+    let port = u16::try_from(cfg.port).map_err(|_| anyhow!("invalid mysql port {}", cfg.port))?;
+    let mut options = MySqlConnectOptions::new()
+        .host(&cfg.host)
+        .port(port)
+        .database(&cfg.database)
+        .username(&cfg.username)
+        .password(&cfg.password);
+
+    let ssl_ca_path = cfg.ssl_ca_path.trim();
+    if cfg.uses_aws_iam_auth() {
+        options = options.enable_cleartext_plugin(true);
+        options = if ssl_ca_path.is_empty() {
+            options.ssl_mode(MySqlSslMode::VerifyIdentity)
+        } else {
+            options
+                .ssl_mode(MySqlSslMode::VerifyCa)
+                .ssl_ca(ssl_ca_path)
+        };
+    } else {
+        options = if ssl_ca_path.is_empty() {
+            options.ssl_mode(MySqlSslMode::Preferred)
+        } else {
+            options
+                .ssl_mode(MySqlSslMode::VerifyCa)
+                .ssl_ca(ssl_ca_path)
+        };
+    }
+
+    Ok(options)
+}
+
+fn max_connections_for(cfg: &ConnectionConfig) -> u32 {
+    if cfg.uses_aws_iam_auth() {
+        IAM_MAX_CONNECTIONS
+    } else {
+        DEFAULT_MAX_CONNECTIONS
     }
 }
 
@@ -337,8 +477,12 @@ fn kill_port_forward(child: &mut Option<Child>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_dsn, build_sqlite_file_dsn, validate_connection_access};
+    use super::{
+        build_dsn, build_mysql_connect_options, build_sqlite_file_dsn, validate_connection_access,
+        validate_connection_config,
+    };
     use crate::models::ConnectionConfig;
+    use sqlx::mysql::MySqlSslMode;
     use sqlx::any::AnyPoolOptions;
 
     #[test]
@@ -364,6 +508,41 @@ mod tests {
             build_sqlite_file_dsn(r"C:\Users\tesmo\data\app.db"),
             "sqlite:///C:/Users/tesmo/data/app.db"
         );
+    }
+
+    #[test]
+    fn mysql_iam_requires_region() {
+        let cfg = ConnectionConfig {
+            driver: "mysql".to_string(),
+            host: "db.example.us-east-1.rds.amazonaws.com".to_string(),
+            port: 3306,
+            username: "app_user".to_string(),
+            database: "app".to_string(),
+            auth_mode: "awsIam".to_string(),
+            ..ConnectionConfig::default()
+        };
+
+        let err = validate_connection_config(&cfg).expect_err("region should be required");
+        assert!(err.to_string().contains("AWS region is required"));
+    }
+
+    #[test]
+    fn mysql_iam_enforces_strict_tls() {
+        let cfg = ConnectionConfig {
+            driver: "mysql".to_string(),
+            host: "db.example.us-east-1.rds.amazonaws.com".to_string(),
+            port: 3306,
+            username: "app_user".to_string(),
+            password: "token".to_string(),
+            database: "app".to_string(),
+            auth_mode: "awsIam".to_string(),
+            aws_region: "us-east-1".to_string(),
+            ..ConnectionConfig::default()
+        };
+
+        let options = build_mysql_connect_options(&cfg).expect("mysql options should build");
+        assert!(matches!(options.get_ssl_mode(), MySqlSslMode::VerifyIdentity));
+        assert!(build_dsn(&cfg).expect("dsn should build").contains("ssl-mode=VERIFY_IDENTITY"));
     }
 
     #[tokio::test]

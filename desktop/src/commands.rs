@@ -54,6 +54,12 @@ async fn resolve_connection_password(
     state: Arc<AppState>,
     mut cfg: ConnectionConfig,
 ) -> Result<ConnectionConfig> {
+    if cfg.uses_aws_iam_auth() {
+        cfg.password.clear();
+        cfg.has_saved_password = false;
+        return Ok(cfg);
+    }
+
     if cfg.password.is_empty() && cfg.has_saved_password {
         let store = state.store().await?;
         let saved = store.load_saved_connection(&cfg.id).await?;

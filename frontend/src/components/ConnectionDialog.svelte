@@ -8,7 +8,10 @@
   let saving = false;
   let testResult = '';
   let testError = '';
+  let awsIamSelected = false;
   const DEFAULT_TAB_COLOR = '#6366f1';
+
+  $: awsIamSelected = form.driver === 'mysql' && isAwsIamMode(form.authMode);
 
   $: if ($showConnectionDialog) {
     form = $editingConnection
@@ -17,6 +20,13 @@
           ...$editingConnection,
           tabColor: $editingConnection.tabColor ?? '',
           tabTextBlack: !!$editingConnection.tabTextBlack,
+          hasSavedPassword: !!$editingConnection.hasSavedPassword,
+          authMode: isAwsIamMode($editingConnection.authMode)
+            ? 'awsIam'
+            : ($editingConnection.authMode || 'password'),
+          awsRegion: $editingConnection.awsRegion ?? '',
+          awsProfile: $editingConnection.awsProfile ?? '',
+          sslCaPath: $editingConnection.sslCaPath ?? '',
         }
       : emptyForm();
     testResult = '';
@@ -36,8 +46,40 @@
     return normalized || DEFAULT_TAB_COLOR;
   }
 
+  function isAwsIamMode(mode: string | null | undefined): boolean {
+    const normalized = (mode ?? '').replace(/[_\s-]/g, '').toLowerCase();
+    return normalized === 'awsiam';
+  }
+
+  function usesAwsIamAuth(value: ConnectionConfig = form): boolean {
+    return value.driver === 'mysql' && isAwsIamMode(value.authMode);
+  }
+
   function emptyForm(): ConnectionConfig {
-    return { id: crypto.randomUUID(), name: '', driver: 'mysql', tabColor: '', tabTextBlack: false, host: 'localhost', port: 3306, username: '', password: '', database: '', dsn: '', useKubePortForward: false, kubeContext: '', kubeNamespace: '', kubeResource: '', kubeLocalPort: 0, kubeRemotePort: 0 };
+    return {
+      id: crypto.randomUUID(),
+      name: '',
+      driver: 'mysql',
+      tabColor: '',
+      tabTextBlack: false,
+      host: 'localhost',
+      port: 3306,
+      username: '',
+      password: '',
+      hasSavedPassword: false,
+      authMode: 'password',
+      database: '',
+      dsn: '',
+      awsRegion: '',
+      awsProfile: '',
+      sslCaPath: '',
+      useKubePortForward: false,
+      kubeContext: '',
+      kubeNamespace: '',
+      kubeResource: '',
+      kubeLocalPort: 0,
+      kubeRemotePort: 0,
+    };
   }
 
   function onTabColorPick() {
@@ -60,6 +102,21 @@
 
   function onDriverChange() {
     form.port = driverDefaultPort(form.driver);
+    if (form.driver !== 'mysql') {
+      form.authMode = 'password';
+      form.password = '';
+      form.hasSavedPassword = false;
+    }
+  }
+
+  function onAuthModeChange(event: Event) {
+    const nextMode = (event.currentTarget as HTMLSelectElement).value;
+    form.authMode = isAwsIamMode(nextMode) ? 'awsIam' : 'password';
+    if (awsIamSelected) {
+      form.password = '';
+      form.hasSavedPassword = false;
+      form.useKubePortForward = false;
+    }
   }
 
   function onKubeToggle() {
@@ -79,6 +136,17 @@
     if (requireName && !form.name.trim()) return 'Name is required';
     if (form.driver === 'sqlite' && !form.database.trim()) {
       return 'SQLite database path is required';
+    }
+    if (form.driver !== 'sqlite') {
+      if (!form.host.trim()) return 'Host is required';
+      if (!form.username.trim()) return 'Username is required';
+      if (!form.database.trim()) return 'Database is required';
+    }
+    if (awsIamSelected) {
+      if (!form.awsRegion.trim()) return 'AWS region is required for IAM authentication';
+      if (form.useKubePortForward) {
+        return 'AWS IAM authentication is not supported with Kubernetes port forwarding';
+      }
     }
     return '';
   }
@@ -107,8 +175,12 @@
       'port',
       'username',
       'password',
+      'authMode',
       'database',
       'dsn',
+      'awsRegion',
+      'awsProfile',
+      'sslCaPath',
       'useKubePortForward',
       'kubeContext',
       'kubeNamespace',
@@ -232,6 +304,17 @@
         </label>
       </div>
 
+      {#if form.driver === 'mysql'}
+      <div class="form-row">
+        <label>Authentication
+          <select bind:value={form.authMode} on:change={(event) => onAuthModeChange(event)}>
+            <option value="password">Password</option>
+            <option value="awsIam">AWS IAM</option>
+          </select>
+        </label>
+      </div>
+      {/if}
+
       {#if form.driver !== 'sqlite'}
       <div class="form-row two-col">
         <label>Host
@@ -242,6 +325,14 @@
         </label>
       </div>
       <div class="form-row two-col">
+        {#if awsIamSelected}
+        <label>AWS Region
+          <input type="text" bind:value={form.awsRegion} placeholder="us-east-1" spellcheck="false" />
+        </label>
+        <label>AWS Profile
+          <input type="text" bind:value={form.awsProfile} placeholder="default" spellcheck="false" />
+        </label>
+        {:else}
         <label>Username
           <input
             type="text"
@@ -255,7 +346,28 @@
         <label>Password
           <input type="password" bind:value={form.password} autocomplete="new-password" />
         </label>
+        {/if}
       </div>
+      {#if awsIamSelected}
+      <div class="form-row">
+        <label>TLS CA Bundle Path
+          <input type="text" bind:value={form.sslCaPath} placeholder="Optional PEM bundle" spellcheck="false" />
+        </label>
+      </div>
+      <div class="form-row">
+        <label>Database User
+          <input
+            type="text"
+            bind:value={form.username}
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            inputmode="text"
+            placeholder="db_user"
+          />
+        </label>
+      </div>
+      {/if}
       <div class="form-row">
         <label>Database
           <input type="text" bind:value={form.database} placeholder="my_db" />
@@ -278,7 +390,7 @@
       {#if form.driver !== 'sqlite'}
       <div class="form-row">
         <label class="checkbox-label">
-          <input type="checkbox" bind:checked={form.useKubePortForward} on:change={onKubeToggle} />
+          <input type="checkbox" bind:checked={form.useKubePortForward} on:change={onKubeToggle} disabled={awsIamSelected} />
           Use Kubernetes port forwarding
         </label>
       </div>
