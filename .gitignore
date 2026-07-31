@@ -59,6 +59,7 @@ pnpm-lock.yaml
 # =========================
 coverage/
 .nyc_output/
+frontend/test-results/
 
 # =========================
 # Desktop build output

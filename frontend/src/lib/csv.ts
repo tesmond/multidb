@@ -7,7 +7,7 @@
 
 import { SaveCSV } from "../../desktop/gen/main/App";
 
-export function escapeCSV(value: any): string {
+function escapeCSV(value: any): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "object") {
     try {
@@ -31,7 +31,7 @@ function csvSafeString(str: string): string {
   return str;
 }
 
-export interface BuildCSVOptions {
+interface BuildCSVOptions {
   /** Optional sort index mapping visible row order to rows array indices. */
   sortIndex?: number[] | null;
   /** Line terminator – default '\n' */
@@ -41,7 +41,7 @@ export interface BuildCSVOptions {
 /**
  * Build a CSV string from columns and rows.
  */
-export function buildCSV(
+function buildCSV(
   columns: string[],
   rows: any[][],
   options: BuildCSVOptions = {},
@@ -82,7 +82,7 @@ function rowToCSV(row: any[], expectedCols: number): string {
  * Open the native OS save dialog through the Rust backend and write the CSV.
  * This works correctly on macOS where WKWebView does not support blob downloads.
  */
-export async function saveCSVNative(
+async function saveCSVNative(
   content: string,
   filename = "query_results.csv",
 ): Promise<void> {
@@ -92,7 +92,7 @@ export async function saveCSVNative(
 /**
  * Build a CSV from columns + rows and save it via the native dialog.
  */
-export async function exportToCSV(
+async function exportToCSV(
   columns: string[],
   rows: any[][],
   filename = "query_results.csv",
