@@ -1,4 +1,4 @@
-use crate::models::ConnectionConfig;
+use crate::{ipc_diagnostics, models::ConnectionConfig};
 use anyhow::{anyhow, Context, Result};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_rds::auth_token::{AuthTokenGenerator, Config as AuthTokenConfig};
@@ -121,6 +121,7 @@ impl ConnectionManager {
     }
 
     pub async fn test_connection(&self, cfg: ConnectionConfig) -> Result<()> {
+        ipc_diagnostics::set_test_connection_stage("prepare_runtime_connection_config");
         let (effective, mut port_forward) = prepare_runtime_connection_config(&cfg).await?;
         let test_result = if effective.driver == "mysql" {
             match connect_mysql_pool(&effective, IAM_MAX_CONNECTIONS, &cfg.name).await {
@@ -132,6 +133,12 @@ impl ConnectionManager {
             }
         } else {
             let dsn = build_dsn(&effective)?;
+            let stage = match effective.driver.as_str() {
+                "postgres" => "postgres_connect",
+                "sqlite" => "sqlite_connect",
+                _ => "validate_connection_access",
+            };
+            ipc_diagnostics::set_test_connection_stage(stage);
             match AnyPoolOptions::new()
                 .max_connections(1)
                 .connect(&dsn)
@@ -260,12 +267,14 @@ pub fn build_dsn(cfg: &ConnectionConfig) -> Result<String> {
 async fn prepare_runtime_connection_config(
     cfg: &ConnectionConfig,
 ) -> Result<(ConnectionConfig, Option<Child>)> {
+    ipc_diagnostics::set_test_connection_stage("validate_connection_config");
     validate_connection_config(cfg)?;
 
     let mut effective = cfg.clone();
     let mut port_forward = None;
 
     if cfg.use_kube_port_forward {
+        ipc_diagnostics::set_test_connection_stage("wait_for_local_port");
         let child = start_port_forward(cfg)?;
         wait_for_local_port(cfg.kube_local_port, Duration::from_secs(30))?;
         effective.host = "127.0.0.1".to_string();
@@ -274,6 +283,7 @@ async fn prepare_runtime_connection_config(
     }
 
     if effective.uses_aws_iam_auth() {
+        ipc_diagnostics::set_test_connection_stage("aws_generate_iam_token");
         effective.password = generate_mysql_aws_iam_token(&effective).await?;
         effective.has_saved_password = false;
         effective.dsn.clear();
@@ -314,6 +324,7 @@ fn validate_connection_config(cfg: &ConnectionConfig) -> Result<()> {
 }
 
 async fn generate_mysql_aws_iam_token(cfg: &ConnectionConfig) -> Result<String> {
+    ipc_diagnostics::set_test_connection_stage("aws_sdk_load_config");
     let mut loader = aws_config::defaults(BehaviorVersion::latest())
         .region(Region::new(cfg.aws_region.trim().to_string()));
 
@@ -364,8 +375,10 @@ async fn connect_mysql_pool(
     max_connections: u32,
     connection_name: &str,
 ) -> Result<MySqlPool> {
+    ipc_diagnostics::set_test_connection_stage("mysql_build_connect_options");
     let options = build_mysql_connect_options(cfg)?;
 
+    ipc_diagnostics::set_test_connection_stage("mysql_connect");
     let mysql_pool = timeout_step(
         MYSQL_CONNECT_TIMEOUT,
         format!(
@@ -380,6 +393,7 @@ async fn connect_mysql_pool(
     .await?
     .with_context(|| format!("connect mysql {}", connection_name))?;
 
+    ipc_diagnostics::set_test_connection_stage("mysql_validate");
     timeout_step(
         CONNECTION_VALIDATION_TIMEOUT,
         format!("run validation query for mysql {}", connection_name),
@@ -397,10 +411,15 @@ where
 {
     match timeout(duration, future).await {
         Ok(result) => Ok(result),
-        Err(_) => Err(anyhow!(
-            "timed out after {}s while trying to {label}",
-            duration.as_secs()
-        )),
+        Err(_) => {
+            let stage = ipc_diagnostics::current_test_connection_stage()
+                .unwrap_or_else(|| "unknown".to_string());
+            let checks = ipc_diagnostics::recommended_checks_for_stage(&stage);
+            Err(anyhow!(
+                "timed out after {}s while trying to {label} (stage: {stage}). Recommended next checks: {checks}",
+                duration.as_secs()
+            ))
+        }
     }
 }
 
