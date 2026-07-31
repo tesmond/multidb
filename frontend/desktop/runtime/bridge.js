@@ -2,11 +2,14 @@ const callbacks = new Map();
 const listeners = new Map();
 let nextId = 1;
 const DEFAULT_IPC_TIMEOUT_MS = 20000;
+const TEST_CONNECTION_TIMEOUT_MS = 60000;
 
 function timeoutForCommand(command) {
   switch (command) {
     case "test_connection":
-      return 20000;
+      // Allow backend connection diagnostics to finish and return a specific
+      // stage failure instead of masking them with a generic IPC timeout.
+      return TEST_CONNECTION_TIMEOUT_MS;
     case "execute_query":
     case "execute_query_streamed":
       return 0;
