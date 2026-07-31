@@ -10,6 +10,7 @@ use sqlx::{
 };
 use std::{
     collections::HashMap,
+    future::Future,
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -17,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 use url::Url;
 
 struct ManagedConnection {
@@ -31,6 +33,10 @@ struct ManagedConnection {
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 const IAM_MAX_CONNECTIONS: u32 = 1;
 const AWS_IAM_REFRESH_AGE: Duration = Duration::from_secs(14 * 60);
+const AWS_SDK_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
+const AWS_IAM_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+const MYSQL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const CONNECTION_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default, Clone)]
 pub struct ConnectionManager {
@@ -315,7 +321,20 @@ async fn generate_mysql_aws_iam_token(cfg: &ConnectionConfig) -> Result<String> 
         loader = loader.profile_name(cfg.aws_profile.trim().to_string());
     }
 
-    let sdk_config = loader.load().await;
+    let sdk_config = timeout_step(
+        AWS_SDK_LOAD_TIMEOUT,
+        format!(
+            "load AWS SDK config for region {}{}",
+            cfg.aws_region.trim(),
+            if cfg.aws_profile.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" with profile {}", cfg.aws_profile.trim())
+            }
+        ),
+        loader.load(),
+    )
+    .await?;
     let token_config = AuthTokenConfig::builder()
         .hostname(cfg.host.trim())
         .port(cfg.port as u64)
@@ -324,10 +343,18 @@ async fn generate_mysql_aws_iam_token(cfg: &ConnectionConfig) -> Result<String> 
         .build()
         .map_err(|err| anyhow!("build AWS RDS auth token config: {err}"))?;
 
-    let token = AuthTokenGenerator::new(token_config)
-        .auth_token(&sdk_config)
-        .await
-        .map_err(|err| anyhow!("generate AWS RDS auth token: {err}"))?;
+    let token = timeout_step(
+        AWS_IAM_TOKEN_TIMEOUT,
+        format!(
+            "generate AWS RDS IAM auth token for {}@{}:{}",
+            cfg.username.trim(),
+            cfg.host.trim(),
+            cfg.port
+        ),
+        AuthTokenGenerator::new(token_config).auth_token(&sdk_config),
+    )
+    .await?
+    .map_err(|err| anyhow!("generate AWS RDS auth token: {err}"))?;
 
     Ok(token.to_string())
 }
@@ -339,18 +366,42 @@ async fn connect_mysql_pool(
 ) -> Result<MySqlPool> {
     let options = build_mysql_connect_options(cfg)?;
 
-    let mysql_pool = MySqlPoolOptions::new()
-        .max_connections(max_connections)
-        .min_connections(0)
-        .connect_with(options)
-        .await
-        .with_context(|| format!("connect mysql {}", connection_name))?;
+    let mysql_pool = timeout_step(
+        MYSQL_CONNECT_TIMEOUT,
+        format!(
+            "connect mysql {} at {}:{}",
+            connection_name, cfg.host, cfg.port
+        ),
+        MySqlPoolOptions::new()
+            .max_connections(max_connections)
+            .min_connections(0)
+            .connect_with(options),
+    )
+    .await?
+    .with_context(|| format!("connect mysql {}", connection_name))?;
 
-    validate_mysql_connection_access(&mysql_pool)
-        .await
+    timeout_step(
+        CONNECTION_VALIDATION_TIMEOUT,
+        format!("run validation query for mysql {}", connection_name),
+        validate_mysql_connection_access(&mysql_pool),
+    )
+    .await?
         .with_context(|| format!("validate {}", connection_name))?;
 
     Ok(mysql_pool)
+}
+
+async fn timeout_step<T, F>(duration: Duration, label: String, future: F) -> Result<T>
+where
+    F: Future<Output = T>,
+{
+    match timeout(duration, future).await {
+        Ok(result) => Ok(result),
+        Err(_) => Err(anyhow!(
+            "timed out after {}s while trying to {label}",
+            duration.as_secs()
+        )),
+    }
 }
 
 fn build_mysql_connect_options(cfg: &ConnectionConfig) -> Result<MySqlConnectOptions> {
@@ -508,12 +559,14 @@ fn kill_port_forward(child: &mut Option<Child>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dsn, build_mysql_connect_options, build_sqlite_file_dsn, validate_connection_access,
-        validate_connection_config,
+        build_dsn, build_mysql_connect_options, build_sqlite_file_dsn, timeout_step,
+        validate_connection_access, validate_connection_config,
     };
     use crate::models::ConnectionConfig;
+    use anyhow::anyhow;
     use sqlx::any::AnyPoolOptions;
     use sqlx::mysql::MySqlSslMode;
+    use std::time::Duration;
 
     #[test]
     fn sqlite_requires_database_path() {
@@ -632,5 +685,30 @@ mod tests {
             .expect("validation query should succeed");
 
         pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn timeout_step_returns_timeout_error() {
+        let err = timeout_step(Duration::from_millis(1), "simulate stall".to_string(), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .expect_err("timeout should fail");
+
+        assert!(err.to_string().contains("timed out after 0s while trying to simulate stall"));
+    }
+
+    #[tokio::test]
+    async fn timeout_step_preserves_underlying_error() {
+        let result = timeout_step(Duration::from_secs(1), "fail fast".to_string(), async {
+            Err::<(), anyhow::Error>(anyhow!("boom"))
+        })
+        .await
+        .expect("timeout wrapper should return the inner result");
+
+        let err = result.expect_err("underlying error should be returned");
+
+        assert!(err.to_string().contains("boom"));
     }
 }
