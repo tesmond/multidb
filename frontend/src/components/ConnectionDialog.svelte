@@ -140,7 +140,7 @@
     if (form.driver !== 'sqlite') {
       if (!form.host.trim()) return 'Host is required';
       if (!form.username.trim()) return 'Username is required';
-      if (!form.database.trim()) return 'Database is required';
+      if (form.driver === 'mysql' && !form.database.trim()) return 'Database is required';
     }
     if (awsIamSelected) {
       if (!form.awsRegion.trim()) return 'AWS region is required for IAM authentication';
@@ -370,7 +370,11 @@
       {/if}
       <div class="form-row">
         <label>Database
-          <input type="text" bind:value={form.database} placeholder="my_db" />
+          <input
+            type="text"
+            bind:value={form.database}
+            placeholder={form.driver === 'postgres' ? 'Optional (leave blank to browse all databases)' : 'my_db'}
+          />
         </label>
       </div>
       {:else}

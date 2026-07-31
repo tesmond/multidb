@@ -794,6 +794,11 @@ pub async fn get_schema(state: Arc<AppState>, conn_id: String) -> CommandResult<
         .get_config_or_saved(&conn_id)
         .await
         .map_err(command_err)?;
+    if cfg.driver == "postgres" && cfg.database.trim().is_empty() {
+        return schema::postgres_database_catalog(&pool)
+            .await
+            .map_err(command_err);
+    }
     schema::get_schema(&pool, &cfg.driver)
         .await
         .map_err(command_err)

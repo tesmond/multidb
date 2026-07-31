@@ -16,6 +16,31 @@ pub async fn get_schema(pool: &AnyPool, driver: &str) -> Result<SchemaTree> {
     }
 }
 
+pub async fn postgres_database_catalog(pool: &AnyPool) -> Result<SchemaTree> {
+    let databases = string_column(
+        pool,
+        r#"
+        SELECT datname::text
+        FROM pg_database
+        WHERE datistemplate = false
+          AND datallowconn = true
+        ORDER BY datname
+        "#,
+        &[],
+    )
+    .await?;
+
+    let mut tree = SchemaTree::default();
+    tree.schemas = databases
+        .into_iter()
+        .map(|database_name| Schema {
+            name: database_name,
+            ..Schema::default()
+        })
+        .collect();
+    Ok(tree)
+}
+
 pub async fn get_primary_keys(
     pool: &AnyPool,
     driver: &str,

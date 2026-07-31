@@ -11,7 +11,7 @@ use sqlx::{
 use std::{
     collections::HashMap,
     net::{TcpStream, ToSocketAddrs},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Arc,
     time::{Duration, Instant},
@@ -366,27 +366,50 @@ fn build_mysql_connect_options(cfg: &ConnectionConfig) -> Result<MySqlConnectOpt
         .username(&cfg.username)
         .password(&cfg.password);
 
-    let ssl_ca_path = cfg.ssl_ca_path.trim();
+    let ssl_ca_path = resolve_ssl_ca_path(cfg.ssl_ca_path.trim())?;
     if cfg.uses_aws_iam_auth() {
         options = options.enable_cleartext_plugin(true);
-        options = if ssl_ca_path.is_empty() {
-            options.ssl_mode(MySqlSslMode::VerifyIdentity)
+        options = if let Some(path) = ssl_ca_path.as_deref() {
+            options.ssl_mode(MySqlSslMode::VerifyCa).ssl_ca(path)
         } else {
-            options
-                .ssl_mode(MySqlSslMode::VerifyCa)
-                .ssl_ca(ssl_ca_path)
+            // AWS IAM requires TLS. Use encrypted transport even when no custom CA bundle is provided.
+            options.ssl_mode(MySqlSslMode::Required)
         };
     } else {
-        options = if ssl_ca_path.is_empty() {
-            options.ssl_mode(MySqlSslMode::Preferred)
+        options = if let Some(path) = ssl_ca_path.as_deref() {
+            options.ssl_mode(MySqlSslMode::VerifyCa).ssl_ca(path)
         } else {
-            options
-                .ssl_mode(MySqlSslMode::VerifyCa)
-                .ssl_ca(ssl_ca_path)
+            options.ssl_mode(MySqlSslMode::Preferred)
         };
     }
 
     Ok(options)
+}
+
+fn resolve_ssl_ca_path(raw: &str) -> Result<Option<String>> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    let expanded = expand_home_dir(raw)?;
+    if !expanded.is_file() {
+        return Err(anyhow!(
+            "TLS CA bundle not found at {}",
+            expanded.display()
+        ));
+    }
+
+    Ok(Some(expanded.to_string_lossy().to_string()))
+}
+
+fn expand_home_dir(path: &str) -> Result<PathBuf> {
+    if path == "~" || path.starts_with("~/") {
+        let home = dirs::home_dir().ok_or_else(|| anyhow!("unable to resolve home directory"))?;
+        let suffix = path.trim_start_matches('~').trim_start_matches('/');
+        return Ok(home.join(suffix));
+    }
+
+    Ok(PathBuf::from(path))
 }
 
 fn max_connections_for(cfg: &ConnectionConfig) -> u32 {
