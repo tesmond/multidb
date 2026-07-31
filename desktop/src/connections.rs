@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 use url::Url;
 
 struct ManagedConnection {
-    pool: AnyPool,
+    pool: Option<AnyPool>,
     pg_pool: Option<PgPool>,
     mysql_pool: Option<MySqlPool>,
     config: ConnectionConfig,
@@ -43,8 +43,8 @@ impl ConnectionManager {
         let connection_result = async {
             let max_connections = max_connections_for(&effective);
             let (pool, pg_pool, mysql_pool) = if effective.driver == "mysql" {
-                let (pool, mysql_pool) = connect_mysql_pools(&effective, max_connections, &cfg.name).await?;
-                (pool, None, Some(mysql_pool))
+                let mysql_pool = connect_mysql_pool(&effective, max_connections, &cfg.name).await?;
+                (None, None, Some(mysql_pool))
             } else {
                 let dsn = build_dsn(&effective)?;
                 let pool = AnyPoolOptions::new()
@@ -70,10 +70,12 @@ impl ConnectionManager {
                 } else {
                     None
                 };
-                (pool, pg_pool, None)
+                (Some(pool), pg_pool, None)
             };
 
-            Result::<(AnyPool, Option<PgPool>, Option<MySqlPool>)>::Ok((pool, pg_pool, mysql_pool))
+            Result::<(Option<AnyPool>, Option<PgPool>, Option<MySqlPool>)>::Ok((
+                pool, pg_pool, mysql_pool,
+            ))
         }
         .await;
 
@@ -87,7 +89,9 @@ impl ConnectionManager {
 
         let mut inner = self.inner.write().await;
         if let Some(mut old) = inner.remove(&cfg.id) {
-            old.pool.close().await;
+            if let Some(pool) = old.pool {
+                pool.close().await;
+            }
             if let Some(pg_pool) = old.pg_pool {
                 pg_pool.close().await;
             }
@@ -113,10 +117,9 @@ impl ConnectionManager {
     pub async fn test_connection(&self, cfg: ConnectionConfig) -> Result<()> {
         let (effective, mut port_forward) = prepare_runtime_connection_config(&cfg).await?;
         let test_result = if effective.driver == "mysql" {
-            match connect_mysql_pools(&effective, IAM_MAX_CONNECTIONS, &cfg.name).await {
-                Ok((pool, mysql_pool)) => {
+            match connect_mysql_pool(&effective, IAM_MAX_CONNECTIONS, &cfg.name).await {
+                Ok(mysql_pool) => {
                     mysql_pool.close().await;
-                    pool.close().await;
                     Ok(())
                 }
                 Err(err) => Err(err),
@@ -148,7 +151,9 @@ impl ConnectionManager {
         let mut conn = inner
             .remove(id)
             .ok_or_else(|| anyhow!("connection {id:?} not found"))?;
-        conn.pool.close().await;
+        if let Some(pool) = conn.pool {
+            pool.close().await;
+        }
         if let Some(pg_pool) = conn.pg_pool {
             pg_pool.close().await;
         }
@@ -163,7 +168,7 @@ impl ConnectionManager {
         let inner = self.inner.read().await;
         inner
             .get(id)
-            .map(|conn| conn.pool.clone())
+            .and_then(|conn| conn.pool.clone())
             .ok_or_else(|| anyhow!("connection {id:?} not found"))
     }
 
@@ -275,7 +280,7 @@ fn validate_connection_config(cfg: &ConnectionConfig) -> Result<()> {
     if cfg.uses_aws_iam_auth() {
         if !cfg.dsn.trim().is_empty() {
             return Err(anyhow!(
-                "AWS IAM MySQL connections require host, port, username, database, and AWS region fields instead of a DSN"
+                "AWS IAM MySQL connections require host, port, username, and AWS region fields instead of a DSN"
             ));
         }
         if cfg.use_kube_port_forward {
@@ -290,10 +295,9 @@ fn validate_connection_config(cfg: &ConnectionConfig) -> Result<()> {
             return Err(anyhow!("mysql port is required for AWS IAM authentication"));
         }
         if cfg.username.trim().is_empty() {
-            return Err(anyhow!("mysql username is required for AWS IAM authentication"));
-        }
-        if cfg.database.trim().is_empty() {
-            return Err(anyhow!("mysql database is required for AWS IAM authentication"));
+            return Err(anyhow!(
+                "mysql username is required for AWS IAM authentication"
+            ));
         }
         if cfg.aws_region.trim().is_empty() {
             return Err(anyhow!("AWS region is required for AWS IAM authentication"));
@@ -328,24 +332,12 @@ async fn generate_mysql_aws_iam_token(cfg: &ConnectionConfig) -> Result<String> 
     Ok(token.to_string())
 }
 
-async fn connect_mysql_pools(
+async fn connect_mysql_pool(
     cfg: &ConnectionConfig,
     max_connections: u32,
     connection_name: &str,
-) -> Result<(AnyPool, MySqlPool)> {
+) -> Result<MySqlPool> {
     let options = build_mysql_connect_options(cfg)?;
-    let dsn = options.to_url_lossy().to_string();
-
-    let pool = AnyPoolOptions::new()
-        .max_connections(max_connections)
-        .min_connections(0)
-        .connect(&dsn)
-        .await
-        .with_context(|| format!("connect {}", connection_name))?;
-
-    validate_connection_access(&pool)
-        .await
-        .with_context(|| format!("validate {}", connection_name))?;
 
     let mysql_pool = MySqlPoolOptions::new()
         .max_connections(max_connections)
@@ -354,7 +346,11 @@ async fn connect_mysql_pools(
         .await
         .with_context(|| format!("connect mysql {}", connection_name))?;
 
-    Ok((pool, mysql_pool))
+    validate_mysql_connection_access(&mysql_pool)
+        .await
+        .with_context(|| format!("validate {}", connection_name))?;
+
+    Ok(mysql_pool)
 }
 
 fn build_mysql_connect_options(cfg: &ConnectionConfig) -> Result<MySqlConnectOptions> {
@@ -362,9 +358,12 @@ fn build_mysql_connect_options(cfg: &ConnectionConfig) -> Result<MySqlConnectOpt
     let mut options = MySqlConnectOptions::new()
         .host(&cfg.host)
         .port(port)
-        .database(&cfg.database)
         .username(&cfg.username)
         .password(&cfg.password);
+    let database = cfg.database.trim();
+    if !database.is_empty() {
+        options = options.database(database);
+    }
 
     let ssl_ca_path = resolve_ssl_ca_path(cfg.ssl_ca_path.trim())?;
     if cfg.uses_aws_iam_auth() {
@@ -393,10 +392,7 @@ fn resolve_ssl_ca_path(raw: &str) -> Result<Option<String>> {
 
     let expanded = expand_home_dir(raw)?;
     if !expanded.is_file() {
-        return Err(anyhow!(
-            "TLS CA bundle not found at {}",
-            expanded.display()
-        ));
+        return Err(anyhow!("TLS CA bundle not found at {}", expanded.display()));
     }
 
     Ok(Some(expanded.to_string_lossy().to_string()))
@@ -421,6 +417,17 @@ fn max_connections_for(cfg: &ConnectionConfig) -> u32 {
 }
 
 async fn validate_connection_access(pool: &AnyPool) -> Result<()> {
+    let probe: i64 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(pool)
+        .await
+        .context("run validation query")?;
+    if probe != 1 {
+        return Err(anyhow!("validation query returned unexpected result"));
+    }
+    Ok(())
+}
+
+async fn validate_mysql_connection_access(pool: &MySqlPool) -> Result<()> {
     let probe: i64 = sqlx::query_scalar("SELECT 1")
         .fetch_one(pool)
         .await
@@ -505,8 +512,8 @@ mod tests {
         validate_connection_config,
     };
     use crate::models::ConnectionConfig;
-    use sqlx::mysql::MySqlSslMode;
     use sqlx::any::AnyPoolOptions;
+    use sqlx::mysql::MySqlSslMode;
 
     #[test]
     fn sqlite_requires_database_path() {
@@ -550,6 +557,43 @@ mod tests {
     }
 
     #[test]
+    fn mysql_password_auth_allows_empty_database() {
+        let cfg = ConnectionConfig {
+            driver: "mysql".to_string(),
+            host: "localhost".to_string(),
+            port: 3306,
+            username: "app_user".to_string(),
+            password: "secret".to_string(),
+            ..ConnectionConfig::default()
+        };
+
+        validate_connection_config(&cfg).expect("database should be optional for password auth");
+        let dsn = build_dsn(&cfg).expect("dsn should build without database");
+        assert!(dsn.starts_with("mysql://app_user:"));
+        assert!(!dsn.contains("@localhost:3306/"));
+    }
+
+    #[test]
+    fn mysql_iam_auth_allows_empty_database() {
+        let cfg = ConnectionConfig {
+            driver: "mysql".to_string(),
+            host: "db.example.eu-west-1.rds.amazonaws.com".to_string(),
+            port: 3306,
+            username: "app_user".to_string(),
+            auth_mode: "awsIam".to_string(),
+            aws_region: "eu-west-1".to_string(),
+            ..ConnectionConfig::default()
+        };
+
+        validate_connection_config(&cfg).expect("database should be optional for IAM auth");
+        let options =
+            build_mysql_connect_options(&cfg).expect("options should build without database");
+        assert_eq!(options.get_host(), cfg.host);
+        assert!(options.get_database().is_none());
+        assert!(options.get_socket().is_none());
+    }
+
+    #[test]
     fn mysql_iam_enforces_strict_tls() {
         let cfg = ConnectionConfig {
             driver: "mysql".to_string(),
@@ -564,8 +608,13 @@ mod tests {
         };
 
         let options = build_mysql_connect_options(&cfg).expect("mysql options should build");
-        assert!(matches!(options.get_ssl_mode(), MySqlSslMode::VerifyIdentity));
-        assert!(build_dsn(&cfg).expect("dsn should build").contains("ssl-mode=VERIFY_IDENTITY"));
+        assert!(matches!(
+            options.get_ssl_mode(),
+            MySqlSslMode::VerifyIdentity
+        ));
+        assert!(build_dsn(&cfg)
+            .expect("dsn should build")
+            .contains("ssl-mode=VERIFY_IDENTITY"));
     }
 
     #[tokio::test]

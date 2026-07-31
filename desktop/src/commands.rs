@@ -26,14 +26,7 @@ fn command_err(err: impl Into<anyhow::Error>) -> String {
 }
 
 pub async fn save_and_connect(state: Arc<AppState>, cfg: ConnectionConfig) -> CommandResult<()> {
-    let connect_cfg = resolve_connection_password(state.clone(), cfg.clone())
-        .await
-        .map_err(command_err)?;
-    state
-        .connections
-        .connect(connect_cfg)
-        .await
-        .map_err(command_err)?;
+    let _ = state.connections.disconnect(&cfg.id).await;
     let store = state.store().await.map_err(command_err)?;
     store.save_connection(&cfg).await.map_err(command_err)?;
     Ok(())
@@ -776,6 +769,16 @@ pub async fn get_table_primary_keys(
     schema_name: String,
     table_name: String,
 ) -> CommandResult<Vec<String>> {
+    if driver == "mysql" {
+        let pool = state
+            .get_mysql_pool_or_reconnect(&conn_id)
+            .await
+            .map_err(command_err)?;
+        return schema::get_mysql_primary_keys(&pool, &schema_name, &table_name)
+            .await
+            .map_err(command_err);
+    }
+
     let pool = state
         .get_pool_or_reconnect(&conn_id)
         .await
@@ -786,12 +789,20 @@ pub async fn get_table_primary_keys(
 }
 
 pub async fn get_schema(state: Arc<AppState>, conn_id: String) -> CommandResult<SchemaTree> {
-    let pool = state
-        .get_pool_or_reconnect(&conn_id)
-        .await
-        .map_err(command_err)?;
     let cfg = state
         .get_config_or_saved(&conn_id)
+        .await
+        .map_err(command_err)?;
+    if cfg.driver == "mysql" {
+        let pool = state
+            .get_mysql_pool_or_reconnect(&conn_id)
+            .await
+            .map_err(command_err)?;
+        return schema::get_mysql_schema(&pool).await.map_err(command_err);
+    }
+
+    let pool = state
+        .get_pool_or_reconnect(&conn_id)
         .await
         .map_err(command_err)?;
     if cfg.driver == "postgres" && cfg.database.trim().is_empty() {

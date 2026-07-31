@@ -76,7 +76,11 @@ impl AppState {
     }
 
     async fn refresh_aws_iam_connection_if_needed(&self, conn_id: &str) -> Result<()> {
-        if !self.connections.should_refresh_iam_connection(conn_id).await {
+        if !self
+            .connections
+            .should_refresh_iam_connection(conn_id)
+            .await
+        {
             return Ok(());
         }
 

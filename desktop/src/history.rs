@@ -216,7 +216,7 @@ impl HistoryStore {
                 aws_region, aws_profile, ssl_ca_path,
                 use_kube_port_forward, kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, driver=excluded.driver, tab_color=excluded.tab_color,
                 tab_text_black=excluded.tab_text_black, host=excluded.host, port=excluded.port,
@@ -590,4 +590,61 @@ fn chrono_like_now() -> String {
         .map(|d| d.as_secs())
         .unwrap_or_default();
     seconds.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HistoryStore;
+    use crate::models::ConnectionConfig;
+
+    fn temp_history_path(test_name: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "multidb-{test_name}-{}-{}.db",
+            std::process::id(),
+            super::chrono_like_now()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    #[tokio::test]
+    async fn save_connection_persists_all_connection_columns() {
+        let path = temp_history_path("save-connection-columns");
+        let store = HistoryStore::open(&path)
+            .await
+            .expect("history store should open");
+
+        let cfg = ConnectionConfig {
+            id: "conn-1".to_string(),
+            name: "Saved Broken Live".to_string(),
+            driver: "mysql".to_string(),
+            tab_color: "#112233".to_string(),
+            tab_text_black: true,
+            host: "does-not-exist.invalid".to_string(),
+            port: 3306,
+            username: "tails".to_string(),
+            auth_mode: "awsIam".to_string(),
+            database: String::new(),
+            aws_region: "eu-west-1".to_string(),
+            aws_profile: "production".to_string(),
+            ssl_ca_path: "/tmp/rds-ca.pem".to_string(),
+            kube_local_port: 13306,
+            kube_remote_port: 3306,
+            ..ConnectionConfig::default()
+        };
+
+        store
+            .save_connection(&cfg)
+            .await
+            .expect("save connection should match saved_connections columns");
+
+        let saved = store
+            .list_saved_connections()
+            .await
+            .expect("saved connections should load");
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].name, cfg.name);
+        assert_eq!(saved[0].kube_remote_port, cfg.kube_remote_port);
+
+        let _ = std::fs::remove_file(path);
+    }
 }

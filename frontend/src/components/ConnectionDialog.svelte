@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { showConnectionDialog, editingConnection, activeConnections, selectedConnId, statusMessage, tabs, refreshConnectionSchema, activeServerGroupId, addConnectionToGroup } from '../stores/appStore';
+  import { showConnectionDialog, editingConnection, activeConnections, selectedConnId, statusMessage, tabs, activeServerGroupId, addConnectionToGroup } from '../stores/appStore';
   import type { ConnectionConfig } from '../stores/appStore';
   import { SaveAndConnect, SelectSqliteFile, TestConnection } from '../../desktop/gen/main/App';
 
@@ -140,7 +140,6 @@
     if (form.driver !== 'sqlite') {
       if (!form.host.trim()) return 'Host is required';
       if (!form.username.trim()) return 'Username is required';
-      if (form.driver === 'mysql' && !form.database.trim()) return 'Database is required';
     }
     if (awsIamSelected) {
       if (!form.awsRegion.trim()) return 'AWS region is required for IAM authentication';
@@ -239,8 +238,7 @@
       if (!$editingConnection && $activeServerGroupId) {
         addConnectionToGroup(form.id, $activeServerGroupId);
       }
-      statusMessage.set(`Connected to ${form.name}`);
-      if (shouldRefreshSchema) void refreshConnectionSchema(form.id);
+      statusMessage.set(`Saved ${form.name}`);
       showConnectionDialog.set(false);
     } catch (e: any) {
       testError = String(e);
@@ -369,11 +367,11 @@
       </div>
       {/if}
       <div class="form-row">
-        <label>Database
+        <label>Database (optional)
           <input
             type="text"
             bind:value={form.database}
-            placeholder={form.driver === 'postgres' ? 'Optional (leave blank to browse all databases)' : 'my_db'}
+            placeholder="Optional (leave blank to browse all databases)"
           />
         </label>
       </div>
@@ -438,7 +436,7 @@
         {testing ? 'Testing…' : 'Test Connection'}
       </button>
       <button class="btn-primary" on:click={handleSave} disabled={saving}>
-        {saving ? 'Saving…' : 'Save & Connect'}
+        {saving ? 'Saving…' : 'Save'}
       </button>
     </div>
   </div>

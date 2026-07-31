@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
+    (window as any).__commands = [];
     const responseByCommand: Record<string, unknown> = {
       list_saved_connections: [],
       get_saved_queries: [],
@@ -18,6 +19,7 @@ test.beforeEach(async ({ page }) => {
         } catch {
           return;
         }
+        (window as any).__commands.push(message.command);
         const payload = Object.prototype.hasOwnProperty.call(responseByCommand, message.command)
           ? responseByCommand[message.command]
           : null;
@@ -67,4 +69,43 @@ test('Authentication toggle shows and hides IAM fields', async ({ page }) => {
   await expect(dialog.getByLabel('AWS Region')).toHaveCount(0);
   await expect(dialog.getByLabel('AWS Profile')).toHaveCount(0);
   await expect(dialog.getByLabel('TLS CA Bundle Path')).toHaveCount(0);
+});
+
+test('IAM connection can be tested without a database', async ({ page }) => {
+  await page.goto('/');
+
+  await page.locator('.navigator .nav-header .icon-btn.header-icon[title="Add"]').click();
+  await page.getByRole('menuitem', { name: 'New Connection' }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Connection Manager' });
+  await dialog.getByLabel('Authentication').selectOption('awsIam');
+  await dialog.getByLabel('Host').fill('db.example.eu-west-1.rds.amazonaws.com');
+  await dialog.getByLabel('Database User').fill('app_user');
+  await dialog.getByLabel('AWS Region').fill('eu-west-1');
+
+  const databaseInput = dialog.getByLabel('Database (optional)');
+  await expect(databaseInput).toHaveValue('');
+  await dialog.getByRole('button', { name: 'Test Connection' }).click();
+
+  await expect(dialog.getByText('Connection successful!')).toBeVisible();
+});
+
+test('saving a connection does not test or connect to the database', async ({ page }) => {
+  await page.goto('/');
+
+  await page.locator('.navigator .nav-header .icon-btn.header-icon[title="Add"]').click();
+  await page.getByRole('menuitem', { name: 'New Connection' }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Connection Manager' });
+  await dialog.getByLabel('Connection Name').fill('Broken Live');
+  await dialog.getByLabel('Host').fill('does-not-exist.invalid');
+  await dialog.getByLabel('Username').fill('tails');
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('.navigator .node-name', { hasText: 'Broken Live' })).toBeVisible();
+
+  const commands = await page.evaluate(() => (window as any).__commands);
+  expect(commands).toContain('save_and_connect');
+  expect(commands).not.toContain('test_connection');
 });
