@@ -31,6 +31,9 @@ pub fn run() -> Result<()> {
     let profiler = StartupProfiler::from_env();
     profiler.mark("run_start");
 
+    install_rustls_crypto_provider()?;
+    profiler.mark("rustls_crypto_provider_installed");
+
     install_platform_edit_menu();
     profiler.mark("platform_edit_menu_installed");
 
@@ -365,6 +368,14 @@ fn build_runtime() -> tokio::runtime::Runtime {
         .thread_name("multidb-worker")
         .build()
         .expect("failed to start async runtime")
+}
+
+fn install_rustls_crypto_provider() -> Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!(
+            "failed to install rustls aws-lc crypto provider; TLS connections cannot be established"
+        ))
 }
 
 fn app_icon() -> Option<Icon> {
