@@ -1232,6 +1232,9 @@
   .section-label.schema-node { color: var(--text); font-size: calc(13px * var(--app-font-scale)); }
   .count { font-weight: 400; opacity: 0.7; }
 
+  .table-node {
+    margin-left: 16px;
+  }
   .table-label {
     display: flex; align-items: center; gap: 4px;
     padding: 3px 8px; cursor: pointer; user-select: none;
