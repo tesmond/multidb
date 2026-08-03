@@ -754,34 +754,32 @@
                           </div>
                           {#if hasTableFilter || expandedTables[tablesKey]}
                             {#each filteredPgTables as table}
-                              <div class="table-node">
-                                <div
-                                  class="table-label"
-                                  on:click={() => toggleTable(`${conn.config.id}-${pgSchema.name}-t-${table.name}`)}
-                                  on:contextmenu={e => openTableContextMenu(e, conn.config.id, table.name, pgSchema.name)}
-                                  role="treeitem" aria-selected={false}
-                                  tabindex="0"
-                                  on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-${pgSchema.name}-t-${table.name}`)}
-                                >
-                                  <span class="chevron">{expandedTables[`${conn.config.id}-${pgSchema.name}-t-${table.name}`] ? '▾' : '▸'}</span>
-                                  <span class="table-icon">📋</span>
-                                  <span class="node-name">{table.name}</span>
-                                  {#if formatBytes(table.sizeBytes)}
-                                    <span class="size-label">{formatBytes(table.sizeBytes)}</span>
-                                  {/if}
-                                </div>
-                                {#if expandedTables[`${conn.config.id}-${pgSchema.name}-t-${table.name}`]}
-                                  <div class="col-list">
-                                    {#each table.columns ?? [] as col}
-                                      <div class="col-row">
-                                        <span class="col-key" title={col.key}>{col.key === 'PRI' ? '🔑' : '·'}</span>
-                                        <span class="col-name">{col.name}</span>
-                                        <span class="col-type">{col.type}</span>
-                                      </div>
-                                    {/each}
-                                  </div>
+                              <div
+                                class="table-label"
+                                on:click={() => toggleTable(`${conn.config.id}-${pgSchema.name}-t-${table.name}`)}
+                                on:contextmenu={e => openTableContextMenu(e, conn.config.id, table.name, pgSchema.name)}
+                                role="treeitem" aria-selected={false}
+                                tabindex="0"
+                                on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-${pgSchema.name}-t-${table.name}`)}
+                              >
+                                <span class="chevron">{expandedTables[`${conn.config.id}-${pgSchema.name}-t-${table.name}`] ? '▾' : '▸'}</span>
+                                <span class="table-icon">📋</span>
+                                <span class="node-name">{table.name}</span>
+                                {#if formatBytes(table.sizeBytes)}
+                                  <span class="size-label">{formatBytes(table.sizeBytes)}</span>
                                 {/if}
                               </div>
+                              {#if expandedTables[`${conn.config.id}-${pgSchema.name}-t-${table.name}`]}
+                                <div class="col-list">
+                                  {#each table.columns ?? [] as col}
+                                    <div class="col-row">
+                                      <span class="col-key" title={col.key}>{col.key === 'PRI' ? '🔑' : '·'}</span>
+                                      <span class="col-name">{col.name}</span>
+                                      <span class="col-type">{col.type}</span>
+                                    </div>
+                                  {/each}
+                                </div>
+                              {/if}
                             {/each}
                           {/if}
                         </div>
@@ -854,34 +852,32 @@
                 </div>
                 {#if hasTableFilter || expandedTables[tablesKey]}
                   {#each filteredTables as table}
-                    <div class="table-node">
-                      <div
-                        class="table-label"
-                        on:click={() => toggleTable(`${conn.config.id}-t-${table.name}`)}
-                        on:contextmenu={e => openTableContextMenu(e, conn.config.id, table.name)}
-                        role="treeitem" aria-selected={false}
-                        tabindex="0"
-                        on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-t-${table.name}`)}
-                      >
-                        <span class="chevron">{expandedTables[`${conn.config.id}-t-${table.name}`] ? '▾' : '▸'}</span>
-                        <span class="table-icon">📋</span>
-                        <span class="node-name">{table.name}</span>
-                        {#if formatBytes(table.sizeBytes)}
-                          <span class="size-label">{formatBytes(table.sizeBytes)}</span>
-                        {/if}
-                      </div>
-                      {#if expandedTables[`${conn.config.id}-t-${table.name}`]}
-                        <div class="col-list">
-                          {#each table.columns ?? [] as col}
-                            <div class="col-row">
-                              <span class="col-key" title={col.key}>{col.key === 'PRI' ? '🔑' : '·'}</span>
-                              <span class="col-name">{col.name}</span>
-                              <span class="col-type">{col.type}</span>
-                            </div>
-                          {/each}
-                        </div>
+                    <div
+                      class="table-label"
+                      on:click={() => toggleTable(`${conn.config.id}-t-${table.name}`)}
+                      on:contextmenu={e => openTableContextMenu(e, conn.config.id, table.name)}
+                      role="treeitem" aria-selected={false}
+                      tabindex="0"
+                      on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-t-${table.name}`)}
+                    >
+                      <span class="chevron">{expandedTables[`${conn.config.id}-t-${table.name}`] ? '▾' : '▸'}</span>
+                      <span class="table-icon">📋</span>
+                      <span class="node-name">{table.name}</span>
+                      {#if formatBytes(table.sizeBytes)}
+                        <span class="size-label">{formatBytes(table.sizeBytes)}</span>
                       {/if}
                     </div>
+                    {#if expandedTables[`${conn.config.id}-t-${table.name}`]}
+                      <div class="col-list">
+                        {#each table.columns ?? [] as col}
+                          <div class="col-row">
+                            <span class="col-key" title={col.key}>{col.key === 'PRI' ? '🔑' : '·'}</span>
+                            <span class="col-name">{col.name}</span>
+                            <span class="col-type">{col.type}</span>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
                   {/each}
                 {/if}
               </div>
@@ -1232,18 +1228,16 @@
   .section-label.schema-node { color: var(--text); font-size: calc(13px * var(--app-font-scale)); }
   .count { font-weight: 400; opacity: 0.7; }
 
-  .table-node {
-    margin-left: 16px;
-  }
   .table-label {
     display: flex; align-items: center; gap: 4px;
+    margin-left: 16px;
     padding: 3px 8px; cursor: pointer; user-select: none;
     font-size: calc(12px * var(--app-font-scale)); color: var(--text);
   }
   .table-label:hover { background: var(--bg-hover); }
   .table-label.leaf { padding-left: 24px; }
 
-  .col-list { padding-left: 24px; }
+  .col-list { margin-left: 16px; padding-left: 24px; }
   .col-row {
     display: flex; align-items: center; gap: 6px;
     padding: 2px 8px; font-size: calc(11px * var(--app-font-scale)); color: var(--text-muted);
