@@ -10,8 +10,13 @@ export namespace connections {
 	    port: number;
 	    username: string;
 	    password: string;
+	    hasSavedPassword: boolean;
+	    authMode: string;
 	    database: string;
 	    dsn: string;
+	    awsRegion: string;
+	    awsProfile: string;
+	    sslCaPath: string;
 	    useKubePortForward: boolean;
 	    kubeContext: string;
 	    kubeNamespace: string;
@@ -34,8 +39,13 @@ export namespace connections {
 	        this.port = source["port"];
 	        this.username = source["username"];
 	        this.password = source["password"];
+	        this.hasSavedPassword = source["hasSavedPassword"];
+	        this.authMode = source["authMode"];
 	        this.database = source["database"];
 	        this.dsn = source["dsn"];
+	        this.awsRegion = source["awsRegion"];
+	        this.awsProfile = source["awsProfile"];
+	        this.sslCaPath = source["sslCaPath"];
 	        this.useKubePortForward = source["useKubePortForward"];
 	        this.kubeContext = source["kubeContext"];
 	        this.kubeNamespace = source["kubeNamespace"];

@@ -19,8 +19,8 @@
  *       • free-standing names     (schemas, tables, columns) when no dot is
  *                                  present but the cursor is on a word
  *
- * No extra npm dependencies are needed – we re-use the @codemirror/* packages
- * already pulled in by @codemirror/lang-sql and codemirror.
+ * Uses direct @codemirror/* dependencies so editor modules do not rely on
+ * transitive package resolution.
  */
 
 import type { CompletionContext, CompletionResult, Completion } from '@codemirror/autocomplete';
@@ -39,7 +39,7 @@ export interface TableInfo {
   isView?: boolean;
 }
 
-export interface SchemaInfo {
+interface SchemaInfo {
   name: string;       // e.g. 'public' (Postgres), 'mydb' (MySQL)
   tables: TableInfo[];
 }

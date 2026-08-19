@@ -1,6 +1,22 @@
 const callbacks = new Map();
 const listeners = new Map();
 let nextId = 1;
+const DEFAULT_IPC_TIMEOUT_MS = 60000;
+const TEST_CONNECTION_TIMEOUT_MS = 70000;
+
+function timeoutForCommand(command) {
+  switch (command) {
+    case "test_connection":
+      // Allow backend connection diagnostics to finish and return a specific
+      // stage failure instead of masking them with a generic IPC timeout.
+      return TEST_CONNECTION_TIMEOUT_MS;
+    case "execute_query":
+    case "execute_query_streamed":
+      return 0;
+    default:
+      return DEFAULT_IPC_TIMEOUT_MS;
+  }
+}
 
 function ensureHost() {
   if (!window.ipc || typeof window.ipc.postMessage !== "function") {
@@ -12,7 +28,23 @@ export function invoke(command, args = {}) {
   ensureHost();
   const id = String(nextId++);
   return new Promise((resolve, reject) => {
-    callbacks.set(id, { resolve, reject });
+    const timeoutMs = timeoutForCommand(command);
+    const timeoutId = timeoutMs > 0
+      ? window.setTimeout(() => {
+          const callback = callbacks.get(id);
+          if (!callback) return;
+          callbacks.delete(id);
+          callback.reject(
+            new Error(`IPC timeout after ${timeoutMs / 1000}s for command ${command}`),
+          );
+        }, timeoutMs)
+      : null;
+
+    callbacks.set(id, {
+      resolve,
+      reject,
+      timeoutId,
+    });
     window.ipc.postMessage(JSON.stringify({ id, command, args }));
   });
 }
@@ -35,12 +67,18 @@ window.__MULTIDB__ = {
     const callback = callbacks.get(String(id));
     if (!callback) return;
     callbacks.delete(String(id));
+    if (callback.timeoutId !== null) {
+      window.clearTimeout(callback.timeoutId);
+    }
     callback.resolve(payload);
   },
   reject(id, error) {
     const callback = callbacks.get(String(id));
     if (!callback) return;
     callbacks.delete(String(id));
+    if (callback.timeoutId !== null) {
+      window.clearTimeout(callback.timeoutId);
+    }
     callback.reject(error);
   },
   emit(eventName, payload) {

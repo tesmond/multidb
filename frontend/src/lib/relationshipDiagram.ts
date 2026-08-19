@@ -1,9 +1,9 @@
 import type { schema } from '../../desktop/gen/models';
 
 export type SchemaTree = schema.SchemaTree;
-export type Relationship = schema.Relationship;
+type Relationship = schema.Relationship;
 
-export interface DiagramColumnNode {
+interface DiagramColumnNode {
   id: string;
   name: string;
   type: string;
@@ -39,7 +39,7 @@ export interface DiagramGraph {
   edges: DiagramRelationshipEdge[];
 }
 
-export interface DiagramPoint {
+interface DiagramPoint {
   x: number;
   y: number;
 }

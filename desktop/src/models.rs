@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+fn default_auth_mode() -> String {
+    "password".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionConfig {
     pub id: String,
@@ -15,14 +19,57 @@ pub struct ConnectionConfig {
     pub password: String,
     #[serde(default)]
     pub has_saved_password: bool,
+    #[serde(default = "default_auth_mode")]
+    pub auth_mode: String,
     pub database: String,
     pub dsn: String,
+    #[serde(default)]
+    pub aws_region: String,
+    #[serde(default)]
+    pub aws_profile: String,
+    #[serde(default)]
+    pub ssl_ca_path: String,
     pub use_kube_port_forward: bool,
     pub kube_context: String,
     pub kube_namespace: String,
     pub kube_resource: String,
     pub kube_local_port: i32,
     pub kube_remote_port: i32,
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            driver: String::new(),
+            tab_color: String::new(),
+            tab_text_black: false,
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            has_saved_password: false,
+            auth_mode: default_auth_mode(),
+            database: String::new(),
+            dsn: String::new(),
+            aws_region: String::new(),
+            aws_profile: String::new(),
+            ssl_ca_path: String::new(),
+            use_kube_port_forward: false,
+            kube_context: String::new(),
+            kube_namespace: String::new(),
+            kube_resource: String::new(),
+            kube_local_port: 0,
+            kube_remote_port: 0,
+        }
+    }
+}
+
+impl ConnectionConfig {
+    pub fn uses_aws_iam_auth(&self) -> bool {
+        self.driver == "mysql" && self.auth_mode == "awsIam"
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

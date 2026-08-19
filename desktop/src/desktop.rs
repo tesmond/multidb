@@ -1,6 +1,7 @@
 use crate::{
     commands::EventEmitter,
     ipc::{self, IpcRequest, UserEvent},
+    ipc_diagnostics,
     startup_profile::StartupProfiler,
     state::AppState,
 };
@@ -9,6 +10,7 @@ use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
+    time::Duration,
 };
 use tao::{
     dpi::LogicalSize,
@@ -22,11 +24,15 @@ use wry::{
 };
 
 const APP_URL: &str = "multidb://localhost/index.html";
+const TEST_CONNECTION_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(65);
 include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
 
 pub fn run() -> Result<()> {
     let profiler = StartupProfiler::from_env();
     profiler.mark("run_start");
+
+    install_rustls_crypto_provider()?;
+    profiler.mark("rustls_crypto_provider_installed");
 
     install_platform_edit_menu();
     profiler.mark("platform_edit_menu_installed");
@@ -131,11 +137,60 @@ pub fn run() -> Result<()> {
 
             runtime.spawn(async move {
                 let id = message.id;
-                let script =
-                    match ipc::dispatch(state, emitter, message.command, message.args).await {
-                        Ok(value) => ipc::resolve_script(&id, &value),
-                        Err(err) => ipc::reject_script(&id, &err),
-                    };
+                let command = message.command;
+                let args = message.args;
+                let dispatch_command = command.clone();
+                let request_id_for_scope = id.clone();
+
+                let mut dispatch_task = tokio::spawn(async move {
+                    if dispatch_command == "test_connection" {
+                        ipc_diagnostics::with_request_context(request_id_for_scope, async move {
+                            ipc::dispatch(state, emitter, dispatch_command, args).await
+                        })
+                        .await
+                    } else {
+                        ipc::dispatch(state, emitter, dispatch_command, args).await
+                    }
+                });
+
+                enum DispatchOutcome {
+                    Completed(Result<Result<Value, String>, tokio::task::JoinError>),
+                    TimedOut,
+                }
+
+                let dispatch_outcome = if command == "test_connection" {
+                    tokio::select! {
+                        result = &mut dispatch_task => DispatchOutcome::Completed(result),
+                        _ = tokio::time::sleep(TEST_CONNECTION_WATCHDOG_TIMEOUT) => {
+                            dispatch_task.abort();
+                            DispatchOutcome::TimedOut
+                        }
+                    }
+                } else {
+                    DispatchOutcome::Completed(dispatch_task.await)
+                };
+
+                let script = match dispatch_outcome {
+                    DispatchOutcome::Completed(Ok(Ok(value))) => ipc::resolve_script(&id, &value),
+                    DispatchOutcome::Completed(Ok(Err(err))) => ipc::reject_script(&id, &err),
+                    DispatchOutcome::TimedOut => {
+                        let stage = ipc_diagnostics::get_test_connection_stage(&id)
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let checks = ipc_diagnostics::recommended_checks_for_stage(&stage);
+                        ipc::reject_script(
+                            &id,
+                            &format!(
+                                "test_connection timed out in backend watchdog after {}s (last stage: {stage}). Recommended next checks: {checks}",
+                                TEST_CONNECTION_WATCHDOG_TIMEOUT.as_secs()
+                            ),
+                        )
+                    }
+                    DispatchOutcome::Completed(Err(join_err)) => ipc::reject_script(
+                        &id,
+                        &format!("backend command task failed: {join_err}"),
+                    ),
+                };
+                ipc_diagnostics::clear_test_connection_stage(&id);
                 let _ = command_proxy.send_event(UserEvent::Script(script));
             });
         })
@@ -314,6 +369,16 @@ fn build_runtime() -> tokio::runtime::Runtime {
         .thread_name("multidb-worker")
         .build()
         .expect("failed to start async runtime")
+}
+
+fn install_rustls_crypto_provider() -> Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| {
+            anyhow::anyhow!(
+            "failed to install rustls aws-lc crypto provider; TLS connections cannot be established"
+        )
+        })
 }
 
 fn app_icon() -> Option<Icon> {

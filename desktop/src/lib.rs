@@ -4,6 +4,7 @@ mod connections;
 mod desktop;
 mod history;
 mod ipc;
+mod ipc_diagnostics;
 mod models;
 mod password_vault;
 mod queries;
