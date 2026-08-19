@@ -24,7 +24,7 @@ use wry::{
 };
 
 const APP_URL: &str = "multidb://localhost/index.html";
-const TEST_CONNECTION_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(55);
+const TEST_CONNECTION_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(65);
 include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
 
 pub fn run() -> Result<()> {
@@ -180,7 +180,8 @@ pub fn run() -> Result<()> {
                         ipc::reject_script(
                             &id,
                             &format!(
-                                "test_connection timed out in backend watchdog after 55s (last stage: {stage}). Recommended next checks: {checks}"
+                                "test_connection timed out in backend watchdog after {}s (last stage: {stage}). Recommended next checks: {checks}",
+                                TEST_CONNECTION_WATCHDOG_TIMEOUT.as_secs()
                             ),
                         )
                     }
@@ -373,9 +374,11 @@ fn build_runtime() -> tokio::runtime::Runtime {
 fn install_rustls_crypto_provider() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
-        .map_err(|_| anyhow::anyhow!(
+        .map_err(|_| {
+            anyhow::anyhow!(
             "failed to install rustls aws-lc crypto provider; TLS connections cannot be established"
-        ))
+        )
+        })
 }
 
 fn app_icon() -> Option<Icon> {

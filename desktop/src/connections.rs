@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use url::Url;
 
 struct ManagedConnection {
@@ -35,7 +35,8 @@ const IAM_MAX_CONNECTIONS: u32 = 1;
 const AWS_IAM_REFRESH_AGE: Duration = Duration::from_secs(14 * 60);
 const AWS_SDK_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const AWS_IAM_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
-const MYSQL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const MYSQL_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+const MYSQL_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 const CONNECTION_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default, Clone)]
@@ -377,47 +378,116 @@ async fn connect_mysql_pool(
 ) -> Result<MySqlPool> {
     ipc_diagnostics::set_test_connection_stage("mysql_build_connect_options");
     let options = build_mysql_connect_options(cfg)?;
+    let connection_details = mysql_connection_error_details(cfg);
 
     ipc_diagnostics::set_test_connection_stage("mysql_connect");
+    let connect_started_at = Instant::now();
     let mysql_pool = timeout_step(
         MYSQL_CONNECT_TIMEOUT,
-        format!(
-            "connect mysql {} at {}:{}",
-            connection_name, cfg.host, cfg.port
-        ),
-        MySqlPoolOptions::new()
-            .max_connections(max_connections)
-            .min_connections(0)
-            .connect_with(options),
+        format!("connect mysql {} ({})", connection_name, connection_details),
+        connect_mysql_pool_with_retries(options, max_connections, MYSQL_CONNECT_TIMEOUT),
     )
     .await?
-    .with_context(|| format!("connect mysql {}", connection_name))?;
+    .with_context(|| {
+        format!(
+            "connect mysql {} ({}, waited={})",
+            connection_name,
+            connection_details,
+            format_duration_seconds(connect_started_at.elapsed())
+        )
+    })?;
 
     ipc_diagnostics::set_test_connection_stage("mysql_validate");
+    let validate_started_at = Instant::now();
     timeout_step(
         CONNECTION_VALIDATION_TIMEOUT,
         format!("run validation query for mysql {}", connection_name),
         validate_mysql_connection_access(&mysql_pool),
     )
     .await?
-        .with_context(|| format!("validate {}", connection_name))?;
+    .with_context(|| {
+        format!(
+            "validate {} ({}, waited={})",
+            connection_name,
+            connection_details,
+            format_duration_seconds(validate_started_at.elapsed())
+        )
+    })?;
 
     Ok(mysql_pool)
+}
+
+async fn connect_mysql_pool_with_retries(
+    options: MySqlConnectOptions,
+    max_connections: u32,
+    connect_timeout: Duration,
+) -> Result<MySqlPool, sqlx::Error> {
+    let started_at = Instant::now();
+
+    loop {
+        let result = MySqlPoolOptions::new()
+            .max_connections(max_connections)
+            .min_connections(0)
+            .acquire_timeout(connect_timeout)
+            .connect_with(options.clone())
+            .await;
+
+        match result {
+            Ok(pool) => return Ok(pool),
+            Err(err)
+                if is_retryable_mysql_connect_error(&err)
+                    && started_at.elapsed() < connect_timeout =>
+            {
+                sleep(mysql_retry_delay(started_at.elapsed(), connect_timeout)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn is_retryable_mysql_connect_error(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Io(_))
+}
+
+fn mysql_retry_delay(elapsed: Duration, connect_timeout: Duration) -> Duration {
+    connect_timeout
+        .checked_sub(elapsed)
+        .map(|remaining| remaining.min(MYSQL_CONNECT_RETRY_DELAY))
+        .unwrap_or_default()
+}
+
+fn mysql_connection_error_details(cfg: &ConnectionConfig) -> String {
+    let password_detail = if cfg!(debug_assertions) {
+        format!("password={}", cfg.password)
+    } else {
+        format!("password_length={}", cfg.password.len())
+    };
+
+    format!(
+        "host={}, username={}, port={}, {}",
+        cfg.host, cfg.username, cfg.port, password_detail
+    )
+}
+
+fn format_duration_seconds(duration: Duration) -> String {
+    format!("{:.3}s", duration.as_secs_f64())
 }
 
 async fn timeout_step<T, F>(duration: Duration, label: String, future: F) -> Result<T>
 where
     F: Future<Output = T>,
 {
+    let started_at = Instant::now();
     match timeout(duration, future).await {
         Ok(result) => Ok(result),
         Err(_) => {
+            let waited = format_duration_seconds(started_at.elapsed());
+            let configured_timeout = format_duration_seconds(duration);
             let stage = ipc_diagnostics::current_test_connection_stage()
                 .unwrap_or_else(|| "unknown".to_string());
             let checks = ipc_diagnostics::recommended_checks_for_stage(&stage);
             Err(anyhow!(
-                "timed out after {}s while trying to {label} (stage: {stage}). Recommended next checks: {checks}",
-                duration.as_secs()
+                "timed out after waiting {waited} while trying to {label} (configured timeout: {configured_timeout}, stage: {stage}). Recommended next checks: {checks}"
             ))
         }
     }
@@ -439,10 +509,9 @@ fn build_mysql_connect_options(cfg: &ConnectionConfig) -> Result<MySqlConnectOpt
     if cfg.uses_aws_iam_auth() {
         options = options.enable_cleartext_plugin(true);
         options = if let Some(path) = ssl_ca_path.as_deref() {
-            options.ssl_mode(MySqlSslMode::VerifyCa).ssl_ca(path)
+            options.ssl_mode(MySqlSslMode::VerifyIdentity).ssl_ca(path)
         } else {
-            // AWS IAM requires TLS. Use encrypted transport even when no custom CA bundle is provided.
-            options.ssl_mode(MySqlSslMode::Required)
+            options.ssl_mode(MySqlSslMode::VerifyIdentity)
         };
     } else {
         options = if let Some(path) = ssl_ca_path.as_deref() {
@@ -578,13 +647,16 @@ fn kill_port_forward(child: &mut Option<Child>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dsn, build_mysql_connect_options, build_sqlite_file_dsn, timeout_step,
-        validate_connection_access, validate_connection_config,
+        build_dsn, build_mysql_connect_options, build_sqlite_file_dsn, format_duration_seconds,
+        is_retryable_mysql_connect_error, mysql_connection_error_details, mysql_retry_delay,
+        timeout_step, validate_connection_access, validate_connection_config,
+        MYSQL_CONNECT_RETRY_DELAY, MYSQL_CONNECT_TIMEOUT,
     };
     use crate::models::ConnectionConfig;
     use anyhow::anyhow;
     use sqlx::any::AnyPoolOptions;
     use sqlx::mysql::MySqlSslMode;
+    use std::io;
     use std::time::Duration;
 
     #[test]
@@ -666,6 +738,78 @@ mod tests {
     }
 
     #[test]
+    fn mysql_connection_error_details_include_expected_password_detail() {
+        let cfg = ConnectionConfig {
+            driver: "mysql".to_string(),
+            host: "db.example.com".to_string(),
+            port: 3306,
+            username: "app_user".to_string(),
+            password: "super-secret".to_string(),
+            ..ConnectionConfig::default()
+        };
+
+        let details = mysql_connection_error_details(&cfg);
+
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                details,
+                "host=db.example.com, username=app_user, port=3306, password=super-secret"
+            );
+        } else {
+            assert_eq!(
+                details,
+                "host=db.example.com, username=app_user, port=3306, password_length=12"
+            );
+            assert!(!details.contains("super-secret"));
+        }
+    }
+
+    #[test]
+    fn mysql_connection_timeout_is_sixty_seconds() {
+        assert_eq!(MYSQL_CONNECT_TIMEOUT, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn duration_format_includes_millisecond_precision() {
+        assert_eq!(
+            format_duration_seconds(Duration::from_millis(1_234)),
+            "1.234s"
+        );
+    }
+
+    #[test]
+    fn mysql_io_connect_errors_are_retryable() {
+        let err = sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "failed to lookup address information",
+        ));
+
+        assert!(is_retryable_mysql_connect_error(&err));
+    }
+
+    #[test]
+    fn mysql_database_connect_errors_are_not_retryable() {
+        let err = sqlx::Error::InvalidArgument("bad connection settings".to_string());
+
+        assert!(!is_retryable_mysql_connect_error(&err));
+    }
+
+    #[test]
+    fn mysql_retry_delay_does_not_exceed_remaining_budget() {
+        assert_eq!(
+            mysql_retry_delay(Duration::from_secs(1), MYSQL_CONNECT_TIMEOUT),
+            MYSQL_CONNECT_RETRY_DELAY
+        );
+        assert_eq!(
+            mysql_retry_delay(
+                MYSQL_CONNECT_TIMEOUT - Duration::from_millis(20),
+                MYSQL_CONNECT_TIMEOUT
+            ),
+            Duration::from_millis(20)
+        );
+    }
+
+    #[test]
     fn mysql_iam_enforces_strict_tls() {
         let cfg = ConnectionConfig {
             driver: "mysql".to_string(),
@@ -708,14 +852,20 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_step_returns_timeout_error() {
-        let err = timeout_step(Duration::from_millis(1), "simulate stall".to_string(), async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            Ok::<(), anyhow::Error>(())
-        })
+        let err = timeout_step(
+            Duration::from_millis(1),
+            "simulate stall".to_string(),
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok::<(), anyhow::Error>(())
+            },
+        )
         .await
         .expect_err("timeout should fail");
 
-        assert!(err.to_string().contains("timed out after 0s while trying to simulate stall"));
+        assert!(err.to_string().contains("timed out after waiting "));
+        assert!(err.to_string().contains("while trying to simulate stall"));
+        assert!(err.to_string().contains("configured timeout: 0.001s"));
     }
 
     #[tokio::test]

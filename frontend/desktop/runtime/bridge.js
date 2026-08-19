@@ -1,8 +1,8 @@
 const callbacks = new Map();
 const listeners = new Map();
 let nextId = 1;
-const DEFAULT_IPC_TIMEOUT_MS = 20000;
-const TEST_CONNECTION_TIMEOUT_MS = 60000;
+const DEFAULT_IPC_TIMEOUT_MS = 60000;
+const TEST_CONNECTION_TIMEOUT_MS = 70000;
 
 function timeoutForCommand(command) {
   switch (command) {
