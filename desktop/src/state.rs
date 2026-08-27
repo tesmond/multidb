@@ -5,10 +5,58 @@ use tokio::sync::{Mutex, OnceCell};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
+pub struct ConnectionTestRegistry {
+    tokens: Mutex<HashMap<String, CancellationToken>>,
+}
+
+impl ConnectionTestRegistry {
+    pub async fn register(&self, test_id: &str) -> CancellationToken {
+        self.tokens
+            .lock()
+            .await
+            .entry(test_id.to_string())
+            .or_insert_with(CancellationToken::new)
+            .clone()
+    }
+
+    pub async fn cancel(&self, test_id: &str) {
+        let token = self
+            .tokens
+            .lock()
+            .await
+            .entry(test_id.to_string())
+            .or_insert_with(CancellationToken::new)
+            .clone();
+        token.cancel();
+    }
+
+    pub async fn finish(&self, test_id: &str) {
+        self.tokens.lock().await.remove(test_id);
+    }
+}
+
+#[derive(Default)]
 pub struct AppState {
     pub connections: ConnectionManager,
     pub store: OnceCell<HistoryStore>,
     pub query_cancels: Mutex<HashMap<String, CancellationToken>>,
+    pub connection_tests: ConnectionTestRegistry,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConnectionTestRegistry;
+
+    #[tokio::test]
+    async fn connection_test_registry_remembers_early_cancellation() {
+        let registry = ConnectionTestRegistry::default();
+        registry.cancel("test-1").await;
+
+        let token = registry.register("test-1").await;
+
+        assert!(token.is_cancelled());
+        registry.finish("test-1").await;
+    }
 }
 
 impl AppState {

@@ -30,6 +30,8 @@ pub struct ConnectionConfig {
     #[serde(default)]
     pub ssl_ca_path: String,
     pub use_kube_port_forward: bool,
+    #[serde(default)]
+    pub kubectl_path: String,
     pub kube_context: String,
     pub kube_namespace: String,
     pub kube_resource: String,
@@ -57,6 +59,7 @@ impl Default for ConnectionConfig {
             aws_profile: String::new(),
             ssl_ca_path: String::new(),
             use_kube_port_forward: false,
+            kubectl_path: String::new(),
             kube_context: String::new(),
             kube_namespace: String::new(),
             kube_resource: String::new(),

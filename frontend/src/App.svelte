@@ -230,8 +230,7 @@
     function getTabCustomStyle(connId: string) {
         const cfg = getConnectionConfig(connId);
         if (!cfg?.tabColor) return "";
-        const textColor = cfg.tabTextBlack ? "#000000" : "var(--text)";
-        return `--tab-custom-bg: ${cfg.tabColor}; --tab-custom-text: ${textColor};`;
+        return `--tab-custom-bg: ${cfg.tabColor};`;
     }
 
     // Pane sizes
@@ -699,6 +698,7 @@
         background: var(--bg-surface);
     }
     .tab.has-custom-color {
+        --tab-custom-text: contrast-color(var(--tab-custom-bg));
         background: var(--tab-custom-bg);
         color: var(--tab-custom-text);
     }
@@ -725,6 +725,9 @@
         padding: 2px 4px;
         outline: none;
         min-width: 0;
+    }
+    .tab.has-custom-color .tab-title-input {
+        color: inherit;
     }
     .tab-close {
         color: var(--text-muted);

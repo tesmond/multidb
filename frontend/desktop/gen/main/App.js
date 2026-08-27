@@ -8,6 +8,10 @@ export function CancelQuery(queryId) {
   return invoke("cancel_query", { queryId });
 }
 
+export function CancelTestConnection(testId) {
+  return invoke("cancel_test_connection", { testId });
+}
+
 export function ClearQueryHistory() {
   return invoke("clear_query_history");
 }
@@ -109,8 +113,12 @@ export function SelectSqliteFile() {
   return invoke("select_sqlite_file");
 }
 
-export function TestConnection(cfg) {
-  return invoke("test_connection", { cfg });
+export function SelectKubectlExecutable() {
+  return invoke("select_kubectl_executable");
+}
+
+export function TestConnection(cfg, testId) {
+  return invoke("test_connection", { cfg, testId });
 }
 
 export function TerminateDatabaseConnection(connId, connectionId) {

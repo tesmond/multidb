@@ -19,7 +19,7 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 - Connection management:
   - Save, edit, test, and remove connections
   - Optional Kubernetes port-forward support for database access
-  - Per-connection tab color and optional black tab text
+  - Per-connection tab color with automatic contrasting tab text
   - Connection color swatch shown in the left navigator
 - SQL editor experience:
   - CodeMirror-based SQL editor

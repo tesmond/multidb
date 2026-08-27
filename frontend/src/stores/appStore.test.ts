@@ -21,23 +21,32 @@ let tabs: any;
 let activeTabId: any;
 let activeTab: any;
 let activeConnections: any;
+let serverGroups: any;
+let orderedConnectionOptions: any;
+let selectedConnId: any;
 let statusMessage: any;
 let outputTab: any;
 let openRelationshipDiagramTab: any;
 let showRelationshipDiagramForConnection: any;
+let openQueryTabForConnection: any;
 let backendApp: any;
 
 beforeEach(async () => {
+  localStorage.clear();
   vi.resetModules();
   const mod = await import('./appStore');
   tabs = mod.tabs;
   activeTabId = mod.activeTabId;
   activeTab = mod.activeTab;
   activeConnections = mod.activeConnections;
+  serverGroups = mod.serverGroups;
+  orderedConnectionOptions = mod.orderedConnectionOptions;
+  selectedConnId = mod.selectedConnId;
   statusMessage = mod.statusMessage;
   outputTab = mod.outputTab;
   openRelationshipDiagramTab = mod.openRelationshipDiagramTab;
   showRelationshipDiagramForConnection = mod.showRelationshipDiagramForConnection;
+  openQueryTabForConnection = mod.openQueryTabForConnection;
   backendApp = await import('../../desktop/gen/main/App');
   vi.mocked(backendApp.LoadSchema).mockResolvedValue(null);
   vi.mocked(backendApp.GetSchema).mockResolvedValue({
@@ -86,6 +95,31 @@ describe('tabs store', () => {
     const tab = (get(tabs) as any[]).find((t: any) => t.id === id);
     expect(tab?.sql).toBe('SELECT 1');
     expect(tab?.running).toBe(true);
+  });
+
+  it('opens an empty query tab for a connection and focuses it', () => {
+    activeConnections.set([
+      {
+        config: { id: 'conn-1', name: 'Sales DB' },
+        schema: null,
+        schemaLoading: false,
+        schemaError: null,
+      },
+    ]);
+
+    const openedId = openQueryTabForConnection('conn-1');
+    const openedTab = (get(tabs) as Tab[]).find((tab) => tab.id === openedId);
+
+    expect(openedTab).toEqual(
+      expect.objectContaining({
+        kind: 'sql',
+        connId: 'conn-1',
+        sql: '',
+        title: 'Query',
+      }),
+    );
+    expect(get(activeTabId)).toBe(openedId);
+    expect(get(selectedConnId)).toBe('conn-1');
   });
 
   it('openRelationshipDiagramTab() creates one diagram tab per connection and focuses it', () => {
@@ -234,6 +268,34 @@ describe('activeTab derived store', () => {
 describe('activeConnections store', () => {
   it('starts empty', () => {
     expect(get(activeConnections)).toHaveLength(0);
+  });
+
+  it('lists every connection in navigator order with server-group labels', () => {
+    activeConnections.set([
+      { config: { id: 'conn-1', name: 'Primary' } },
+      { config: { id: 'conn-2', name: 'Analytics' } },
+      { config: { id: 'conn-3', name: 'Replica' } },
+      { config: { id: 'conn-4', name: 'Local' } },
+    ]);
+    serverGroups.set([
+      {
+        id: 'production',
+        title: 'Production',
+        connectionIds: ['conn-3', 'missing', 'conn-1'],
+      },
+      {
+        id: 'reporting',
+        title: 'Reporting',
+        connectionIds: ['conn-2', 'conn-1'],
+      },
+    ]);
+
+    expect(get(orderedConnectionOptions)).toEqual([
+      { value: 'conn-3', label: 'Production - Replica' },
+      { value: 'conn-1', label: 'Production - Primary' },
+      { value: 'conn-2', label: 'Reporting - Analytics' },
+      { value: 'conn-4', label: 'Local' },
+    ]);
   });
 });
 

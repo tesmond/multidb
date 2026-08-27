@@ -10,6 +10,8 @@ export function BackupTable(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function CancelQuery(arg1:string):Promise<void>;
 
+export function CancelTestConnection(arg1:string):Promise<void>;
+
 export function ClearQueryHistory():Promise<void>;
 
 export function ClearQueryHistoryByConnID(arg1:string):Promise<void>;
@@ -58,7 +60,9 @@ export function SelectImportFile(arg1:string):Promise<string>;
 
 export function SelectSqliteFile():Promise<string>;
 
-export function TestConnection(arg1:connections.ConnectionConfig):Promise<void>;
+export function SelectKubectlExecutable():Promise<string>;
+
+export function TestConnection(arg1:connections.ConnectionConfig,arg2:string):Promise<void>;
 
 export function TerminateDatabaseConnection(arg1:string,arg2:string):Promise<void>;
 

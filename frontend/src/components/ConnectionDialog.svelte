@@ -1,10 +1,13 @@
 <script lang="ts">
   import { showConnectionDialog, editingConnection, activeConnections, selectedConnId, statusMessage, tabs, activeServerGroupId, addConnectionToGroup } from '../stores/appStore';
   import type { ConnectionConfig } from '../stores/appStore';
-  import { SaveAndConnect, SelectSqliteFile, TestConnection } from '../../desktop/gen/main/App';
+  import { CancelTestConnection, SaveAndConnect, SelectKubectlExecutable, SelectSqliteFile, TestConnection } from '../../desktop/gen/main/App';
 
   let form: ConnectionConfig = emptyForm();
   let testing = false;
+  let stoppingTest = false;
+  let activeTestId = '';
+  let stopRequested = false;
   let saving = false;
   let testResult = '';
   let testError = '';
@@ -19,7 +22,6 @@
           ...emptyForm(),
           ...$editingConnection,
           tabColor: $editingConnection.tabColor ?? '',
-          tabTextBlack: !!$editingConnection.tabTextBlack,
           hasSavedPassword: !!$editingConnection.hasSavedPassword,
           authMode: isAwsIamMode($editingConnection.authMode)
             ? 'awsIam'
@@ -27,6 +29,7 @@
           awsRegion: $editingConnection.awsRegion ?? '',
           awsProfile: $editingConnection.awsProfile ?? '',
           sslCaPath: $editingConnection.sslCaPath ?? '',
+          kubectlPath: $editingConnection.kubectlPath ?? '',
         }
       : emptyForm();
     testResult = '';
@@ -74,6 +77,7 @@
       awsProfile: '',
       sslCaPath: '',
       useKubePortForward: false,
+      kubectlPath: '',
       kubeContext: '',
       kubeNamespace: '',
       kubeResource: '',
@@ -166,6 +170,17 @@
     }
   }
 
+  async function browseKubectlExecutable() {
+    testResult = '';
+    testError = '';
+    try {
+      const selected = await SelectKubectlExecutable();
+      if (selected) form.kubectlPath = selected;
+    } catch (e: any) {
+      testError = String(e);
+    }
+  }
+
   function connectionTargetChanged(previous: ConnectionConfig | null, next: ConnectionConfig): boolean {
     if (!previous) return true;
     const keys: (keyof ConnectionConfig)[] = [
@@ -181,6 +196,7 @@
       'awsProfile',
       'sslCaPath',
       'useKubePortForward',
+      'kubectlPath',
       'kubeContext',
       'kubeNamespace',
       'kubeResource',
@@ -199,13 +215,33 @@
       return;
     }
     testing = true;
+    stoppingTest = false;
+    stopRequested = false;
+    const testId = crypto.randomUUID();
+    activeTestId = testId;
     try {
-      await TestConnection(form);
+      await TestConnection(form, testId);
       testResult = 'Connection successful!';
     } catch (e: any) {
-      testError = String(e);
+      testError = stopRequested ? 'Connection test cancelled' : String(e);
     } finally {
-      testing = false;
+      if (activeTestId === testId) {
+        activeTestId = '';
+        testing = false;
+        stoppingTest = false;
+      }
+    }
+  }
+
+  async function handleStopTest() {
+    if (!activeTestId || stoppingTest) return;
+    stoppingTest = true;
+    stopRequested = true;
+    try {
+      await CancelTestConnection(activeTestId);
+    } catch (e: any) {
+      testError = String(e);
+      stoppingTest = false;
     }
   }
 
@@ -248,6 +284,7 @@
   }
 
   function close() {
+    if (activeTestId) void CancelTestConnection(activeTestId);
     showConnectionDialog.set(false);
     editingConnection.set(null);
   }
@@ -262,12 +299,10 @@
     </div>
 
     <div class="modal-body">
-      <div class="form-row">
+      <div class="form-row two-col">
         <label>Connection Name
           <input type="text" bind:value={form.name} placeholder="My Database" />
         </label>
-      </div>
-      <div class="form-row tab-color-row">
         <label class="tab-color-label">Tab Colour
           <div class="tab-color-inputs">
             <input
@@ -287,12 +322,9 @@
             <button type="button" class="btn-clear-color" on:click={clearTabColor}>Clear</button>
           </div>
         </label>
-        <label class="checkbox-label tab-black-text-label">
-          <input type="checkbox" bind:checked={form.tabTextBlack} />
-          Black text
-        </label>
       </div>
-      <div class="form-row">
+
+      <div class="form-row two-col driver-row">
         <label>Driver
           <select bind:value={form.driver} on:change={onDriverChange}>
             <option value="mysql">MySQL</option>
@@ -300,18 +332,17 @@
             <option value="sqlite">SQLite</option>
           </select>
         </label>
-      </div>
-
-      {#if form.driver === 'mysql'}
-      <div class="form-row">
+        {#if form.driver === 'mysql'}
         <label>Authentication
           <select bind:value={form.authMode} on:change={(event) => onAuthModeChange(event)}>
             <option value="password">Password</option>
             <option value="awsIam">AWS IAM</option>
           </select>
         </label>
+        {:else}
+        <div class="column-placeholder" aria-hidden="true"></div>
+        {/if}
       </div>
-      {/if}
 
       {#if form.driver !== 'sqlite'}
       <div class="form-row two-col">
@@ -398,6 +429,17 @@
       </div>
       {#if form.useKubePortForward}
       <div class="kube-section">
+        <div class="form-row">
+          <label>kubectl Executable
+            <div class="file-path-row">
+              <input type="text" bind:value={form.kubectlPath} placeholder="kubectl (use PATH)" spellcheck="false" />
+              <button type="button" class="btn-secondary btn-browse" on:click={browseKubectlExecutable}>
+                Browse…
+              </button>
+            </div>
+          </label>
+          <span class="field-help">Leave blank to find <code>kubectl</code> using the application PATH.</span>
+        </div>
         <div class="form-row two-col">
           <label>Context
             <input type="text" bind:value={form.kubeContext} placeholder="my-cluster" />
@@ -432,10 +474,14 @@
     </div>
 
     <div class="modal-footer">
-      <button class="btn-secondary" on:click={handleTest} disabled={testing}>
-        {testing ? 'Testing…' : 'Test Connection'}
-      </button>
-      <button class="btn-primary" on:click={handleSave} disabled={saving}>
+      {#if testing}
+        <button class="btn-stop" on:click={handleStopTest} disabled={stoppingTest}>
+          {stoppingTest ? 'Stopping…' : 'Stop Test'}
+        </button>
+      {:else}
+        <button class="btn-secondary" on:click={handleTest}>Test Connection</button>
+      {/if}
+      <button class="btn-primary" on:click={handleSave} disabled={saving || testing}>
         {saving ? 'Saving…' : 'Save'}
       </button>
     </div>
@@ -454,7 +500,7 @@
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 8px;
-    width: 480px;
+    width: 640px;
     max-width: 95vw;
     box-shadow: 0 8px 32px rgba(0,0,0,0.5);
   }
@@ -471,14 +517,15 @@
   .close-btn:hover { color: var(--text); }
   .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
   .form-row { display: flex; flex-direction: column; gap: 4px; }
-  .tab-color-row { gap: 8px; }
   .form-row.two-col { flex-direction: row; gap: 12px; }
   .form-row.two-col label { flex: 1; }
+  .driver-row .column-placeholder { flex: 1; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: calc(12px * var(--app-font-scale)); color: var(--text-muted); }
   .tab-color-label { gap: 6px; }
   .tab-color-inputs { display: flex; align-items: center; gap: 8px; }
-  .sqlite-file-row { display: flex; align-items: center; gap: 8px; }
-  .sqlite-file-row input { flex: 1; }
+  .tab-color-inputs input[type="text"] { flex: 1; min-width: 0; }
+  .sqlite-file-row, .file-path-row { display: flex; align-items: center; gap: 8px; }
+  .sqlite-file-row input, .file-path-row input { flex: 1; }
   .tab-color-picker {
     width: 36px;
     min-width: 36px;
@@ -502,7 +549,6 @@
     flex: 0 0 auto;
     white-space: nowrap;
   }
-  .tab-black-text-label { width: fit-content; }
   input, select {
     background: var(--bg-input); border: 1px solid var(--border);
     color: var(--text); padding: 7px 10px; border-radius: 4px;
@@ -532,6 +578,13 @@
   .btn-secondary { background: var(--bg-input); color: var(--text); border-color: var(--border); }
   .btn-secondary:hover { border-color: var(--accent); }
   .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-stop {
+    padding: 7px 16px; border-radius: 4px;
+    font-size: calc(13px * var(--app-font-scale)); cursor: pointer;
+    border: 1px solid var(--error); background: transparent; color: var(--error);
+  }
+  .btn-stop:hover { background: color-mix(in srgb, var(--error) 12%, transparent); }
+  .btn-stop:disabled { opacity: 0.5; cursor: not-allowed; }
   .success { color: var(--success); font-size: calc(12px * var(--app-font-scale)); margin: 0; }
   .checkbox-label {
     flex-direction: row; align-items: center; gap: 8px; cursor: pointer;
