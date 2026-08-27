@@ -11,5 +11,8 @@
     "frontend:build": "npm --prefix frontend run build",
     "frontend:check": "npm --prefix frontend run check",
     "rust:check": "cd desktop && cargo check"
+  },
+  "dependencies": {
+    "vite": "^8.2.2"
   }
 }

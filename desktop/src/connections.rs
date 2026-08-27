@@ -544,15 +544,9 @@ fn mysql_retry_delay(elapsed: Duration, connect_timeout: Duration) -> Duration {
 }
 
 fn mysql_connection_error_details(cfg: &ConnectionConfig) -> String {
-    let password_detail = if cfg!(debug_assertions) {
-        format!("password={}", cfg.password)
-    } else {
-        format!("password_length={}", cfg.password.len())
-    };
-
     format!(
-        "host={}, username={}, port={}, {}",
-        cfg.host, cfg.username, cfg.port, password_detail
+        "host={}, username={}, port={}, password_length={}",
+        cfg.host, cfg.username, cfg.port, cfg.password.len()
     )
 }
 
@@ -1032,18 +1026,11 @@ mod tests {
 
         let details = mysql_connection_error_details(&cfg);
 
-        if cfg!(debug_assertions) {
-            assert_eq!(
-                details,
-                "host=db.example.com, username=app_user, port=3306, password=super-secret"
-            );
-        } else {
-            assert_eq!(
-                details,
-                "host=db.example.com, username=app_user, port=3306, password_length=12"
-            );
-            assert!(!details.contains("super-secret"));
-        }
+        assert_eq!(
+            details,
+            "host=db.example.com, username=app_user, port=3306, password_length=12"
+        );
+        assert!(!details.contains("super-secret"));
     }
 
     #[test]

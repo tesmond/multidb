@@ -99,9 +99,7 @@
       if (result?.columns) {
         colTextMeasurements = result.columns.map(columnName => ({
           maxLength: initialColumnTextLen(columnName),
-          maxBaseWidth: columnName.toLowerCase() === 'explain'
-            ? EXPLAIN_DEFAULT_TEXT_LEN * BASE_AVG_CHAR_W
-            : 0,
+          maxBaseWidth: 0,
         }));
         colWidths = colTextMeasurements.map((_, idx) => columnTextWidth(idx));
         _colWidthsFontScale = fontScale;

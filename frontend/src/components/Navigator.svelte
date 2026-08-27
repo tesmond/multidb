@@ -1,7 +1,7 @@
 <script lang="ts">
   import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, loadCachedSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup, showRelationshipDiagramForConnection, showDatabaseConnectionsForConnection, openQueryTabForConnection, buildConnectionDisplayStructure } from '../stores/appStore';
   import type { ActiveConnection, SchemaTree, ServerGroup } from '../stores/appStore';
-  import { Disconnect, TestConnection, BackupTable, DropTable } from '../../desktop/gen/main/App';
+  import { CancelTestConnection, Disconnect, TestConnection, BackupTable, DropTable } from '../../desktop/gen/main/App';
   import { get } from 'svelte/store';
 
   // Expandable node state
@@ -205,16 +205,32 @@
 
   // Test the saved connection config without opening a new one
   let testingConnId: string | null = null;
+  let activeTestId = '';
+  let stopRequested = false;
   async function testConn(conn: ActiveConnection) {
+    const testId = crypto.randomUUID();
     testingConnId = conn.config.id;
+    activeTestId = testId;
+    stopRequested = false;
     statusMessage.set('Testing connection…');
     try {
-      await TestConnection(conn.config, crypto.randomUUID());
+      await TestConnection(conn.config, testId);
       statusMessage.set(`Connection to ${conn.config.name} succeeded ✓`);
     } catch (e: any) {
-      statusMessage.set(`Connection failed: ${e}`);
+      statusMessage.set(stopRequested ? 'Connection test cancelled' : `Connection failed: ${e}`);
     } finally {
+      if (activeTestId === testId) activeTestId = '';
       testingConnId = null;
+    }
+  }
+
+  async function cancelTest() {
+    if (!activeTestId) return;
+    stopRequested = true;
+    try {
+      await CancelTestConnection(activeTestId);
+    } catch (e: any) {
+      statusMessage.set(String(e));
     }
   }
 
@@ -471,7 +487,7 @@
     contextMenu = { kind: 'database', x: pos.x, y: pos.y, connId };
   }
 
-  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'dropTable' | 'query' | 'import' | 'refresh' | 'relationships' | 'connections' | 'test' | 'delete') {
+  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'dropTable' | 'query' | 'import' | 'refresh' | 'relationships' | 'connections' | 'test' | 'cancelTest' | 'delete') {
     if (!contextMenu) return;
     const menu = contextMenu;
     contextMenu = null;
@@ -504,6 +520,10 @@
         if (action === 'test') {
           const conn = get(activeConnections).find(c => c.config.id === menu.connId);
           if (conn) await testConn(conn);
+          return;
+        }
+        if (action === 'cancelTest') {
+          await cancelTest();
           return;
         }
         if (action === 'delete') {
@@ -974,9 +994,15 @@
         Query
       </button>
       <div class="context-separator"></div>
-      <button role="menuitem" on:click={() => handleContextAction('test')} disabled={testingConnId === contextMenu.connId}>
-        {testingConnId === contextMenu.connId ? 'Testing…' : 'Test Connection'}
-      </button>
+      {#if testingConnId === contextMenu.connId}
+        <button role="menuitem" on:click={() => handleContextAction('cancelTest')}>
+          Cancel Test
+        </button>
+      {:else}
+        <button role="menuitem" on:click={() => handleContextAction('test')}>
+          Test Connection
+        </button>
+      {/if}
       <div class="context-separator"></div>
       <button role="menuitem" on:click={() => handleContextAction('refresh')}>
         Refresh Schema
