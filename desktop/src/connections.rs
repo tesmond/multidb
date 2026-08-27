@@ -9,16 +9,23 @@ use sqlx::{
     AnyPool, ConnectOptions, MySqlPool, PgPool,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    ffi::{OsStr, OsString},
     future::Future,
-    net::{TcpStream, ToSocketAddrs},
+    io::{self, Read},
+    net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex,
+    },
     time::{Duration, Instant},
 };
+use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 struct ManagedConnection {
@@ -26,8 +33,70 @@ struct ManagedConnection {
     pg_pool: Option<PgPool>,
     mysql_pool: Option<MySqlPool>,
     config: ConnectionConfig,
-    port_forward: Option<Child>,
+    port_forward: Option<PortForwardProcess>,
     connected_at: Instant,
+}
+
+struct PortForwardProcess {
+    child: Child,
+    stderr: Arc<StdMutex<VecDeque<u8>>>,
+    stderr_done: Arc<AtomicBool>,
+}
+
+impl Drop for PortForwardProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl PortForwardProcess {
+    fn capture(mut child: Child) -> Result<Self> {
+        const STDERR_LIMIT: usize = 16 * 1024;
+        let mut pipe = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("kubectl stderr was not captured"))?;
+        let stderr = Arc::new(StdMutex::new(VecDeque::with_capacity(STDERR_LIMIT)));
+        let thread_buffer = stderr.clone();
+        let stderr_done = Arc::new(AtomicBool::new(false));
+        let thread_done = stderr_done.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0_u8; 1024];
+            while let Ok(count) = pipe.read(&mut chunk) {
+                if count == 0 {
+                    break;
+                }
+                let mut buffer = thread_buffer.lock().unwrap_or_else(|err| err.into_inner());
+                buffer.extend(&chunk[..count]);
+                while buffer.len() > STDERR_LIMIT {
+                    buffer.pop_front();
+                }
+            }
+            thread_done.store(true, Ordering::Release);
+        });
+        Ok(Self {
+            child,
+            stderr,
+            stderr_done,
+        })
+    }
+
+    async fn wait_for_stderr(&self) {
+        let _ = timeout(Duration::from_millis(100), async {
+            while !self.stderr_done.load(Ordering::Acquire) {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+    }
+
+    fn stderr_text(&self) -> String {
+        let mut buffer = self.stderr.lock().unwrap_or_else(|err| err.into_inner());
+        String::from_utf8_lossy(buffer.make_contiguous())
+            .trim()
+            .to_string()
+    }
 }
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
@@ -46,7 +115,7 @@ pub struct ConnectionManager {
 
 impl ConnectionManager {
     pub async fn connect(&self, cfg: ConnectionConfig) -> Result<()> {
-        let (effective, mut port_forward) = prepare_runtime_connection_config(&cfg).await?;
+        let (effective, mut port_forward) = prepare_runtime_connection_config(&cfg, None).await?;
         let connection_result = async {
             let max_connections = max_connections_for(&effective);
             let (pool, pg_pool, mysql_pool) = if effective.driver == "mysql" {
@@ -121,40 +190,51 @@ impl ConnectionManager {
         Ok(())
     }
 
-    pub async fn test_connection(&self, cfg: ConnectionConfig) -> Result<()> {
+    pub async fn test_connection(
+        &self,
+        cfg: ConnectionConfig,
+        cancel: CancellationToken,
+    ) -> Result<()> {
         ipc_diagnostics::set_test_connection_stage("prepare_runtime_connection_config");
-        let (effective, mut port_forward) = prepare_runtime_connection_config(&cfg).await?;
-        let test_result = if effective.driver == "mysql" {
-            match connect_mysql_pool(&effective, IAM_MAX_CONNECTIONS, &cfg.name).await {
-                Ok(mysql_pool) => {
-                    mysql_pool.close().await;
-                    Ok(())
+        let (effective, mut port_forward) =
+            prepare_runtime_connection_config(&cfg, Some(&cancel)).await?;
+        let connection_test = async {
+            if effective.driver == "mysql" {
+                match connect_mysql_pool(&effective, IAM_MAX_CONNECTIONS, &cfg.name).await {
+                    Ok(mysql_pool) => {
+                        mysql_pool.close().await;
+                        Ok(())
+                    }
+                    Err(err) => Err(err),
                 }
-                Err(err) => Err(err),
-            }
-        } else {
-            let dsn = build_dsn(&effective)?;
-            let stage = match effective.driver.as_str() {
-                "postgres" => "postgres_connect",
-                "sqlite" => "sqlite_connect",
-                _ => "validate_connection_access",
-            };
-            ipc_diagnostics::set_test_connection_stage(stage);
-            match AnyPoolOptions::new()
-                .max_connections(1)
-                .connect(&dsn)
-                .await
-                .with_context(|| format!("test connection {}", cfg.name))
-            {
-                Ok(pool) => {
-                    let result = validate_connection_access(&pool)
-                        .await
-                        .with_context(|| format!("validate connection {}", cfg.name));
-                    pool.close().await;
-                    result
+            } else {
+                let dsn = build_dsn(&effective)?;
+                let stage = match effective.driver.as_str() {
+                    "postgres" => "postgres_connect",
+                    "sqlite" => "sqlite_connect",
+                    _ => "validate_connection_access",
+                };
+                ipc_diagnostics::set_test_connection_stage(stage);
+                match AnyPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&dsn)
+                    .await
+                    .with_context(|| format!("test connection {}", cfg.name))
+                {
+                    Ok(pool) => {
+                        let result = validate_connection_access(&pool)
+                            .await
+                            .with_context(|| format!("validate connection {}", cfg.name));
+                        pool.close().await;
+                        result
+                    }
+                    Err(err) => Err(err),
                 }
-                Err(err) => Err(err),
             }
+        };
+        let test_result = tokio::select! {
+            _ = cancel.cancelled() => Err(anyhow!("connection test cancelled")),
+            result = connection_test => result,
         };
         kill_port_forward(&mut port_forward);
         test_result
@@ -267,7 +347,8 @@ pub fn build_dsn(cfg: &ConnectionConfig) -> Result<String> {
 
 async fn prepare_runtime_connection_config(
     cfg: &ConnectionConfig,
-) -> Result<(ConnectionConfig, Option<Child>)> {
+    cancel: Option<&CancellationToken>,
+) -> Result<(ConnectionConfig, Option<PortForwardProcess>)> {
     ipc_diagnostics::set_test_connection_stage("validate_connection_config");
     validate_connection_config(cfg)?;
 
@@ -276,11 +357,17 @@ async fn prepare_runtime_connection_config(
 
     if cfg.use_kube_port_forward {
         ipc_diagnostics::set_test_connection_stage("wait_for_local_port");
-        let child = start_port_forward(cfg)?;
-        wait_for_local_port(cfg.kube_local_port, Duration::from_secs(30))?;
+        let mut process = start_port_forward(cfg)?;
+        wait_for_local_port(
+            &mut process,
+            cfg.kube_local_port,
+            Duration::from_secs(30),
+            cancel,
+        )
+        .await?;
         effective.host = "127.0.0.1".to_string();
         effective.port = cfg.kube_local_port;
-        port_forward = Some(child);
+        port_forward = Some(process);
     }
 
     if effective.uses_aws_iam_auth() {
@@ -457,15 +544,9 @@ fn mysql_retry_delay(elapsed: Duration, connect_timeout: Duration) -> Duration {
 }
 
 fn mysql_connection_error_details(cfg: &ConnectionConfig) -> String {
-    let password_detail = if cfg!(debug_assertions) {
-        format!("password={}", cfg.password)
-    } else {
-        format!("password_length={}", cfg.password.len())
-    };
-
     format!(
-        "host={}, username={}, port={}, {}",
-        cfg.host, cfg.username, cfg.port, password_detail
+        "host={}, username={}, port={}, password_length={}",
+        cfg.host, cfg.username, cfg.port, cfg.password.len()
     )
 }
 
@@ -593,12 +674,14 @@ fn looks_like_windows_absolute_path(path: &str) -> bool {
     bytes.len() > 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() && bytes[2] == b'/'
 }
 
-fn start_port_forward(cfg: &ConnectionConfig) -> Result<Child> {
+fn start_port_forward(cfg: &ConnectionConfig) -> Result<PortForwardProcess> {
+    ensure_local_port_available(cfg.kube_local_port)?;
     let mut args = Vec::new();
     if !cfg.kube_context.is_empty() {
         args.push(format!("--context={}", cfg.kube_context));
     }
     args.push("port-forward".to_string());
+    args.push("--address=127.0.0.1".to_string());
     if !cfg.kube_namespace.is_empty() {
         args.push("-n".to_string());
         args.push(cfg.kube_namespace.clone());
@@ -606,58 +689,148 @@ fn start_port_forward(cfg: &ConnectionConfig) -> Result<Child> {
     args.push(cfg.kube_resource.clone());
     args.push(format!("{}:{}", cfg.kube_local_port, cfg.kube_remote_port));
 
-    Command::new("kubectl")
+    let child = Command::new(kubectl_program(cfg)?)
         .args(args)
+        .env("PATH", kubectl_child_path(cfg)?)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .context("kubectl port-forward")
+        .context("kubectl port-forward")?;
+    PortForwardProcess::capture(child)
 }
 
-fn wait_for_local_port(port: i32, timeout: Duration) -> Result<()> {
-    let addr = format!("127.0.0.1:{port}");
-    let addrs: Vec<_> = addr.to_socket_addrs()?.collect();
-    let deadline = Instant::now() + timeout;
+fn ensure_local_port_available(port: i32) -> Result<()> {
+    ensure_local_port_available_with(port, |port_number| {
+        TcpListener::bind(("127.0.0.1", port_number)).map(drop)
+    })
+}
+
+fn ensure_local_port_available_with(
+    port: i32,
+    bind: impl FnOnce(u16) -> io::Result<()>,
+) -> Result<()> {
+    let port_number = u16::try_from(port)
+        .ok()
+        .filter(|port| *port > 0)
+        .ok_or_else(|| anyhow!("invalid local port {port}"))?;
+    bind(port_number).with_context(|| format!("local port {port} is already in use"))
+}
+
+fn kubectl_program(cfg: &ConnectionConfig) -> Result<PathBuf> {
+    Ok(if cfg.kubectl_path.trim().is_empty() {
+        PathBuf::from("kubectl")
+    } else {
+        expand_home_dir(cfg.kubectl_path.trim())?
+    })
+}
+
+fn kubectl_child_path(cfg: &ConnectionConfig) -> Result<OsString> {
+    kubectl_child_path_from(cfg, std::env::var_os("PATH").as_deref())
+}
+
+fn kubectl_child_path_from(
+    cfg: &ConnectionConfig,
+    current_path: Option<&OsStr>,
+) -> Result<OsString> {
+    let mut paths = Vec::new();
+    let program = kubectl_program(cfg)?;
+    if program.is_absolute() {
+        if let Some(parent) = program.parent() {
+            paths.push(parent.to_path_buf());
+        }
+    }
+    if let Some(current_path) = current_path {
+        paths.extend(std::env::split_paths(current_path));
+    }
+    if cfg!(target_os = "macos") {
+        paths.push(PathBuf::from("/usr/local/bin"));
+        paths.push(PathBuf::from("/opt/homebrew/bin"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".rd/bin"));
+        paths.push(home.join(".local/bin"));
+    }
+    paths.dedup();
+    std::env::join_paths(paths).context("build kubectl child PATH")
+}
+
+async fn wait_for_local_port(
+    process: &mut PortForwardProcess,
+    port: i32,
+    wait_timeout: Duration,
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let deadline = Instant::now() + wait_timeout;
 
     while Instant::now() < deadline {
-        if addrs
-            .iter()
-            .any(|addr| TcpStream::connect_timeout(addr, Duration::from_secs(1)).is_ok())
+        if let Some(status) = process
+            .child
+            .try_wait()
+            .context("check kubectl port-forward")?
         {
+            process.wait_for_stderr().await;
+            let stderr = process.stderr_text();
+            let detail = if stderr.is_empty() {
+                format!("kubectl port-forward exited with {status}")
+            } else {
+                format!("kubectl port-forward exited with {status}: {stderr}")
+            };
+            return Err(anyhow!(detail));
+        }
+        let connect = timeout(Duration::from_millis(200), TcpStream::connect(addr));
+        let connected = if let Some(cancel) = cancel {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(anyhow!("connection test cancelled")),
+                result = connect => result.is_ok_and(|result| result.is_ok()),
+            }
+        } else {
+            connect.await.is_ok_and(|result| result.is_ok())
+        };
+        if connected {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(300));
+        sleep(Duration::from_millis(100)).await;
     }
 
-    Err(anyhow!(
-        "port {port} not ready after {}s",
-        timeout.as_secs()
-    ))
+    let stderr = process.stderr_text();
+    if stderr.is_empty() {
+        Err(anyhow!(
+            "port {port} not ready after {}s",
+            wait_timeout.as_secs()
+        ))
+    } else {
+        Err(anyhow!(
+            "port {port} not ready after {}s: {stderr}",
+            wait_timeout.as_secs()
+        ))
+    }
 }
 
-fn kill_port_forward(child: &mut Option<Child>) {
-    if let Some(child) = child.as_mut() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    *child = None;
+fn kill_port_forward(process: &mut Option<PortForwardProcess>) {
+    *process = None;
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dsn, build_mysql_connect_options, build_sqlite_file_dsn, format_duration_seconds,
-        is_retryable_mysql_connect_error, mysql_connection_error_details, mysql_retry_delay,
-        timeout_step, validate_connection_access, validate_connection_config,
-        MYSQL_CONNECT_RETRY_DELAY, MYSQL_CONNECT_TIMEOUT,
+        build_dsn, build_mysql_connect_options, build_sqlite_file_dsn,
+        ensure_local_port_available_with, format_duration_seconds,
+        is_retryable_mysql_connect_error, kubectl_child_path_from, kubectl_program,
+        mysql_connection_error_details, mysql_retry_delay, timeout_step,
+        validate_connection_access, validate_connection_config, wait_for_local_port,
+        PortForwardProcess, MYSQL_CONNECT_RETRY_DELAY, MYSQL_CONNECT_TIMEOUT,
     };
     use crate::models::ConnectionConfig;
     use anyhow::anyhow;
     use sqlx::any::AnyPoolOptions;
     use sqlx::mysql::MySqlSslMode;
+    use std::ffi::OsStr;
     use std::io;
-    use std::time::Duration;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn sqlite_requires_database_path() {
@@ -682,6 +855,109 @@ mod tests {
             build_sqlite_file_dsn(r"C:\Users\tesmo\data\app.db"),
             "sqlite:///C:/Users/tesmo/data/app.db"
         );
+    }
+
+    #[test]
+    fn kubectl_program_uses_path_lookup_when_unconfigured() {
+        assert_eq!(
+            kubectl_program(&ConnectionConfig::default()).expect("kubectl program"),
+            std::path::PathBuf::from("kubectl")
+        );
+    }
+
+    #[test]
+    fn kubectl_program_uses_configured_executable() {
+        let cfg = ConnectionConfig {
+            kubectl_path: "/opt/tools/kubectl".to_string(),
+            ..ConnectionConfig::default()
+        };
+
+        assert_eq!(
+            kubectl_program(&cfg).expect("kubectl program"),
+            std::path::PathBuf::from("/opt/tools/kubectl")
+        );
+    }
+
+    #[test]
+    fn kubectl_child_path_includes_configured_program_directory() {
+        let cfg = ConnectionConfig {
+            kubectl_path: "/opt/tools/kubectl".to_string(),
+            ..ConnectionConfig::default()
+        };
+        let path = kubectl_child_path_from(&cfg, Some(OsStr::new("/usr/bin:/bin")))
+            .expect("kubectl child PATH");
+        let entries = std::env::split_paths(&path).collect::<Vec<_>>();
+
+        assert!(entries.contains(&std::path::PathBuf::from("/opt/tools")));
+        if cfg!(target_os = "macos") {
+            assert!(entries.contains(&std::path::PathBuf::from("/usr/local/bin")));
+            assert!(entries.contains(&std::path::PathBuf::from("/opt/homebrew/bin")));
+        }
+    }
+
+    #[test]
+    fn port_forward_rejects_a_local_port_that_is_already_in_use() {
+        let err = ensure_local_port_available_with(18_105, |_| {
+            Err(io::Error::new(io::ErrorKind::AddrInUse, "occupied"))
+        })
+        .expect_err("occupied port should fail");
+
+        assert!(err.to_string().contains("already in use"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn port_forward_wait_reports_child_stderr_without_waiting_for_timeout() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "echo credential helper missing >&2; exit 7"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn failing child");
+        let mut process = PortForwardProcess::capture(child).expect("capture child stderr");
+        let started = Instant::now();
+
+        let err = wait_for_local_port(&mut process, 1, Duration::from_secs(30), None)
+            .await
+            .expect_err("exited child should fail readiness");
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(err.to_string().contains("credential helper missing"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn port_forward_wait_can_be_cancelled() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 30"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn waiting child");
+        let mut process = PortForwardProcess::capture(child).expect("capture child stderr");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let err = wait_for_local_port(&mut process, 1, Duration::from_secs(30), Some(&cancel))
+            .await
+            .expect_err("cancelled wait should fail");
+
+        assert!(err.to_string().contains("connection test cancelled"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn port_forward_timeout_includes_buffered_stderr() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "echo waiting for pod >&2; exec sleep 30"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn waiting child");
+        let mut process = PortForwardProcess::capture(child).expect("capture child stderr");
+
+        let err = wait_for_local_port(&mut process, 1, Duration::from_millis(300), None)
+            .await
+            .expect_err("readiness should time out");
+
+        assert!(err.to_string().contains("waiting for pod"));
     }
 
     #[test]
@@ -750,18 +1026,11 @@ mod tests {
 
         let details = mysql_connection_error_details(&cfg);
 
-        if cfg!(debug_assertions) {
-            assert_eq!(
-                details,
-                "host=db.example.com, username=app_user, port=3306, password=super-secret"
-            );
-        } else {
-            assert_eq!(
-                details,
-                "host=db.example.com, username=app_user, port=3306, password_length=12"
-            );
-            assert!(!details.contains("super-secret"));
-        }
+        assert_eq!(
+            details,
+            "host=db.example.com, username=app_user, port=3306, password_length=12"
+        );
+        assert!(!details.contains("super-secret"));
     }
 
     #[test]

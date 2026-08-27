@@ -18,6 +18,7 @@ export namespace connections {
 	    awsProfile: string;
 	    sslCaPath: string;
 	    useKubePortForward: boolean;
+	    kubectlPath: string;
 	    kubeContext: string;
 	    kubeNamespace: string;
 	    kubeResource: string;
@@ -47,6 +48,7 @@ export namespace connections {
 	        this.awsProfile = source["awsProfile"];
 	        this.sslCaPath = source["sslCaPath"];
 	        this.useKubePortForward = source["useKubePortForward"];
+	        this.kubectlPath = source["kubectlPath"];
 	        this.kubeContext = source["kubeContext"];
 	        this.kubeNamespace = source["kubeNamespace"];
 	        this.kubeResource = source["kubeResource"];

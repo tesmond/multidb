@@ -63,6 +63,7 @@ impl HistoryStore {
                 aws_profile TEXT NOT NULL DEFAULT '',
                 ssl_ca_path TEXT NOT NULL DEFAULT '',
                 use_kube_port_forward INTEGER NOT NULL DEFAULT 0,
+                kubectl_path TEXT NOT NULL DEFAULT '',
                 kube_context TEXT NOT NULL DEFAULT '',
                 kube_namespace TEXT NOT NULL DEFAULT '',
                 kube_resource TEXT NOT NULL DEFAULT '',
@@ -97,6 +98,7 @@ impl HistoryStore {
             "ALTER TABLE saved_connections ADD COLUMN aws_profile TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN ssl_ca_path TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN use_kube_port_forward INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE saved_connections ADD COLUMN kubectl_path TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN kube_context TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN kube_namespace TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE saved_connections ADD COLUMN kube_resource TEXT NOT NULL DEFAULT ''",
@@ -214,9 +216,9 @@ impl HistoryStore {
             INSERT INTO saved_connections (
                 id, name, driver, tab_color, tab_text_black, host, port, username, has_keychain_password, auth_mode, database, dsn,
                 aws_region, aws_profile, ssl_ca_path,
-                use_kube_port_forward, kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
+                use_kube_port_forward, kubectl_path, kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, driver=excluded.driver, tab_color=excluded.tab_color,
                 tab_text_black=excluded.tab_text_black, host=excluded.host, port=excluded.port,
@@ -224,6 +226,7 @@ impl HistoryStore {
                 auth_mode=excluded.auth_mode, database=excluded.database,
                 dsn=excluded.dsn, aws_region=excluded.aws_region, aws_profile=excluded.aws_profile,
                 ssl_ca_path=excluded.ssl_ca_path, use_kube_port_forward=excluded.use_kube_port_forward,
+                kubectl_path=excluded.kubectl_path,
                 kube_context=excluded.kube_context, kube_namespace=excluded.kube_namespace,
                 kube_resource=excluded.kube_resource, kube_local_port=excluded.kube_local_port,
                 kube_remote_port=excluded.kube_remote_port
@@ -245,6 +248,7 @@ impl HistoryStore {
         .bind(&cfg.aws_profile)
         .bind(&cfg.ssl_ca_path)
         .bind(cfg.use_kube_port_forward as i64)
+        .bind(&cfg.kubectl_path)
         .bind(&cfg.kube_context)
         .bind(&cfg.kube_namespace)
         .bind(&cfg.kube_resource)
@@ -269,7 +273,7 @@ impl HistoryStore {
             r#"
              SELECT id, name, driver, tab_color, tab_text_black, host, port, username, has_keychain_password, auth_mode, database, dsn,
                  aws_region, aws_profile, ssl_ca_path,
-                   use_kube_port_forward, kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
+                   use_kube_port_forward, kubectl_path, kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             FROM saved_connections
             ORDER BY name
             "#,
@@ -300,6 +304,7 @@ impl HistoryStore {
                 aws_profile: row.try_get("aws_profile")?,
                 ssl_ca_path: row.try_get("ssl_ca_path")?,
                 use_kube_port_forward: row.try_get::<i64, _>("use_kube_port_forward")? != 0,
+                kubectl_path: row.try_get("kubectl_path")?,
                 kube_context: row.try_get("kube_context")?,
                 kube_namespace: row.try_get("kube_namespace")?,
                 kube_resource: row.try_get("kube_resource")?,
@@ -403,6 +408,7 @@ impl HistoryStore {
                 aws_profile TEXT NOT NULL DEFAULT '',
                 ssl_ca_path TEXT NOT NULL DEFAULT '',
                 use_kube_port_forward INTEGER NOT NULL DEFAULT 0,
+                kubectl_path TEXT NOT NULL DEFAULT '',
                 kube_context TEXT NOT NULL DEFAULT '',
                 kube_namespace TEXT NOT NULL DEFAULT '',
                 kube_resource TEXT NOT NULL DEFAULT '',
@@ -418,13 +424,13 @@ impl HistoryStore {
             r#"
             INSERT INTO saved_connections_without_password (
                 id, name, driver, tab_color, tab_text_black, host, port, username,
-                has_keychain_password, auth_mode, database, dsn, aws_region, aws_profile, ssl_ca_path, use_kube_port_forward,
+                has_keychain_password, auth_mode, database, dsn, aws_region, aws_profile, ssl_ca_path, use_kube_port_forward, kubectl_path,
                 kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             )
             SELECT
                 id, name, driver, tab_color, tab_text_black, host, port, username,
                 has_keychain_password, COALESCE(auth_mode, 'password'), database, dsn,
-                COALESCE(aws_region, ''), COALESCE(aws_profile, ''), COALESCE(ssl_ca_path, ''), use_kube_port_forward,
+                COALESCE(aws_region, ''), COALESCE(aws_profile, ''), COALESCE(ssl_ca_path, ''), use_kube_port_forward, COALESCE(kubectl_path, ''),
                 kube_context, kube_namespace, kube_resource, kube_local_port, kube_remote_port
             FROM saved_connections
             "#,
@@ -627,6 +633,7 @@ mod tests {
             aws_region: "eu-west-1".to_string(),
             aws_profile: "production".to_string(),
             ssl_ca_path: "/tmp/rds-ca.pem".to_string(),
+            kubectl_path: "/opt/homebrew/bin/kubectl".to_string(),
             kube_local_port: 13306,
             kube_remote_port: 3306,
             ..ConnectionConfig::default()
@@ -644,6 +651,7 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].name, cfg.name);
         assert_eq!(saved[0].kube_remote_port, cfg.kube_remote_port);
+        assert_eq!(saved[0].kubectl_path, cfg.kubectl_path);
 
         let _ = std::fs::remove_file(path);
     }

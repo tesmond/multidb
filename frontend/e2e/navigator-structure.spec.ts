@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
@@ -14,6 +14,26 @@ test.beforeEach(async ({ page }) => {
           database: 'app',
           username: 'user',
           password: 'pass',
+        },
+        {
+          id: 'conn-2',
+          name: 'Replica DB',
+          driver: 'postgres',
+          host: 'replica.localhost',
+          port: 5432,
+          database: 'app',
+          username: 'user',
+          password: 'pass',
+        },
+        {
+          id: 'conn-3',
+          name: 'Local DB',
+          driver: 'sqlite',
+          host: '',
+          port: 0,
+          database: 'local.db',
+          username: '',
+          password: '',
         },
       ],
       load_schema: {
@@ -56,11 +76,26 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+async function seedProductionGroup(page: Page) {
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      'multidb.serverGroups.v1',
+      JSON.stringify([
+        {
+          id: 'production',
+          title: 'Production',
+          connectionIds: ['conn-2', 'conn-1'],
+        },
+      ]),
+    );
+  });
+}
+
 test('navigator renders tables with a single row element per table entry', async ({ page }) => {
   await page.goto('/');
 
   await expect(page.locator('.navigator')).toBeVisible();
-  await expect(page.locator('.navigator .conn-label')).toContainText('Test DB');
+  await expect(page.locator('.navigator .conn-label').filter({ hasText: 'Test DB' })).toBeVisible();
 
   await page.locator('.navigator .conn-label').filter({ hasText: 'Test DB' }).click();
   await page.locator('.navigator .section-label').filter({ hasText: 'Tables' }).click();
@@ -68,4 +103,32 @@ test('navigator renders tables with a single row element per table entry', async
   await expect(page.locator('.navigator .table-label')).toContainText('users');
   await page.locator('.navigator .table-label').filter({ hasText: 'users' }).click();
   await expect(page.locator('.navigator .col-row')).toContainText('id');
+});
+
+test('connection dropdown follows navigator group order and labels', async ({ page }) => {
+  await seedProductionGroup(page);
+  await page.goto('/');
+
+  const selector = page.getByRole('button', { name: 'Connection selector' });
+  await selector.click();
+
+  await expect(page.getByRole('option').locator('.option-label')).toHaveText([
+    '— select connection —',
+    'Production - Replica DB',
+    'Production - Test DB',
+    'Local DB',
+  ]);
+});
+
+test('connection context menu opens an empty query for that connection', async ({ page }) => {
+  await seedProductionGroup(page);
+  await page.goto('/');
+
+  await page.locator('.navigator .group-label').filter({ hasText: 'Production' }).click();
+  await page.locator('.navigator .conn-label').filter({ hasText: 'Replica DB' }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Query', exact: true }).click();
+
+  await expect(page.locator('.tab.active .tab-title')).toHaveText('Query');
+  await expect(page.getByRole('button', { name: 'Connection selector' })).toContainText('Production - Replica DB');
+  await expect(page.getByRole('button', { name: '💾 Save' })).toBeDisabled();
 });

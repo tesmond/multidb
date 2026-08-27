@@ -611,7 +611,7 @@ async fn mysql_relationships(pool: &AnyPool) -> Result<Vec<Relationship>> {
             kcu.REFERENCED_COLUMN_NAME,
             COALESCE(rc.UPDATE_RULE, ''),
             COALESCE(rc.DELETE_RULE, ''),
-            kcu.ORDINAL_POSITION
+            CAST(kcu.ORDINAL_POSITION AS SIGNED)
         FROM information_schema.KEY_COLUMN_USAGE kcu
         JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
@@ -658,7 +658,7 @@ async fn mysql_relationships_typed(pool: &MySqlPool) -> Result<Vec<Relationship>
             kcu.REFERENCED_COLUMN_NAME,
             COALESCE(rc.UPDATE_RULE, ''),
             COALESCE(rc.DELETE_RULE, ''),
-            kcu.ORDINAL_POSITION
+            CAST(kcu.ORDINAL_POSITION AS SIGNED)
         FROM information_schema.KEY_COLUMN_USAGE kcu
         JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
@@ -1045,8 +1045,9 @@ fn quote_sqlite_pragma(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_any_i64, decode_any_text, get_schema};
+    use super::{decode_any_i64, decode_any_text, get_mysql_schema, get_schema};
     use sqlx::any::AnyPoolOptions;
+    use sqlx::mysql::MySqlPoolOptions;
 
     #[tokio::test]
     async fn decode_any_text_handles_sqlite_blob_values() {
@@ -1290,6 +1291,50 @@ mod tests {
 
         assert!(schema.relationships.is_empty());
 
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MYSQL_REPRO_URL pointing to a disposable MySQL database"]
+    async fn mysql_schema_refresh_loads_foreign_key_relationships() {
+        let url = std::env::var("MYSQL_REPRO_URL").expect("MYSQL_REPRO_URL must be set");
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to MySQL");
+
+        sqlx::query("DROP DATABASE IF EXISTS multidb_unsigned_repro")
+            .execute(&pool)
+            .await
+            .expect("reset reproduction database");
+        sqlx::query("CREATE DATABASE multidb_unsigned_repro")
+            .execute(&pool)
+            .await
+            .expect("create reproduction database");
+        sqlx::query("CREATE TABLE multidb_unsigned_repro.parents (id INT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create parent table");
+        sqlx::query(
+            "CREATE TABLE multidb_unsigned_repro.children (parent_id INT, CONSTRAINT children_parent_fk FOREIGN KEY (parent_id) REFERENCES multidb_unsigned_repro.parents(id))",
+        )
+        .execute(&pool)
+        .await
+        .expect("create child table");
+
+        let schema = get_mysql_schema(&pool)
+            .await
+            .expect("refresh MySQL schema with relationships");
+        assert!(schema
+            .relationships
+            .iter()
+            .any(|relationship| relationship.constraint_name == "children_parent_fk"));
+
+        sqlx::query("DROP DATABASE multidb_unsigned_repro")
+            .execute(&pool)
+            .await
+            .expect("remove reproduction database");
         pool.close().await;
     }
 }

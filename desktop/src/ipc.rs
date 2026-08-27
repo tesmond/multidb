@@ -30,6 +30,19 @@ struct CfgArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TestConnectionArgs {
+    cfg: ConnectionConfig,
+    test_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestIdArgs {
+    test_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct IdArgs {
     id: i64,
 }
@@ -162,8 +175,12 @@ pub async fn dispatch(
             to_value(commands::save_and_connect(state, args.cfg).await?)
         }
         "test_connection" => {
-            let args: CfgArgs = parse(args)?;
-            to_value(commands::test_connection(state, args.cfg).await?)
+            let args: TestConnectionArgs = parse(args)?;
+            to_value(commands::test_connection(state, args.cfg, args.test_id).await?)
+        }
+        "cancel_test_connection" => {
+            let args: TestIdArgs = parse(args)?;
+            to_value(commands::cancel_test_connection(state, args.test_id).await?)
         }
         "disconnect" => {
             let args: DisconnectArgs = parse(args)?;
@@ -257,6 +274,7 @@ pub async fn dispatch(
             to_value(commands::select_import_file(args.import_type)?)
         }
         "select_sqlite_file" => to_value(commands::select_sqlite_file()?),
+        "select_kubectl_executable" => to_value(commands::select_kubectl_executable()?),
         "import_table" => {
             let args: ImportArgs = parse(args)?;
             to_value(

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { tabs, activeConnections, selectedConnId, statusMessage, outputTab, requestSchemaRefresh, extractFirstTableName, isSqlTab } from '../stores/appStore';
+  import { tabs, activeConnections, orderedConnectionOptions, selectedConnId, statusMessage, outputTab, requestSchemaRefresh, extractFirstTableName, isSqlTab } from '../stores/appStore';
   import { ExecuteQueryStreamed, CancelQuery, SaveQuery } from '../../desktop/gen/main/App';
   import { EventsOn, EventsOff } from '../../desktop/runtime/runtime';
   import { get } from 'svelte/store';
@@ -29,7 +29,7 @@
   }
   $: connectionOptions = [
     { value: '', label: '— select connection —' },
-    ...$activeConnections.map((conn) => ({ value: conn.config.id, label: conn.config.name })),
+    ...$orderedConnectionOptions,
   ];
 
   // Cleanup function for the active streaming query's event listeners.

@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, loadCachedSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup, showRelationshipDiagramForConnection, showDatabaseConnectionsForConnection } from '../stores/appStore';
+  import { activeConnections, selectedConnId, showConnectionDialog, editingConnection, showImportDialog, importDialogConnId, tabs, activeTabId, statusMessage, schemaRefreshSignal, refreshConnectionSchema, loadCachedSchema, deleteCachedSchema, serverGroups, activeServerGroupId, fontScalePercent, setFontScalePercent, addServerGroup, addConnectionToGroup, removeConnectionFromGroups, moveConnectionInList, moveServerGroup, showRelationshipDiagramForConnection, showDatabaseConnectionsForConnection, openQueryTabForConnection, buildConnectionDisplayStructure } from '../stores/appStore';
   import type { ActiveConnection, SchemaTree, ServerGroup } from '../stores/appStore';
-  import { Disconnect, TestConnection, BackupTable, DropTable } from '../../desktop/gen/main/App';
+  import { CancelTestConnection, Disconnect, TestConnection, BackupTable, DropTable } from '../../desktop/gen/main/App';
   import { get } from 'svelte/store';
 
   // Expandable node state
@@ -43,18 +43,13 @@
   $: hasTableFilter = normalizedTableFilter.length > 0;
 
   $: {
-    const connById = new Map($activeConnections.map((conn) => [conn.config.id, conn]));
-    const groupedIds = new Set<string>();
     const items: NavItem[] = [];
     const filterText = normalizedTableFilter;
     const filtering = filterText.length > 0;
+    const structure = buildConnectionDisplayStructure($activeConnections, $serverGroups);
 
-    for (const group of $serverGroups) {
-      for (const connId of group.connectionIds) groupedIds.add(connId);
-
-      const groupConns = group.connectionIds
-        .map((connId) => connById.get(connId))
-        .filter((conn): conn is ActiveConnection => !!conn)
+    for (const { group, connections } of structure.groups) {
+      const groupConns = connections
         .filter((conn) => connectionMatchesFilter(conn, filterText));
 
       if (!filtering || groupConns.length > 0) {
@@ -66,8 +61,8 @@
       }
     }
 
-    for (const conn of $activeConnections) {
-      if (!groupedIds.has(conn.config.id) && connectionMatchesFilter(conn, filterText)) {
+    for (const conn of structure.ungrouped) {
+      if (connectionMatchesFilter(conn, filterText)) {
         items.push({ kind: 'conn', conn });
       }
     }
@@ -210,16 +205,32 @@
 
   // Test the saved connection config without opening a new one
   let testingConnId: string | null = null;
+  let activeTestId = '';
+  let stopRequested = false;
   async function testConn(conn: ActiveConnection) {
+    const testId = crypto.randomUUID();
     testingConnId = conn.config.id;
+    activeTestId = testId;
+    stopRequested = false;
     statusMessage.set('Testing connection…');
     try {
-      await TestConnection(conn.config);
+      await TestConnection(conn.config, testId);
       statusMessage.set(`Connection to ${conn.config.name} succeeded ✓`);
     } catch (e: any) {
-      statusMessage.set(`Connection failed: ${e}`);
+      statusMessage.set(stopRequested ? 'Connection test cancelled' : `Connection failed: ${e}`);
     } finally {
+      if (activeTestId === testId) activeTestId = '';
       testingConnId = null;
+    }
+  }
+
+  async function cancelTest() {
+    if (!activeTestId) return;
+    stopRequested = true;
+    try {
+      await CancelTestConnection(activeTestId);
+    } catch (e: any) {
+      statusMessage.set(String(e));
     }
   }
 
@@ -453,7 +464,7 @@
   function clampMenuPosition(x: number, y: number, kind: 'table' | 'database' | 'dropConfirm') {
     const pad = 8;
     const estimatedWidth = 220;
-    const estimatedHeight = kind === 'database' ? 245 : kind === 'dropConfirm' ? 120 : 165;
+    const estimatedHeight = kind === 'database' ? 285 : kind === 'dropConfirm' ? 120 : 165;
     const maxX = Math.max(pad, window.innerWidth - estimatedWidth - pad);
     const maxY = Math.max(pad, window.innerHeight - estimatedHeight - pad);
     return {
@@ -476,13 +487,17 @@
     contextMenu = { kind: 'database', x: pos.x, y: pos.y, connId };
   }
 
-  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'dropTable' | 'import' | 'refresh' | 'relationships' | 'connections' | 'test' | 'delete') {
+  async function handleContextAction(action: 'view' | 'copy' | 'select' | 'backup' | 'dropTable' | 'query' | 'import' | 'refresh' | 'relationships' | 'connections' | 'test' | 'cancelTest' | 'delete') {
     if (!contextMenu) return;
     const menu = contextMenu;
     contextMenu = null;
 
     try {
       if (menu.kind === 'database') {
+        if (action === 'query') {
+          openQueryTabForConnection(menu.connId);
+          return;
+        }
         if (action === 'refresh') {
           statusMessage.set('Refreshing schema…');
           await refreshSchema(menu.connId);
@@ -505,6 +520,10 @@
         if (action === 'test') {
           const conn = get(activeConnections).find(c => c.config.id === menu.connId);
           if (conn) await testConn(conn);
+          return;
+        }
+        if (action === 'cancelTest') {
+          await cancelTest();
           return;
         }
         if (action === 'delete') {
@@ -971,9 +990,19 @@
         Drop Table...
       </button>
     {:else if contextMenu.kind === 'database'}
-      <button role="menuitem" on:click={() => handleContextAction('test')} disabled={testingConnId === contextMenu.connId}>
-        {testingConnId === contextMenu.connId ? 'Testing…' : 'Test Connection'}
+      <button role="menuitem" on:click={() => handleContextAction('query')}>
+        Query
       </button>
+      <div class="context-separator"></div>
+      {#if testingConnId === contextMenu.connId}
+        <button role="menuitem" on:click={() => handleContextAction('cancelTest')}>
+          Cancel Test
+        </button>
+      {:else}
+        <button role="menuitem" on:click={() => handleContextAction('test')}>
+          Test Connection
+        </button>
+      {/if}
       <div class="context-separator"></div>
       <button role="menuitem" on:click={() => handleContextAction('refresh')}>
         Refresh Schema

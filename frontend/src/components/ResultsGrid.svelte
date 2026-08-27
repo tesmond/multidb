@@ -3,6 +3,7 @@
   import type { ExecuteResult, TabEditInfo } from '../stores/appStore';
   import { fontScalePercent, tabs, isSqlTab } from '../stores/appStore';
   import { escapeTsvCell, formatValueForClipboard } from '../lib/resultClipboard';
+  import { calculateAutoFitColumnWidth } from '../lib/columnSizing';
 
   export let result: ExecuteResult | null = null;
   export let tabId: string = '';
@@ -12,7 +13,7 @@
   const BASE_ROW_HEIGHT = 28;
   const MAX_SCROLL_HEIGHT = 10_000_000;
   const BASE_CELL_PAD_X = 10;
-  // Average character width at 12px sans-serif — used for content-width estimation
+  // Used only if the browser cannot provide a canvas text measurement context.
   const BASE_AVG_CHAR_W = 5.6;
   const EXPLAIN_DEFAULT_TEXT_LEN = 120;
   const FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
@@ -28,7 +29,6 @@
   $: fontScale = $fontScalePercent / 100;
   $: rowHeight = BASE_ROW_HEIGHT * fontScale;
   $: cellPadX = BASE_CELL_PAD_X * fontScale;
-  $: avgCharW = BASE_AVG_CHAR_W * fontScale;
   $: font = `${12 * fontScale}px ${FONT_FAMILY}`;
   $: fontSmall = `${11 * fontScale}px ${FONT_FAMILY}`;
   $: fontNull = `italic ${12 * fontScale}px ${FONT_FAMILY}`;
@@ -62,10 +62,28 @@
   let colWidths: number[] = [];
   let _colWidthsKey = '';
   let _colWidthsFontScale = 1;
-  // Maximum cell text length (chars) per column — updated incrementally on every
-  // rows change so it stays correct across streaming chunks.
-  let colMaxTextLen: number[] = [];
-  let _colMaxTextLenRowCount = 0; // how many rows have already been scanned
+  interface ColumnTextMeasurement {
+    maxLength: number;
+    maxBaseWidth: number;
+  }
+
+  // Updated incrementally so auto-fit stays correct across streaming chunks.
+  let colTextMeasurements: ColumnTextMeasurement[] = [];
+  let _measuredRowCount = 0;
+  let textMeasurementContext: CanvasRenderingContext2D | null | undefined;
+
+  function measureBaseTextWidth(text: string): number {
+    if (textMeasurementContext === undefined) {
+      textMeasurementContext = typeof document === 'undefined'
+        ? null
+        : document.createElement('canvas').getContext('2d');
+      if (textMeasurementContext) {
+        textMeasurementContext.font = `12px ${FONT_FAMILY}`;
+      }
+    }
+    return textMeasurementContext?.measureText(text).width
+      ?? text.length * BASE_AVG_CHAR_W;
+  }
 
   function initialColumnTextLen(columnName: string): number {
     return columnName.toLowerCase() === 'explain'
@@ -79,14 +97,17 @@
     if (key !== _colWidthsKey) {
       _colWidthsKey = key;
       if (result?.columns) {
-        colMaxTextLen = result.columns.map(initialColumnTextLen);
-        colWidths = colMaxTextLen.map(len => textLenToWidth(len));
+        colTextMeasurements = result.columns.map(columnName => ({
+          maxLength: initialColumnTextLen(columnName),
+          maxBaseWidth: 0,
+        }));
+        colWidths = colTextMeasurements.map((_, idx) => columnTextWidth(idx));
         _colWidthsFontScale = fontScale;
       } else {
-        colMaxTextLen = [];
+        colTextMeasurements = [];
         colWidths = [];
       }
-      _colMaxTextLenRowCount = 0;
+      _measuredRowCount = 0;
     }
   }
 
@@ -100,34 +121,37 @@
   // a full re-scan of all rows on every update.
   $: {
     const dataRows = result?.rows;
-    if (dataRows && colMaxTextLen.length > 0) {
-      const prev = _colMaxTextLenRowCount;
+    if (dataRows && colTextMeasurements.length > 0) {
+      const prev = _measuredRowCount;
       const next = dataRows.length;
       if (next > prev) {
-        const maxLen = colMaxTextLen; // mutate in place — no new array needed
+        const measurements = colTextMeasurements;
         for (let r = prev; r < next; r++) {
           const row = dataRows[r];
-          for (let c = 0; c < row.length && c < maxLen.length; c++) {
+          for (let c = 0; c < row.length && c < measurements.length; c++) {
             const v = row[c];
-            const len = v === null ? 4 /* "NULL" */ : String(v).length;
-            if (len > maxLen[c]) maxLen[c] = len;
+            const text = v === null ? 'NULL' : String(v);
+            const measurement = measurements[c];
+            if (text.length > measurement.maxLength) measurement.maxLength = text.length;
+            const width = measureBaseTextWidth(text);
+            if (width > measurement.maxBaseWidth) measurement.maxBaseWidth = width;
           }
         }
-        _colMaxTextLenRowCount = next;
-        colMaxTextLen = maxLen; // trigger Svelte reactivity
+        _measuredRowCount = next;
+        colTextMeasurements = measurements;
       }
     }
   }
 
-  // ─── Column max widths (for auto-fit on resize-handle double-click) ───────────
-  // Derived instantly from colMaxTextLen using avgCharW — no canvas scan needed.
-  function ensureColMaxWidths() {
-    // colMaxTextLen is already up to date from the reactive block above; nothing to do.
-  }
-
-  // Convert a max text length to a clamped pixel width.
-  function textLenToWidth(len: number): number {
-    return Math.min(Math.max(len * avgCharW + cellPadX * 2 + 4 * fontScale, 50 * fontScale), 800 * fontScale);
+  function columnTextWidth(idx: number): number {
+    return calculateAutoFitColumnWidth(
+      colTextMeasurements[idx]?.maxBaseWidth ?? 0,
+      measureBaseTextWidth(result?.columns[idx] ?? ''),
+      {
+        cellPaddingX: cellPadX,
+        fontScale,
+      },
+    );
   }
 
   // ─── Resize drag state ────────────────────────────────────────────────────────
@@ -1070,13 +1094,12 @@
   }
 
   // ─── Auto-fit column on resize-handle double-click ───────────────────────────
-  // Ensures colMaxWidths is populated (lazy, cached per result), then applies.
+  // Applies the widest measured header or cell width for this result.
   function autoFitColumn(e: MouseEvent, idx: number) {
     e.preventDefault();
     e.stopPropagation();
-    const len = colMaxTextLen[idx];
-    if (len != null) {
-      colWidths[idx] = textLenToWidth(len);
+    if (colTextMeasurements[idx]) {
+      colWidths[idx] = columnTextWidth(idx);
       colWidths = [...colWidths];
     }
   }
@@ -1236,7 +1259,7 @@
       {#if result?.columnTypes?.[tooltipCol]}
         <span class="col-tooltip-type">{result.columnTypes[tooltipCol]}</span>
       {/if}
-      <span class="col-tooltip-len">max length: {colMaxTextLen[tooltipCol] ?? 0}</span>
+      <span class="col-tooltip-len">max length: {colTextMeasurements[tooltipCol]?.maxLength ?? 0}</span>
     </div>
   {/if}
 

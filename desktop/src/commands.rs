@@ -32,15 +32,24 @@ pub async fn save_and_connect(state: Arc<AppState>, cfg: ConnectionConfig) -> Co
     Ok(())
 }
 
-pub async fn test_connection(state: Arc<AppState>, cfg: ConnectionConfig) -> CommandResult<()> {
-    let cfg = resolve_connection_password(state.clone(), cfg)
-        .await
-        .map_err(command_err)?;
-    state
-        .connections
-        .test_connection(cfg)
-        .await
-        .map_err(command_err)
+pub async fn test_connection(
+    state: Arc<AppState>,
+    cfg: ConnectionConfig,
+    test_id: String,
+) -> CommandResult<()> {
+    let cancel = state.connection_tests.register(&test_id).await;
+    let result = async {
+        let cfg = resolve_connection_password(state.clone(), cfg).await?;
+        state.connections.test_connection(cfg, cancel).await
+    }
+    .await;
+    state.connection_tests.finish(&test_id).await;
+    result.map_err(command_err)
+}
+
+pub async fn cancel_test_connection(state: Arc<AppState>, test_id: String) -> CommandResult<()> {
+    state.connection_tests.cancel(&test_id).await;
+    Ok(())
 }
 
 async fn resolve_connection_password(
@@ -905,6 +914,14 @@ pub fn select_sqlite_file() -> CommandResult<String> {
     Ok(rfd::FileDialog::new()
         .set_title("Select SQLite database")
         .add_filter("SQLite Database", &["db", "sqlite", "sqlite3", "db3"])
+        .pick_file()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default())
+}
+
+pub fn select_kubectl_executable() -> CommandResult<String> {
+    Ok(rfd::FileDialog::new()
+        .set_title("Select kubectl executable")
         .pick_file()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default())

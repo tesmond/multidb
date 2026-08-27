@@ -104,6 +104,74 @@ export const fontScalePercent = writable<number>(
   clampFontScale(readStoredFontScale()),
 );
 
+export interface ConnectionOption {
+  value: string;
+  label: string;
+}
+
+export interface ConnectionDisplayStructure {
+  groups: Array<{
+    group: ServerGroup;
+    connections: ActiveConnection[];
+  }>;
+  ungrouped: ActiveConnection[];
+}
+
+export function buildConnectionDisplayStructure(
+  connections: ActiveConnection[],
+  groups: ServerGroup[],
+): ConnectionDisplayStructure {
+  const connectionsById = new Map(
+    connections.map((connection) => [connection.config.id, connection]),
+  );
+  const includedConnectionIds = new Set<string>();
+  const orderedGroups = groups.map((group) => ({
+    group,
+    connections: group.connectionIds.flatMap((connectionId) => {
+      const connection = connectionsById.get(connectionId);
+      if (!connection || includedConnectionIds.has(connectionId)) return [];
+      includedConnectionIds.add(connectionId);
+      return [connection];
+    }),
+  }));
+
+  return {
+    groups: orderedGroups,
+    ungrouped: connections.filter(
+      (connection) => !includedConnectionIds.has(connection.config.id),
+    ),
+  };
+}
+
+export const orderedConnectionOptions = derived(
+  [activeConnections, serverGroups],
+  ([$activeConnections, $serverGroups]): ConnectionOption[] => {
+    const structure = buildConnectionDisplayStructure(
+      $activeConnections,
+      $serverGroups,
+    );
+    const options: ConnectionOption[] = [];
+
+    for (const { group, connections } of structure.groups) {
+      for (const connection of connections) {
+        options.push({
+          value: connection.config.id,
+          label: `${group.title} - ${connection.config.name}`,
+        });
+      }
+    }
+
+    for (const connection of structure.ungrouped) {
+      options.push({
+        value: connection.config.id,
+        label: connection.config.name,
+      });
+    }
+
+    return options;
+  },
+);
+
 serverGroups.subscribe((groups) => {
   if (typeof localStorage === "undefined") return;
   localStorage.setItem(serverGroupsStorageKey, JSON.stringify(groups));
@@ -536,6 +604,24 @@ export function showDatabaseConnectionsForConnection(
 
   selectedConnId.set(connId);
   return openDatabaseConnectionsTab(connId, conn.config.name);
+}
+
+export function openQueryTabForConnection(connId: string): string | null {
+  const connection = get(activeConnections).find(
+    (entry) => entry.config.id === connId,
+  );
+  if (!connection) {
+    statusMessage.set("Connection not found.");
+    return null;
+  }
+
+  tabs.add(connId);
+  const nextTab = get(tabs).at(-1);
+  if (!nextTab) return null;
+
+  selectedConnId.set(connId);
+  activeTabId.set(nextTab.id);
+  return nextTab.id;
 }
 
 // -----------------------------------------------------------------------
