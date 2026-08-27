@@ -28,9 +28,14 @@ jobs:
           - os: windows-latest
             target: windows-x64
             artifact: desktop/target/release/multidb.exe
-          - os: macos-latest
+          - os: macos-13
             target: macos-x64
-            artifact: desktop/target/release/MultiDB-macos.zip
+            macos_zip: MultiDB-macos-x64.zip
+            artifact: desktop/target/release/MultiDB-macos-x64.zip
+          - os: macos-latest
+            target: macos-arm64
+            macos_zip: MultiDB-macos-arm64.zip
+            artifact: desktop/target/release/MultiDB-macos-arm64.zip
 
     steps:
       - name: Check out repository
@@ -66,6 +71,10 @@ jobs:
 
       - name: Build desktop app
         run: npm run build
+
+      - name: Rename macOS bundle for architecture
+        if: runner.os == 'macOS'
+        run: mv desktop/target/release/MultiDB-macos.zip desktop/target/release/${{ matrix.macos_zip }}
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v7
