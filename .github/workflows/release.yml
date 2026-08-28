@@ -28,10 +28,12 @@ jobs:
           - os: windows-latest
             target: windows-x64
             artifact: desktop/target/release/multidb.exe
-          - os: macos-latest
-            target: macos-arm64
-            macos_zip: MultiDB-macos-arm64.zip
-            artifact: desktop/target/release/MultiDB-macos-arm64.zip
+          # macOS build is currently disabled
+          # No developer ID
+          # - os: macos-latest
+          #   target: macos-arm64
+          #   macos_zip: MultiDB-macos-arm64.zip
+          #   artifact: desktop/target/release/MultiDB-macos-arm64.zip
 
     steps:
       - name: Check out repository
