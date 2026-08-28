@@ -42,7 +42,10 @@ test.beforeEach(async ({ page }) => {
             {
               name: 'users',
               sizeBytes: 128,
-              columns: [{ name: 'id', type: 'integer', key: 'PRI' }],
+              columns: [
+                { name: 'id', type: 'integer', key: 'PRI' },
+                { name: 'email_address', type: 'text', key: '' },
+              ],
             },
           ],
           views: [],
@@ -102,7 +105,18 @@ test('navigator renders tables with a single row element per table entry', async
 
   await expect(page.locator('.navigator .table-label')).toContainText('users');
   await page.locator('.navigator .table-label').filter({ hasText: 'users' }).click();
-  await expect(page.locator('.navigator .col-row')).toContainText('id');
+
+  const primaryColumn = page.locator('.navigator .col-row').filter({ hasText: 'id' });
+  const regularColumn = page.locator('.navigator .col-row').filter({ hasText: 'email_address' });
+  await expect(primaryColumn).toContainText('id');
+  await expect(primaryColumn.locator('.col-key')).toHaveText('🔑');
+  await expect(regularColumn.locator('.col-key')).toHaveCount(0);
+
+  const primaryName = await primaryColumn.locator('.col-name').boundingBox();
+  const regularName = await regularColumn.locator('.col-name').boundingBox();
+  expect(primaryName).not.toBeNull();
+  expect(regularName).not.toBeNull();
+  expect(regularName!.x).toBeLessThan(primaryName!.x);
 });
 
 test('connection dropdown follows navigator group order and labels', async ({ page }) => {
@@ -118,6 +132,24 @@ test('connection dropdown follows navigator group order and labels', async ({ pa
     'Production - Test DB',
     'Local DB',
   ]);
+});
+
+test('database sections are indented below grouped connections', async ({ page }) => {
+  await seedProductionGroup(page);
+  await page.goto('/');
+
+  await page.locator('.navigator .group-label').filter({ hasText: 'Production' }).click();
+  const connection = page.locator('.navigator .conn-label').filter({ hasText: 'Replica DB' });
+  await connection.click();
+  const databaseSection = page.locator('.navigator .section-label').filter({ hasText: 'Tables' });
+  await expect(databaseSection).toBeVisible();
+
+  const connectionChevron = await connection.locator('.chevron').boundingBox();
+  const databaseChevron = await databaseSection.locator('.chevron').boundingBox();
+
+  expect(connectionChevron).not.toBeNull();
+  expect(databaseChevron).not.toBeNull();
+  expect(databaseChevron!.x).toBeGreaterThan(connectionChevron!.x);
 });
 
 test('connection context menu opens an empty query for that connection', async ({ page }) => {

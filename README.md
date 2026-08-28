@@ -70,59 +70,51 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 ## Prerequisites
 
 - Rust stable
-- Node.js and npm
+- [Bun](https://bun.sh/)
+- `make`
 - Platform dependencies for WRY/WebKitGTK on Linux
 - Optional tools based on workflow:
   - `kubectl` for Kubernetes port-forwarded connections
 
-## Development
+## Install and build
 
-Install dependencies:
-
-```bash
-npm install
-cd frontend
-npm install
-cd ..
-```
-
-Run the desktop app in development mode:
+Install JavaScript dependencies once, from the repository root:
 
 ```bash
-npm run dev
+bun install
 ```
 
-This builds the frontend once and starts the lightweight WRY/Tao desktop app.
-
-## Build
-
-Create a production desktop build:
+Then compile the production application:
 
 ```bash
-npm run build
+make
 ```
 
-The build script compiles the Svelte bundle first, then embeds those static assets into the WRY executable so the app can start without loose frontend files beside it.
+`bun install` uses the root workspace definition and installs the frontend package too. Do not run an install command inside `frontend/`.
+
+The build compiles the Svelte frontend first, then builds the Rust desktop executable at `desktop/target/release/multidb`. On macOS it also creates the application bundle.
+
+For development, run:
+
+```bash
+make dev
+```
+
+## Running the macOS download
+
+The macOS download is not currently notarized, so Gatekeeper may block it the first time it runs. Only override this warning if you downloaded MultiDB from a source you trust.
+
+1. Unzip the download and move `MultiDB.app` to the `Applications` folder.
+2. Try to open `MultiDB.app` once, then dismiss the warning.
+3. Open **System Settings**, select **Privacy & Security**, and scroll down to **Security**.
+4. Click **Open Anyway** beside the MultiDB warning.
+5. Authenticate when prompted, then click **Open**.
+
+macOS saves MultiDB as an exception, so later launches work normally. The **Open Anyway** button is available for about an hour after the blocked launch. See [Apple's instructions for opening an app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac).
 
 ## Testing And Checks
 
-Run Rust checks:
-
-```bash
-npm run rust:check
-```
-
-Run frontend checks:
-
-```bash
-npm run frontend:check
-```
-
-Build the frontend:
-
-```bash
-npm run frontend:build
-```
+Run both frontend and Rust checks with `make check`.
 
 ## Data Storage
 

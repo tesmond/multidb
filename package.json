@@ -3,16 +3,16 @@
   "private": true,
   "version": "0.3.0",
   "type": "module",
+  "workspaces": [
+    "frontend"
+  ],
   "scripts": {
-    "dev": "npm run frontend:build && cd desktop && cargo run",
-    "build": "npm run frontend:build && cd desktop && cargo build --release",
-    "postbuild": "node -e \"if(process.platform==='darwin'){require('child_process').execSync('sh build/darwin/bundle.sh',{stdio:'inherit'})}\"",
-    "frontend:dev": "npm --prefix frontend run dev",
-    "frontend:build": "npm --prefix frontend run build",
-    "frontend:check": "npm --prefix frontend run check",
-    "rust:check": "cd desktop && cargo check"
-  },
-  "dependencies": {
-    "vite": "^8.2.2"
+    "dev": "bun run frontend:build && cargo run --manifest-path desktop/Cargo.toml",
+    "build": "bun run frontend:build && cargo build --manifest-path desktop/Cargo.toml --release && bun run bundle:macos",
+    "bundle:macos": "bun -e \"if (process.platform === 'darwin') { const result = Bun.spawnSync(['sh', 'build/darwin/bundle.sh'], { stdout: 'inherit', stderr: 'inherit' }); process.exit(result.exitCode ?? 1) }\"",
+    "frontend:dev": "bun run --cwd frontend dev",
+    "frontend:build": "bun run --cwd frontend build",
+    "frontend:check": "bun run --cwd frontend check",
+    "rust:check": "cargo check --manifest-path desktop/Cargo.toml"
   }
 }

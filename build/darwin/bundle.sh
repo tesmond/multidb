@@ -20,6 +20,6 @@ chmod +x "$APP_DIR/Contents/MacOS/multidb"
 echo "Zipping MultiDB.app..."
 cd "$RELEASE_DIR"
 rm -f MultiDB-macos.zip
-zip -r --symlinks MultiDB-macos.zip MultiDB.app
+zip -qr --symlinks MultiDB-macos.zip MultiDB.app
 
 echo "Done: $RELEASE_DIR/MultiDB-macos.zip"

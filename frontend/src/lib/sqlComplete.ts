@@ -24,6 +24,7 @@
  */
 
 import type { CompletionContext, CompletionResult, Completion } from '@codemirror/autocomplete';
+import { syntaxTree } from '@codemirror/language';
 
 // ─── Public data types ────────────────────────────────────────────────────────
 
@@ -235,6 +236,159 @@ function tableCompletion(t: TableInfo): Completion {
 
 function schemaCompletion(name: string): Completion {
   return { label: name, type: 'namespace', boost: 5 };
+}
+
+const COMMON_SQL_FUNCTIONS = [
+  'AVG', 'CAST', 'COALESCE', 'COUNT', 'LOWER', 'MAX', 'MIN', 'NULLIF',
+  'ROUND', 'SUBSTRING', 'SUM', 'TRIM', 'UPPER',
+];
+
+const SQL_FUNCTIONS_BY_DRIVER: Record<string, string[]> = {
+  mysql: ['DATE_FORMAT', 'GROUP_CONCAT', 'IFNULL', 'JSON_EXTRACT', 'NOW'],
+  postgres: ['ARRAY_AGG', 'DATE_TRUNC', 'JSONB_BUILD_OBJECT', 'NOW', 'STRING_AGG'],
+  sqlite: ['DATETIME', 'GROUP_CONCAT', 'IFNULL', 'JULIANDAY', 'STRFTIME'],
+};
+
+function functionCompletion(name: string): Completion {
+  return { label: name, type: 'function', detail: 'SQL function', boost: 78 };
+}
+
+type SqlCompletionMode = 'expression' | 'table' | 'neutral';
+
+function statementBounds(ctx: CompletionContext): { from: number; to: number } {
+  let node = syntaxTree(ctx.state).resolveInner(ctx.pos, -1);
+  while (node.parent && node.name !== 'Statement') node = node.parent;
+  if (node.name === 'Statement') return { from: node.from, to: node.to };
+
+  const doc = ctx.state.doc.toString();
+  const from = doc.lastIndexOf(';', Math.max(0, ctx.pos - 1)) + 1;
+  const nextSemicolon = doc.indexOf(';', ctx.pos);
+  return { from, to: nextSemicolon === -1 ? doc.length : nextSemicolon };
+}
+
+/**
+ * Returns SQL words and structural punctuation while skipping strings,
+ * quoted identifiers, and comments. This remains useful when the Lezer tree
+ * contains error nodes for an unfinished statement.
+ */
+function sqlContextTokens(sqlText: string): string[] {
+  const tokens: string[] = [];
+  let i = 0;
+
+  while (i < sqlText.length) {
+    const ch = sqlText[i];
+    const next = sqlText[i + 1];
+
+    if (ch === '-' && next === '-') {
+      i += 2;
+      while (i < sqlText.length && sqlText[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < sqlText.length && !(sqlText[i] === '*' && sqlText[i + 1] === '/')) i++;
+      i = Math.min(sqlText.length, i + 2);
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`' || ch === '[') {
+      const close = ch === '[' ? ']' : ch;
+      i++;
+      while (i < sqlText.length) {
+        if (sqlText[i] === close) {
+          if (sqlText[i + 1] === close && close !== ']') {
+            i += 2;
+            continue;
+          }
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      const start = i++;
+      while (i < sqlText.length && /[\w$]/.test(sqlText[i])) i++;
+      tokens.push(sqlText.slice(start, i).toUpperCase());
+      continue;
+    }
+    if ('();,'.includes(ch)) tokens.push(ch);
+    i++;
+  }
+
+  return tokens;
+}
+
+function completionMode(sqlBeforeCursor: string): SqlCompletionMode {
+  const modes: SqlCompletionMode[] = ['neutral'];
+  let awaitingBy = false;
+
+  for (const token of sqlContextTokens(sqlBeforeCursor)) {
+    const depth = modes.length - 1;
+
+    if (token === ';') {
+      modes.splice(0, modes.length, 'neutral');
+      awaitingBy = false;
+      continue;
+    }
+    if (token === '(') {
+      modes.push(modes[depth]);
+      continue;
+    }
+    if (token === ')') {
+      if (modes.length > 1) modes.pop();
+      continue;
+    }
+
+    if (token === 'SELECT' || token === 'WHERE' || token === 'ON' ||
+        token === 'HAVING' || token === 'RETURNING' || token === 'SET' ||
+        token === 'VALUES') {
+      modes[modes.length - 1] = 'expression';
+      awaitingBy = false;
+    } else if (token === 'FROM' || token === 'JOIN' || token === 'UPDATE' || token === 'INTO') {
+      modes[modes.length - 1] = 'table';
+      awaitingBy = false;
+    } else if (token === 'GROUP' || token === 'ORDER') {
+      awaitingBy = true;
+    } else if (token === 'BY' && awaitingBy) {
+      modes[modes.length - 1] = 'expression';
+      awaitingBy = false;
+    }
+  }
+
+  return modes[modes.length - 1];
+}
+
+function findTable(db: DbSchema, schemaName: string, tableName: string): TableInfo | undefined {
+  const lowerTable = tableName.toLowerCase();
+  if (db.schemas?.length) {
+    const schemas = schemaName
+      ? db.schemas.filter((schema) => schema.name.toLowerCase() === schemaName.toLowerCase())
+      : db.schemas;
+    for (const schema of schemas) {
+      const table = schema.tables.find((candidate) => candidate.name.toLowerCase() === lowerTable);
+      if (table) return table;
+    }
+    return undefined;
+  }
+
+  return [...(db.tables ?? []), ...(db.views ?? [])]
+    .find((candidate) => candidate.name.toLowerCase() === lowerTable);
+}
+
+function referencedColumnNames(sqlText: string, db: DbSchema): Set<string> {
+  const names = new Set<string>();
+  const tableRef = /\b(?:FROM|JOIN)\s+(?:([\w"'`[\]]+)\s*\.\s*)?([\w"'`[\]]+)/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = tableRef.exec(sqlText)) !== null) {
+    const schemaName = match[1] ? normalizeIdent(match[1]) : '';
+    const tableName = normalizeIdent(match[2]);
+    const table = findTable(db, schemaName, tableName);
+    for (const column of table?.columns ?? []) names.add(column.name.toLowerCase());
+  }
+
+  return names;
 }
 
 type TableRef = {
@@ -708,64 +862,79 @@ export function makeSmartCompletionSource(db: DbSchema) {
 
     // ── No dot: free-standing word completion ─────────────────────────────
     const word = ctx.matchBefore(/\w+/);
-    if (!word && !ctx.explicit) return null;
+    const bounds = statementBounds(ctx);
+    const statementBeforeCursor = ctx.state.sliceDoc(bounds.from, ctx.pos);
+    const automaticClauseStart = /\b(?:SELECT|WHERE|ON|HAVING|RETURNING|SET|BY|FROM|JOIN)\s*$/i
+      .test(statementBeforeCursor) || /,\s*$/.test(statementBeforeCursor);
+    if (!word && !ctx.explicit && !automaticClauseStart) return null;
 
     const partial = (word?.text ?? '').toLowerCase();
     const from    = word?.from ?? ctx.pos;
 
-    // Determine if we're in a position where column names are useful.
-    // Heuristic: look back (up to 200 chars) for SELECT, WHERE, SET, ON,
-    // HAVING, RETURNING — if found before the next statement boundary, boost
-    // column completions.
-    const lookBack   = ctx.state.sliceDoc(Math.max(0, ctx.pos - 200), ctx.pos);
-    const inColCtx   = /\b(SELECT|WHERE|SET|ON|HAVING|RETURNING|BY)\b/i.test(lookBack);
-    const inFromCtx  = /\b(FROM|JOIN)\s*$/i.test(lookBack.trimEnd());
+    const statementSql = ctx.state.sliceDoc(bounds.from, bounds.to);
+    const mode = completionMode(statementBeforeCursor);
+    const referencedColumns = referencedColumnNames(statementSql, db);
 
     const options: Completion[] = [];
-    const seen = new Set<string>();
+    const optionIndex = new Map<string, number>();
 
     function add(c: Completion) {
-      if (!seen.has(c.label)) {
-        seen.add(c.label);
+      const key = c.label.toLowerCase();
+      const existingIndex = optionIndex.get(key);
+      if (existingIndex === undefined) {
+        optionIndex.set(key, options.length);
         options.push(c);
+        return;
       }
+
+      const existing = options[existingIndex];
+      if ((c.boost ?? 0) > (existing.boost ?? 0)) {
+        options[existingIndex] = c;
+      }
+    }
+
+    if (mode === 'expression') {
+      const functions = [...COMMON_SQL_FUNCTIONS, ...(SQL_FUNCTIONS_BY_DRIVER[db.driver] ?? [])];
+      for (const name of functions) {
+        if (name.toLowerCase().startsWith(partial)) add(functionCompletion(name));
+      }
+    }
+
+    function addTable(table: TableInfo) {
+      if (!table.name.toLowerCase().startsWith(partial)) return;
+      const completion = tableCompletion(table);
+      add({
+        ...completion,
+        boost: mode === 'table' ? 92 : mode === 'expression' ? 4 : completion.boost,
+      });
+    }
+
+    function addColumn(column: ColInfo) {
+      if (mode !== 'expression' || !column.name.toLowerCase().startsWith(partial)) return;
+      const inScope = referencedColumns.has(column.name.toLowerCase());
+      add({
+        ...colCompletion(column),
+        boost: (inScope ? 88 : 48) + (column.key === 'PRI' ? 2 : 0),
+      });
     }
 
     if (db.schemas) {
       for (const s of db.schemas) {
         if (s.name.toLowerCase().startsWith(partial)) {
-          add(schemaCompletion(s.name));
+          const completion = schemaCompletion(s.name);
+          add({ ...completion, boost: mode === 'table' ? 84 : completion.boost });
         }
         for (const t of s.tables) {
-          if (t.name.toLowerCase().startsWith(partial)) {
-            const comp = tableCompletion(t);
-            // Boost tables when we're right after FROM / JOIN
-            add(inFromCtx ? { ...comp, boost: (comp.boost ?? 0) + 4 } : comp);
-          }
-          if (inColCtx) {
-            for (const c of t.columns) {
-              if (c.name.toLowerCase().startsWith(partial)) {
-                add({ ...colCompletion(c), boost: (colCompletion(c).boost ?? 0) - 2 });
-              }
-            }
-          }
+          addTable(t);
+          for (const c of t.columns) addColumn(c);
         }
       }
     } else {
       // Flat (SQLite)
       const all = [...(db.tables ?? []), ...(db.views ?? [])];
       for (const t of all) {
-        if (t.name.toLowerCase().startsWith(partial)) {
-          const comp = tableCompletion(t);
-          add(inFromCtx ? { ...comp, boost: (comp.boost ?? 0) + 4 } : comp);
-        }
-        if (inColCtx) {
-          for (const c of t.columns) {
-            if (c.name.toLowerCase().startsWith(partial)) {
-              add({ ...colCompletion(c), boost: (colCompletion(c).boost ?? 0) - 2 });
-            }
-          }
-        }
+        addTable(t);
+        for (const c of t.columns) addColumn(c);
       }
     }
 

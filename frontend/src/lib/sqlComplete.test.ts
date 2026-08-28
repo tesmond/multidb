@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { findSqlSemanticDiagnostics, type DbSchema } from './sqlComplete';
+import { CompletionContext, type Completion, type CompletionResult } from '@codemirror/autocomplete';
+import { MySQL, sql as sqlLanguage } from '@codemirror/lang-sql';
+import { EditorState } from '@codemirror/state';
+import { findSqlSemanticDiagnostics, makeSmartCompletionSource, type DbSchema } from './sqlComplete';
 
 const mysqlSchema: DbSchema = {
   driver: 'mysql',
@@ -11,13 +14,76 @@ const mysqlSchema: DbSchema = {
           name: 'users',
           columns: [
             { name: 'id' },
+            { name: 'username' },
             { name: 'data_length' },
+          ],
+        },
+        {
+          name: 'orders',
+          columns: [
+            { name: 'order_id' },
+            { name: 'user_id' },
           ],
         },
       ],
     },
   ],
 };
+
+function completionsAt(query: string, cursor = query.length, explicit = true): CompletionResult {
+  const state = EditorState.create({
+    doc: query,
+    extensions: [sqlLanguage({ dialect: MySQL })],
+  });
+  const source = makeSmartCompletionSource(mysqlSchema);
+  const result = source(new CompletionContext(state, cursor, explicit));
+
+  expect(result).not.toBeNull();
+  expect(result).not.toBeInstanceOf(Promise);
+  return result as CompletionResult;
+}
+
+function option(result: CompletionResult, label: string): Completion {
+  const completion = result.options.find((candidate) => candidate.label === label);
+  expect(completion, `Expected completion ${label}`).toBeDefined();
+  return completion!;
+}
+
+describe('SQL completion ranking', () => {
+  it.each(['SELECT ', 'SELECT * FROM users WHERE '])(
+    'offers expression completions automatically after %s',
+    (query) => {
+      const result = completionsAt(query, query.length, false);
+
+      expect(option(result, 'COUNT').boost).toBeGreaterThan(option(result, 'users').boost!);
+      expect(option(result, 'username').boost).toBeGreaterThan(option(result, 'users').boost!);
+    },
+  );
+
+  it('ranks matching functions and in-scope columns above tables in SELECT expressions', () => {
+    const functionResult = completionsAt('SELECT co');
+    expect(option(functionResult, 'COUNT').type).toBe('function');
+
+    const sql = 'SELECT  FROM users';
+    const result = completionsAt(sql, 'SELECT '.length);
+    expect(option(result, 'COUNT').boost).toBeGreaterThan(option(result, 'users').boost!);
+    expect(option(result, 'username').boost).toBeGreaterThan(option(result, 'users').boost!);
+  });
+
+  it('ranks columns from referenced tables above unrelated columns in WHERE expressions', () => {
+    const result = completionsAt('SELECT * FROM users WHERE ');
+
+    expect(option(result, 'username').boost).toBeGreaterThan(option(result, 'order_id').boost!);
+    expect(option(result, 'username').boost).toBeGreaterThan(option(result, 'users').boost!);
+  });
+
+  it.each(['FROM', 'JOIN'])('keeps tables above matching columns after %s with a partial name', (clause) => {
+    const result = completionsAt(`SELECT * FROM orders ${clause} us`);
+
+    expect(option(result, 'users').boost).toBeGreaterThanOrEqual(90);
+    expect(result.options.some((candidate) => candidate.label === 'username')).toBe(false);
+  });
+});
 
 describe('SQL semantic diagnostics', () => {
   it('allows MySQL information_schema table size queries', () => {

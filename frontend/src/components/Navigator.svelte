@@ -792,7 +792,9 @@
                                 <div class="col-list">
                                   {#each table.columns ?? [] as col}
                                     <div class="col-row">
-                                      <span class="col-key" title={col.key}>{col.key === 'PRI' ? '🔑' : '·'}</span>
+                                      {#if col.key === 'PRI'}
+                                        <span class="col-key" title={col.key}>🔑</span>
+                                      {/if}
                                       <span class="col-name">{col.name}</span>
                                       <span class="col-type">{col.type}</span>
                                     </div>
@@ -890,7 +892,9 @@
                       <div class="col-list">
                         {#each table.columns ?? [] as col}
                           <div class="col-row">
-                            <span class="col-key" title={col.key}>{col.key === 'PRI' ? '🔑' : '·'}</span>
+                            {#if col.key === 'PRI'}
+                              <span class="col-key" title={col.key}>🔑</span>
+                            {/if}
                             <span class="col-name">{col.name}</span>
                             <span class="col-type">{col.type}</span>
                           </div>
@@ -1247,6 +1251,7 @@
   }
 
   .conn-children { padding-left: 16px; }
+  .conn-children > .schema-section { margin-left: 16px; }
   .schema-section { margin: 2px 0; }
   .section-label {
     display: flex; align-items: center; gap: 4px;

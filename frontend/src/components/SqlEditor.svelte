@@ -11,7 +11,7 @@
   import { EditorState, Compartment } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { sql, MySQL, PostgreSQL, SQLite } from '@codemirror/lang-sql';
-  import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
+  import { acceptCompletion, autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
   import { buildSqlNamespace, makeSmartCompletionSource, findSqlSemanticDiagnostics, findSqlCommonSyntaxDiagnostics, type DbSchema } from '../lib/sqlComplete';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { lineNumbers, highlightActiveLineGutter, highlightActiveLine } from '@codemirror/view';
@@ -375,6 +375,7 @@
             activateOnTyping: true,
             maxRenderedOptions: 50,
             defaultKeymap: true,
+            interactionDelay: 0,
           }),
           lintGutter(),
           sqlLinter,
@@ -386,6 +387,7 @@
             ...historyKeymap,
             ...completionKeymap,
             ...searchKeymap,
+            { key: 'Tab', run: acceptCompletion },
             indentWithTab,
           ]),
           placeholder('Type SQL here… (Ctrl+Enter to run)'),
