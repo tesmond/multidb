@@ -112,6 +112,11 @@ The macOS download is not currently notarized, so Gatekeeper may block it the fi
 
 macOS saves MultiDB as an exception, so later launches work normally. The **Open Anyway** button is available for about an hour after the blocked launch. See [Apple's instructions for opening an app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac).
 
+If you get a "download is broken..." error instead run:
+`sudo xattr -cr path/to/MultiDB.app` 
+
+The application should then run as expected.
+
 ## Testing And Checks
 
 Run both frontend and Rust checks with `make check`.
