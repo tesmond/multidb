@@ -792,10 +792,10 @@
                                 <div class="col-list">
                                   {#each table.columns ?? [] as col}
                                     <div class="col-row">
+                                      <span class="col-name">{col.name}</span>
                                       {#if col.key === 'PRI'}
                                         <span class="col-key" title={col.key}>🔑</span>
                                       {/if}
-                                      <span class="col-name">{col.name}</span>
                                       <span class="col-type">{col.type}</span>
                                     </div>
                                   {/each}
@@ -892,10 +892,10 @@
                       <div class="col-list">
                         {#each table.columns ?? [] as col}
                           <div class="col-row">
+                            <span class="col-name">{col.name}</span>
                             {#if col.key === 'PRI'}
                               <span class="col-key" title={col.key}>🔑</span>
                             {/if}
-                            <span class="col-name">{col.name}</span>
                             <span class="col-type">{col.type}</span>
                           </div>
                         {/each}

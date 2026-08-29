@@ -116,7 +116,8 @@ test('navigator renders tables with a single row element per table entry', async
   const regularName = await regularColumn.locator('.col-name').boundingBox();
   expect(primaryName).not.toBeNull();
   expect(regularName).not.toBeNull();
-  expect(regularName!.x).toBeLessThan(primaryName!.x);
+  expect(primaryName!.x).toBe(regularName!.x);
+  await expect(primaryColumn.locator('.col-name + .col-key')).toHaveText('🔑');
 });
 
 test('connection dropdown follows navigator group order and labels', async ({ page }) => {
