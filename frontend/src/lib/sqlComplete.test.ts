@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { CompletionContext, type Completion, type CompletionResult } from '@codemirror/autocomplete';
 import { MySQL, sql as sqlLanguage } from '@codemirror/lang-sql';
 import { EditorState } from '@codemirror/state';
-import { findSqlSemanticDiagnostics, makeSmartCompletionSource, type DbSchema } from './sqlComplete';
+import {
+  findSqlSemanticDiagnostics,
+  isIgnorableSqlParserError,
+  makeSmartCompletionSource,
+  type DbSchema,
+} from './sqlComplete';
 
 const mysqlSchema: DbSchema = {
   driver: 'mysql',
@@ -107,6 +112,10 @@ ORDER BY total_mb DESC;
     expect(findSqlSemanticDiagnostics(sql, mysqlSchema)).toEqual([]);
   });
 
+  it('allows a table-qualified wildcard', () => {
+    expect(findSqlSemanticDiagnostics('SELECT users.* FROM users LIMIT 4;', mysqlSchema)).toEqual([]);
+  });
+
   it('reports unknown bare selected columns', () => {
     const diagnostics = findSqlSemanticDiagnostics('SELECT missing_column FROM users', mysqlSchema);
 
@@ -139,5 +148,17 @@ ORDER BY total_mb DESC;
     expect(diagnostics.map((diagnostic) => diagnostic.message)).toContain(
       'Unknown table missing_table',
     );
+  });
+});
+
+describe('SQL parser error filtering', () => {
+  it('allows a wildcard qualified by a table name', () => {
+    const sql = 'SELECT a.* FROM albums a LIMIT 12;';
+
+    expect(isIgnorableSqlParserError(sql, 9, 10)).toBe(true);
+  });
+
+  it('does not ignore unrelated zero-width parser errors', () => {
+    expect(isIgnorableSqlParserError('SELECT FROM albums', 7, 7)).toBe(false);
   });
 });

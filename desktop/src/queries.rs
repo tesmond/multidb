@@ -11,7 +11,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub fn looks_like_row_returning_query(query: &str) -> bool {
-    let q = query.trim();
+    let q = strip_leading_comments(query);
     if q.is_empty() {
         return false;
     }
@@ -270,16 +270,36 @@ pub async fn execute_mysql_non_query(pool: &MySqlPool, query: &str) -> ExecuteRe
 }
 
 pub fn split_statements(query: &str) -> Vec<String> {
-    let statements: Vec<_> = query
+    query
         .split(';')
-        .map(str::trim)
+        .map(strip_leading_comments)
         .filter(|statement| !statement.is_empty())
         .map(ToOwned::to_owned)
-        .collect();
-    if statements.is_empty() {
-        vec![query.trim().to_string()]
-    } else {
-        statements
+        .collect()
+}
+
+/// Remove comments before the first executable SQL token.
+///
+/// Comments elsewhere in a statement are left alone. This is intentionally
+/// only a small lexer for the prefix, since the database still parses the SQL
+/// itself and may support dialect-specific comment forms in the body.
+fn strip_leading_comments(mut query: &str) -> &str {
+    loop {
+        query = query.trim_start();
+
+        if query.starts_with("--") || query.starts_with('#') {
+            match query.find('\n') {
+                Some(newline) => query = &query[newline + 1..],
+                None => return "",
+            }
+        } else if query.starts_with("/*") {
+            match query.find("*/") {
+                Some(end) => query = &query[end + 2..],
+                None => return "",
+            }
+        } else {
+            return query.trim();
+        }
     }
 }
 
@@ -1447,8 +1467,30 @@ mod tests {
     use super::{
         decode_pg_numeric, format_binary_value, format_pg_array_binary, format_pg_binary_value,
         format_text_value, geometry_bytes_to_text, is_boolean_type, json_value_to_text,
+        looks_like_row_returning_query, split_statements,
     };
     use serde_json::json;
+
+    #[test]
+    fn leading_comments_do_not_hide_row_returning_queries() {
+        assert!(looks_like_row_returning_query(
+            "-- explain the query\nSELECT 1"
+        ));
+        assert!(looks_like_row_returning_query(
+            "/* explain the query */\nSELECT 1"
+        ));
+    }
+
+    #[test]
+    fn split_statements_removes_leading_comments_from_each_statement() {
+        assert_eq!(
+            split_statements("-- first\nCREATE TABLE items (id INTEGER); /* second */ INSERT INTO items VALUES (1);"),
+            vec![
+                "CREATE TABLE items (id INTEGER)".to_string(),
+                "INSERT INTO items VALUES (1)".to_string(),
+            ]
+        );
+    }
 
     #[test]
     fn json_values_render_as_text() {
@@ -1493,6 +1535,27 @@ mod tests {
         )
         .await;
 
+        assert_eq!(result.rows, vec![vec![json!(1)]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_query_with_leading_comment_returns_rows() {
+        sqlx::any::install_default_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create in-memory sqlite pool");
+
+        let result = super::execute(
+            &pool,
+            "-- query data\nSELECT 1",
+            100,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(result.error, "");
         assert_eq!(result.rows, vec![vec![json!(1)]]);
     }
 

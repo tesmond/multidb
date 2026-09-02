@@ -69,6 +69,24 @@ export interface SqlSyntaxDiagnostic {
   message: string;
 }
 
+/**
+ * CodeMirror's SQL grammar reports the `*` in `table.*` as a zero-width
+ * error node even though the construct is valid SQL. Keep that parser quirk
+ * out of the editor's syntax diagnostics without hiding other errors.
+ */
+export function isIgnorableSqlParserError(doc: string, from: number, to: number): boolean {
+  const token = doc.slice(from, to);
+  if (token === '/') {
+    const before = doc.slice(0, from).match(/\S\s*$/)?.[0]?.trim();
+    const after = doc.slice(to).match(/^\s*\S/)?.[0]?.trim();
+    return !!before && !!after && /[\w$.)\]]/.test(before) && /[\w$([+-]/.test(after);
+  }
+
+  if (to - from !== 1 || doc.slice(from, to) !== '*') return false;
+  const before = doc.slice(0, from).match(/[A-Za-z_][\w$]*\s*\.\s*$/)?.[0] ?? '';
+  return /[A-Za-z_]\s*\.\s*$/.test(before);
+}
+
 // ─── Namespace builder ────────────────────────────────────────────────────────
 
 /**
@@ -685,8 +703,9 @@ function findColumnReferences(expression: string): Array<{
     const second = m[2];
     const afterMatch = expression.slice(tokenRe.lastIndex);
     const isFunctionName = !second && /^\s*\(/.test(afterMatch);
+    const isQualifiedWildcard = !second && /^\s*\.\s*\*/.test(afterMatch);
 
-    if (isFunctionName || RESERVED.has(first.toUpperCase())) continue;
+    if (isFunctionName || isQualifiedWildcard || RESERVED.has(first.toUpperCase())) continue;
 
     if (second) {
       const secondOffset = m[0].lastIndexOf(second);

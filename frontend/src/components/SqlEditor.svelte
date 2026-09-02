@@ -12,7 +12,7 @@
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { sql, MySQL, PostgreSQL, SQLite } from '@codemirror/lang-sql';
   import { acceptCompletion, autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
-  import { buildSqlNamespace, makeSmartCompletionSource, findSqlSemanticDiagnostics, findSqlCommonSyntaxDiagnostics, type DbSchema } from '../lib/sqlComplete';
+  import { buildSqlNamespace, makeSmartCompletionSource, findSqlSemanticDiagnostics, findSqlCommonSyntaxDiagnostics, isIgnorableSqlParserError, type DbSchema } from '../lib/sqlComplete';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { lineNumbers, highlightActiveLineGutter, highlightActiveLine } from '@codemirror/view';
   import { bracketMatching, indentOnInput, syntaxTree } from '@codemirror/language';
@@ -39,15 +39,6 @@
   let editorEl: HTMLDivElement;
   let view: EditorView | null = null;
   let sqlCompartment = new Compartment();
-
-  function isIgnorableParserError(editorView: EditorView, from: number, to: number): boolean {
-    if (editorView.state.sliceDoc(from, to) !== '/') return false;
-    const doc = editorView.state.doc.toString();
-    const before = doc.slice(0, from).match(/\S\s*$/)?.[0]?.trim();
-    const after = doc.slice(to).match(/^\s*\S/)?.[0]?.trim();
-
-    return !!before && !!after && /[\w$.)\]]/.test(before) && /[\w$([+-]/.test(after);
-  }
 
   // Combined linter: parser errors + schema-aware semantic identifier checks.
   const sqlLinter = linter((editorView) => {
@@ -86,7 +77,7 @@
         // Expand zero-length error ranges by one char so the underline is visible.
         const from = node.from;
         const to   = node.to > node.from ? node.to : Math.min(node.from + 1, editorView.state.doc.length);
-        if (isIgnorableParserError(editorView, from, to)) return;
+        if (isIgnorableSqlParserError(editorView.state.doc.toString(), from, to)) return;
         diagnostics.push({
           from,
           to,
