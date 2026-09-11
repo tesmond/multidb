@@ -90,6 +90,7 @@ pub async fn list_saved_connections(state: Arc<AppState>) -> CommandResult<Vec<C
 pub async fn execute_query(
     state: Arc<AppState>,
     conn_id: String,
+    database_name: String,
     query_id: String,
     query: String,
     max_rows: i64,
@@ -107,7 +108,7 @@ pub async fn execute_query(
 
     let result = if cfg.driver == "postgres" {
         let pool = state
-            .get_pg_pool_or_reconnect(&conn_id)
+            .get_pg_pool_for_database_or_reconnect(&conn_id, &database_name)
             .await
             .map_err(command_err)?;
         queries::execute_postgres(&pool, &query, max_rows, cancel).await
@@ -200,6 +201,7 @@ pub async fn execute_query_streamed(
     emitter: EventEmitter,
     state: Arc<AppState>,
     conn_id: String,
+    database_name: String,
     query_id: String,
     query: String,
     max_rows: i64,
@@ -236,7 +238,10 @@ pub async fn execute_query_streamed(
 
     let start = Instant::now();
     let done = if cfg.driver == "postgres" {
-        match state.get_pg_pool_or_reconnect(&conn_id).await {
+        match state
+            .get_pg_pool_for_database_or_reconnect(&conn_id, &database_name)
+            .await
+        {
             Ok(pool) => {
                 if queries::looks_like_row_returning_query(&query) {
                     stream_postgres_rows(
@@ -775,6 +780,7 @@ pub async fn get_table_primary_keys(
     state: Arc<AppState>,
     conn_id: String,
     driver: String,
+    database_name: String,
     schema_name: String,
     table_name: String,
 ) -> CommandResult<Vec<String>> {
@@ -784,6 +790,16 @@ pub async fn get_table_primary_keys(
             .await
             .map_err(command_err)?;
         return schema::get_mysql_primary_keys(&pool, &schema_name, &table_name)
+            .await
+            .map_err(command_err);
+    }
+
+    if driver == "postgres" {
+        let pool = state
+            .get_pg_pool_for_database_or_reconnect(&conn_id, &database_name)
+            .await
+            .map_err(command_err)?;
+        return schema::get_postgres_primary_keys(&pool, &schema_name, &table_name)
             .await
             .map_err(command_err);
     }
@@ -810,15 +826,19 @@ pub async fn get_schema(state: Arc<AppState>, conn_id: String) -> CommandResult<
         return schema::get_mysql_schema(&pool).await.map_err(command_err);
     }
 
-    let pool = state
-        .get_pool_or_reconnect(&conn_id)
-        .await
-        .map_err(command_err)?;
     if cfg.driver == "postgres" && cfg.database.trim().is_empty() {
+        let pool = state
+            .get_pg_pool_or_reconnect(&conn_id)
+            .await
+            .map_err(command_err)?;
         return schema::postgres_database_catalog(&pool)
             .await
             .map_err(command_err);
     }
+    let pool = state
+        .get_pool_or_reconnect(&conn_id)
+        .await
+        .map_err(command_err)?;
     schema::get_schema(&pool, &cfg.driver)
         .await
         .map_err(command_err)

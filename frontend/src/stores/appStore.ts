@@ -346,6 +346,7 @@ export interface TabBase {
 
 export interface SqlTab extends TabBase {
   kind: "sql";
+  databaseName: string;
   sql: string;
   result: ExecuteResult | null;
   running: boolean;
@@ -382,13 +383,14 @@ export function isDatabaseConnectionsTab(
   return tab?.kind === "databaseConnections";
 }
 
-function makeSqlTab(connId = ""): SqlTab {
+function makeSqlTab(connId = "", databaseName = ""): SqlTab {
   const id = crypto.randomUUID();
   return {
     id,
     title: "Query",
     connId,
     kind: "sql",
+    databaseName,
     sql: "",
     result: null,
     running: false,
@@ -433,8 +435,8 @@ function createTabStore() {
   return {
     subscribe,
     update,
-    add(connId: string) {
-      update((tabs) => [...tabs, makeSqlTab(connId)]);
+    add(connId: string, databaseName = "") {
+      update((tabs) => [...tabs, makeSqlTab(connId, databaseName)]);
     },
     remove(id: string) {
       update((tabs) => {

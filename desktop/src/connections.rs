@@ -31,6 +31,7 @@ use url::Url;
 struct ManagedConnection {
     pool: Option<AnyPool>,
     pg_pool: Option<PgPool>,
+    pg_database_pools: HashMap<String, PgPool>,
     mysql_pool: Option<MySqlPool>,
     config: ConnectionConfig,
     port_forward: Option<PortForwardProcess>,
@@ -171,6 +172,9 @@ impl ConnectionManager {
             if let Some(pg_pool) = old.pg_pool {
                 pg_pool.close().await;
             }
+            for pool in old.pg_database_pools.into_values() {
+                pool.close().await;
+            }
             if let Some(mysql_pool) = old.mysql_pool {
                 mysql_pool.close().await;
             }
@@ -181,6 +185,7 @@ impl ConnectionManager {
             ManagedConnection {
                 pool,
                 pg_pool,
+                pg_database_pools: HashMap::new(),
                 mysql_pool,
                 config: cfg,
                 port_forward,
@@ -251,6 +256,9 @@ impl ConnectionManager {
         if let Some(pg_pool) = conn.pg_pool {
             pg_pool.close().await;
         }
+        for pool in conn.pg_database_pools.into_values() {
+            pool.close().await;
+        }
         if let Some(mysql_pool) = conn.mysql_pool {
             mysql_pool.close().await;
         }
@@ -272,6 +280,56 @@ impl ConnectionManager {
             .get(id)
             .and_then(|conn| conn.pg_pool.clone())
             .ok_or_else(|| anyhow!("postgres connection {id:?} not found"))
+    }
+
+    pub async fn get_pg_pool_for_database(&self, id: &str, database: &str) -> Result<PgPool> {
+        let database = database.trim();
+        if database.is_empty() {
+            return self.get_pg_pool(id).await;
+        }
+
+        let base_pool = {
+            let inner = self.inner.read().await;
+            let connection = inner
+                .get(id)
+                .ok_or_else(|| anyhow!("postgres connection {id:?} not found"))?;
+            if let Some(pool) = connection.pg_database_pools.get(database) {
+                return Ok(pool.clone());
+            }
+            connection
+                .pg_pool
+                .clone()
+                .ok_or_else(|| anyhow!("postgres connection {id:?} not found"))?
+        };
+
+        if base_pool.connect_options().get_database() == Some(database) {
+            return Ok(base_pool);
+        }
+
+        let options = base_pool
+            .connect_options()
+            .as_ref()
+            .clone()
+            .database(database);
+        let new_pool = PgPoolOptions::new()
+            .max_connections(DEFAULT_MAX_CONNECTIONS)
+            .min_connections(0)
+            .connect_with(options)
+            .await
+            .with_context(|| format!("connect to PostgreSQL database {database}"))?;
+
+        let mut inner = self.inner.write().await;
+        let connection = inner
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("postgres connection {id:?} disconnected"))?;
+        if let Some(existing) = connection.pg_database_pools.get(database).cloned() {
+            new_pool.close().await;
+            return Ok(existing);
+        }
+        connection
+            .pg_database_pools
+            .insert(database.to_string(), new_pool.clone());
+        Ok(new_pool)
     }
 
     pub async fn get_mysql_pool(&self, id: &str) -> Result<MySqlPool> {

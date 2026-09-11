@@ -344,6 +344,42 @@ export namespace schema {
 		    return a;
 		}
 	}
+	export class Database {
+	    name: string;
+	    sizeBytes?: number;
+	    schemas: Schema[];
+	    relationships?: Relationship[];
+
+	    static createFrom(source: any = {}) {
+	        return new Database(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.sizeBytes = source["sizeBytes"];
+	        this.schemas = this.convertValues(source["schemas"], Schema);
+	        this.relationships = this.convertValues(source["relationships"], Relationship);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class SchemaTree {
 	    sizeBytes?: number;
 	    tables: Table[];
@@ -351,6 +387,7 @@ export namespace schema {
 	    indexes: string[];
 	    relationships?: Relationship[];
 	    schemas?: Schema[];
+	    databases?: Database[];
 	
 	    static createFrom(source: any = {}) {
 	        return new SchemaTree(source);
@@ -364,6 +401,7 @@ export namespace schema {
 	        this.indexes = source["indexes"];
 	        this.relationships = this.convertValues(source["relationships"], Relationship);
 	        this.schemas = this.convertValues(source["schemas"], Schema);
+	        this.databases = this.convertValues(source["databases"], Database);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

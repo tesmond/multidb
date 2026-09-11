@@ -31,6 +31,10 @@
   let lastFilterSchemaLoadKey = '';
 
   type SchemaTable = NonNullable<SchemaTree['tables']>[number];
+  type NavigatorSchemaGroup = {
+    name: string;
+    schemas: NonNullable<SchemaTree['schemas']>;
+  };
 
   type NavItem =
     | { kind: 'group'; group: ServerGroup }
@@ -149,10 +153,38 @@
   }
 
   function schemaHasMatchingTables(schema: SchemaTree, filterText = normalizedTableFilter): boolean {
+    if (schema.databases?.length) {
+      return schema.databases.some((database) =>
+        database.schemas?.some((pgSchema) => filterTables(pgSchema.tables, filterText).length > 0),
+      );
+    }
     if (schema.schemas?.length) {
       return schema.schemas.some((pgSchema) => filterTables(pgSchema.tables, filterText).length > 0);
     }
     return filterTables(schema.tables, filterText).length > 0;
+  }
+
+  function navigatorSchemaGroups(conn: ActiveConnection): NavigatorSchemaGroup[] {
+    if (!conn.schema) return [];
+
+    if (conn.config.driver === 'postgres') {
+      if (conn.schema.databases?.length) {
+        return conn.schema.databases.map((database) => ({
+          name: database.name,
+          schemas: database.schemas ?? [],
+        }));
+      }
+
+      const databaseName = conn.config.database.trim();
+      if (databaseName && conn.schema.schemas?.length) {
+        return [{ name: databaseName, schemas: conn.schema.schemas }];
+      }
+      return [];
+    }
+
+    return conn.schema.schemas?.length
+      ? [{ name: '', schemas: conn.schema.schemas }]
+      : [];
   }
 
   function connectionMatchesFilter(conn: ActiveConnection, filterText = normalizedTableFilter): boolean {
@@ -245,8 +277,8 @@
     return `${quoteIdentifier(schemaName, driver)}.${quoteIdentifier(tableName, driver)}`;
   }
 
-  function openTableQuery(connId: string, tableName: string, schemaName?: string) {
-    tabs.add(connId);
+  function openTableQuery(connId: string, tableName: string, schemaName?: string, databaseName = '') {
+    tabs.add(connId, databaseName);
     // Find the just-added tab and set its SQL
     const allTabs = get(tabs);
     const newTab = allTabs[allTabs.length - 1];
@@ -456,9 +488,9 @@
 
   // Context menu state
   let contextMenu:
-    | { kind: 'table'; x: number; y: number; tableName: string; connId: string; schemaName?: string }
+    | { kind: 'table'; x: number; y: number; tableName: string; connId: string; schemaName?: string; databaseName?: string }
     | { kind: 'database'; x: number; y: number; connId: string }
-    | { kind: 'dropConfirm'; x: number; y: number; tableName: string; connId: string; schemaName?: string }
+    | { kind: 'dropConfirm'; x: number; y: number; tableName: string; connId: string; schemaName?: string; databaseName?: string }
     | null = null;
 
   function clampMenuPosition(x: number, y: number, kind: 'table' | 'database' | 'dropConfirm') {
@@ -473,11 +505,11 @@
     };
   }
 
-  function openTableContextMenu(e: MouseEvent, connId: string, tableName: string, schemaName?: string) {
+  function openTableContextMenu(e: MouseEvent, connId: string, tableName: string, schemaName?: string, databaseName?: string) {
     e.preventDefault();
     e.stopPropagation();
     const pos = clampMenuPosition(e.clientX, e.clientY, 'table');
-    contextMenu = { kind: 'table', x: pos.x, y: pos.y, tableName, connId, schemaName };
+    contextMenu = { kind: 'table', x: pos.x, y: pos.y, tableName, connId, schemaName, databaseName };
   }
 
   function openDatabaseContextMenu(e: MouseEvent, connId: string) {
@@ -535,16 +567,16 @@
 
       if (menu.kind !== 'table') return;
 
-      const { connId, tableName, schemaName } = menu;
-      if (action === 'view') openTableQuery(connId, tableName, schemaName);
+      const { connId, tableName, schemaName, databaseName } = menu;
+      if (action === 'view') openTableQuery(connId, tableName, schemaName, databaseName);
       else if (action === 'copy') copyName(qualifyTable(connId, tableName, schemaName));
-      else if (action === 'select') openTableQuery(connId, tableName, schemaName);
+      else if (action === 'select') openTableQuery(connId, tableName, schemaName, databaseName);
       else if (action === 'backup') {
         await BackupTable(connId, tableName, schemaName ?? '');
         statusMessage.set(`Backed up ${qualifyTable(connId, tableName, schemaName)}`);
       } else if (action === 'dropTable') {
         const pos = clampMenuPosition(menu.x, menu.y, 'dropConfirm');
-        contextMenu = { kind: 'dropConfirm', x: pos.x, y: pos.y, connId, tableName, schemaName };
+        contextMenu = { kind: 'dropConfirm', x: pos.x, y: pos.y, connId, tableName, schemaName, databaseName };
       }
     } catch (e: any) {
       statusMessage.set(String(e));
@@ -733,31 +765,52 @@
             {:else if conn.schemaError}
               <div class="nav-error">{conn.schemaError}</div>
             {:else if conn.schema}
-              {#if conn.schema.schemas?.length}
-                <!-- Postgres: schema-grouped hierarchy -->
-                {#each conn.schema.schemas as pgSchema}
-                  {@const schemaKey = `${conn.config.id}-schema-${pgSchema.name}`}
-                  {@const tablesKey = `${conn.config.id}-${pgSchema.name}-tables`}
-                  {@const filteredPgTables = filterTables(pgSchema.tables)}
-                  {#if !hasTableFilter || filteredPgTables.length > 0}
+              {@const schemaGroups = navigatorSchemaGroups(conn)}
+              {#if schemaGroups.length}
+                <!-- Database and schema-grouped hierarchy -->
+                {#each schemaGroups as databaseGroup}
+                {@const databaseKey = `${conn.config.id}-database-${databaseGroup.name}`}
+                {#if databaseGroup.name}
                   <div class="schema-section">
                     <div
-                      class="section-label schema-node"
-                      on:click={() => toggleTable(schemaKey)}
+                      class="section-label database-node"
+                      on:click={() => toggleTable(databaseKey)}
                       role="treeitem" aria-selected={false}
-                      aria-expanded={hasTableFilter || !!expandedTables[schemaKey]}
+                      aria-expanded={hasTableFilter || !!expandedTables[databaseKey]}
                       tabindex="0"
-                      on:keydown={e => e.key === 'Enter' && toggleTable(schemaKey)}
+                      on:keydown={e => e.key === 'Enter' && toggleTable(databaseKey)}
                     >
-                      <span class="chevron">{hasTableFilter || expandedTables[schemaKey] ? '▾' : '▸'}</span>
-                      <span class="table-icon">🗂</span>
-                      <span class="node-name">{pgSchema.name}</span>
-                      {#if formatBytes(pgSchema.sizeBytes)}
-                        <span class="size-label">{formatBytes(pgSchema.sizeBytes)}</span>
-                      {/if}
+                      <span class="chevron">{hasTableFilter || expandedTables[databaseKey] ? '▾' : '▸'}</span>
+                      <span class="table-icon">🗄</span>
+                      <span class="node-name">{databaseGroup.name}</span>
                     </div>
-                    {#if hasTableFilter || expandedTables[schemaKey]}
-                      <div class="conn-children">
+                  </div>
+                {/if}
+                {#if !databaseGroup.name || hasTableFilter || expandedTables[databaseKey]}
+                  <div class:conn-children={!!databaseGroup.name}>
+                    {#each databaseGroup.schemas as pgSchema}
+                      {@const schemaKey = `${conn.config.id}-schema-${pgSchema.name}`}
+                      {@const tablesKey = `${conn.config.id}-${pgSchema.name}-tables`}
+                      {@const filteredPgTables = filterTables(pgSchema.tables)}
+                      {#if !hasTableFilter || filteredPgTables.length > 0}
+                      <div class="schema-section">
+                        <div
+                          class="section-label schema-node"
+                          on:click={() => toggleTable(schemaKey)}
+                          role="treeitem" aria-selected={false}
+                          aria-expanded={hasTableFilter || !!expandedTables[schemaKey]}
+                          tabindex="0"
+                          on:keydown={e => e.key === 'Enter' && toggleTable(schemaKey)}
+                        >
+                          <span class="chevron">{hasTableFilter || expandedTables[schemaKey] ? '▾' : '▸'}</span>
+                          <span class="table-icon">🗂</span>
+                          <span class="node-name">{pgSchema.name}</span>
+                          {#if formatBytes(pgSchema.sizeBytes)}
+                            <span class="size-label">{formatBytes(pgSchema.sizeBytes)}</span>
+                          {/if}
+                        </div>
+                        {#if hasTableFilter || expandedTables[schemaKey]}
+                          <div class="conn-children">
                         <!-- Tables -->
                         <div class="schema-section">
                           <div
@@ -776,7 +829,7 @@
                               <div
                                 class="table-label"
                                 on:click={() => toggleTable(`${conn.config.id}-${pgSchema.name}-t-${table.name}`)}
-                                on:contextmenu={e => openTableContextMenu(e, conn.config.id, table.name, pgSchema.name)}
+                                on:contextmenu={e => openTableContextMenu(e, conn.config.id, table.name, pgSchema.name, databaseGroup.name)}
                                 role="treeitem" aria-selected={false}
                                 tabindex="0"
                                 on:keydown={e => e.key === 'Enter' && toggleTable(`${conn.config.id}-${pgSchema.name}-t-${table.name}`)}
@@ -848,10 +901,13 @@
                           {/if}
                         </div>
                         {/if}
+                          </div>
+                        {/if}
                       </div>
-                    {/if}
+                      {/if}
+                    {/each}
                   </div>
-                  {/if}
+                {/if}
                 {/each}
               {:else}
               <!-- MySQL / SQLite: flat hierarchy -->

@@ -113,7 +113,7 @@
     if (!tab) return;
     const sql = generateUpdateSQL();
     if (!sql) return;
-    tabs.add(tab.connId);
+    tabs.add(tab.connId, tab.databaseName);
     const allTabs = get(tabs);
     const newTab = allTabs[allTabs.length - 1];
     tabs.updateTab(newTab.id, { sql });
@@ -130,14 +130,14 @@
     if (key !== _lastEditCheckKey) {
       _lastEditCheckKey = key;
       if (tab && tab.result && !tab.result.error && tab.sql) {
-        checkForEditability(tab.id, tab.sql, tab.connId);
+        checkForEditability(tab.id, tab.sql, tab.connId, tab.databaseName);
       } else if (tab) {
         tabs.updateTab(tab.id, { editInfo: null });
       }
     }
   }
 
-  async function checkForEditability(tabId: string, sql: string, connId: string) {
+  async function checkForEditability(tabId: string, sql: string, connId: string, databaseName: string) {
     const parsed = parseSimpleSelect(sql);
     if (!parsed) {
       tabs.updateTab(tabId, { editInfo: null });
@@ -149,7 +149,7 @@
       return;
     }
     try {
-      const pkCols = await GetTablePrimaryKeys(connId, conn.config.driver, parsed.schemaName, parsed.tableName);
+      const pkCols = await GetTablePrimaryKeys(connId, conn.config.driver, databaseName, parsed.schemaName, parsed.tableName);
       if (pkCols && pkCols.length > 0) {
         tabs.updateTab(tabId, {
           editInfo: { tableName: parsed.tableName, schemaName: parsed.schemaName, primaryKeyCols: pkCols },

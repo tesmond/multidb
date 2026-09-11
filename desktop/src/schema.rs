@@ -1,9 +1,13 @@
 use crate::models::{
-    Column as DbColumn, Relationship, RelationshipColumnPair, RelationshipTableRef, Schema,
-    SchemaTree, Table,
+    Column as DbColumn, Database, Relationship, RelationshipColumnPair, RelationshipTableRef,
+    Schema, SchemaTree, Table,
 };
-use anyhow::{anyhow, Result};
-use sqlx::{any::AnyRow, mysql::MySqlRow, AnyPool, ColumnIndex, MySqlPool, Row, ValueRef};
+use anyhow::{anyhow, Context, Result};
+use sqlx::{
+    any::{AnyPoolOptions, AnyRow},
+    mysql::MySqlRow,
+    AnyPool, ColumnIndex, ConnectOptions, MySqlPool, PgPool, Row, ValueRef,
+};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
@@ -16,28 +20,49 @@ pub async fn get_schema(pool: &AnyPool, driver: &str) -> Result<SchemaTree> {
     }
 }
 
-pub async fn postgres_database_catalog(pool: &AnyPool) -> Result<SchemaTree> {
-    let databases = string_column(
-        pool,
+pub async fn postgres_database_catalog(pool: &PgPool) -> Result<SchemaTree> {
+    let database_names = sqlx::query_scalar::<_, String>(
         r#"
         SELECT datname::text
         FROM pg_database
         WHERE datistemplate = false
           AND datallowconn = true
+          AND has_database_privilege(datname, 'CONNECT')
         ORDER BY datname
         "#,
-        &[],
     )
+    .fetch_all(pool)
     .await?;
 
     let mut tree = SchemaTree::default();
-    tree.schemas = databases
-        .into_iter()
-        .map(|database_name| Schema {
+    for database_name in database_names {
+        let connect_options = pool
+            .connect_options()
+            .as_ref()
+            .clone()
+            .database(&database_name);
+        let url = connect_options.to_url_lossy();
+        let database_pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(url.as_str())
+            .await
+            .with_context(|| format!("connect to PostgreSQL database {database_name}"))?;
+
+        let schema_tree = postgres_schema(&database_pool)
+            .await
+            .with_context(|| format!("load schemas for PostgreSQL database {database_name}"));
+        database_pool.close().await;
+        let schema_tree = schema_tree?;
+
+        tree.size_bytes =
+            Some(tree.size_bytes.unwrap_or_default() + schema_tree.size_bytes.unwrap_or_default());
+        tree.databases.push(Database {
             name: database_name,
-            ..Schema::default()
-        })
-        .collect();
+            size_bytes: schema_tree.size_bytes,
+            schemas: schema_tree.schemas,
+            relationships: schema_tree.relationships,
+        });
+    }
     Ok(tree)
 }
 
@@ -121,6 +146,36 @@ pub async fn get_mysql_primary_keys(
         &[schema_name, table_name],
     )
     .await
+}
+
+pub async fn get_postgres_primary_keys(
+    pool: &PgPool,
+    schema_name: &str,
+    table_name: &str,
+) -> Result<Vec<String>> {
+    let schema_name = if schema_name.is_empty() {
+        "public"
+    } else {
+        schema_name
+    };
+    Ok(sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT kcu.column_name::text
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+         AND tc.table_name = kcu.table_name
+        WHERE tc.constraint_type = 'PRIMARY KEY'
+          AND tc.table_schema = $1
+          AND tc.table_name = $2
+        ORDER BY kcu.ordinal_position
+        "#,
+    )
+    .bind(schema_name)
+    .bind(table_name)
+    .fetch_all(pool)
+    .await?)
 }
 
 async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
@@ -1045,9 +1100,12 @@ fn quote_sqlite_pragma(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_any_i64, decode_any_text, get_mysql_schema, get_schema};
+    use super::{
+        decode_any_i64, decode_any_text, get_mysql_schema, get_schema, postgres_database_catalog,
+    };
     use sqlx::any::AnyPoolOptions;
     use sqlx::mysql::MySqlPoolOptions;
+    use sqlx::postgres::PgPoolOptions;
 
     #[tokio::test]
     async fn decode_any_text_handles_sqlite_blob_values() {
@@ -1290,6 +1348,38 @@ mod tests {
         let schema = get_schema(&pool, "sqlite").await.expect("load schema");
 
         assert!(schema.relationships.is_empty());
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires POSTGRES_REPRO_URL pointing to a PostgreSQL server with multiple databases"]
+    async fn postgres_database_catalog_includes_schemas_for_each_database() {
+        sqlx::any::install_default_drivers();
+
+        let url = std::env::var("POSTGRES_REPRO_URL").expect("POSTGRES_REPRO_URL must be set");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to PostgreSQL");
+
+        let catalog = postgres_database_catalog(&pool)
+            .await
+            .expect("load PostgreSQL database catalog");
+
+        assert!(!catalog.databases.is_empty());
+        assert!(catalog.schemas.is_empty());
+        for database in &catalog.databases {
+            assert!(
+                database
+                    .schemas
+                    .iter()
+                    .any(|schema| schema.name == "public"),
+                "database {} should include its public schema",
+                database.name,
+            );
+        }
 
         pool.close().await;
     }

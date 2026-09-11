@@ -107,6 +107,17 @@ impl AppState {
         }
     }
 
+    pub async fn get_pg_pool_for_database_or_reconnect(
+        &self,
+        conn_id: &str,
+        database: &str,
+    ) -> Result<sqlx::PgPool> {
+        self.get_pg_pool_or_reconnect(conn_id).await?;
+        self.connections
+            .get_pg_pool_for_database(conn_id, database)
+            .await
+    }
+
     pub async fn get_mysql_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::MySqlPool> {
         self.refresh_aws_iam_connection_if_needed(conn_id).await?;
         match self.connections.get_mysql_pool(conn_id).await {

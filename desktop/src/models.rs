@@ -152,6 +152,17 @@ pub struct Schema {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Database {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+    pub schemas: Vec<Schema>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relationships: Vec<Relationship>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaTree {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<i64>,
@@ -162,6 +173,8 @@ pub struct SchemaTree {
     pub relationships: Vec<Relationship>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<Schema>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub databases: Vec<Database>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

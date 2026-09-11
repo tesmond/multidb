@@ -22,9 +22,9 @@ export function Disconnect(arg1:string):Promise<void>;
 
 export function DropTable(arg1:string,arg2:string,arg3:string):Promise<void>;
 
-export function ExecuteQuery(arg1:string,arg2:string,arg3:string,arg4:number):Promise<main.ExecuteResult>;
+export function ExecuteQuery(arg1:string,arg2:string,arg3:string,arg4:string,arg5:number):Promise<main.ExecuteResult>;
 
-export function ExecuteQueryStreamed(arg1:string,arg2:string,arg3:string,arg4:number):Promise<void>;
+export function ExecuteQueryStreamed(arg1:string,arg2:string,arg3:string,arg4:string,arg5:number):Promise<void>;
 
 export function GetQueryHistory(arg1:number):Promise<Array<history.QueryRecord>>;
 
@@ -34,7 +34,7 @@ export function GetSavedQueries(arg1:string):Promise<Array<history.SavedQuery>>;
 
 export function GetSchema(arg1:string):Promise<schema.SchemaTree>;
 
-export function GetTablePrimaryKeys(arg1:string,arg2:string,arg3:string,arg4:string):Promise<Array<string>>;
+export function GetTablePrimaryKeys(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<Array<string>>;
 
 export function ImportTable(arg1:string,arg2:string,arg3:string):Promise<void>;
 

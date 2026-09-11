@@ -3,6 +3,7 @@ import { test, expect, type Page } from '@playwright/test';
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__commands = [];
+    (window as any).__messages = [];
     const responseByCommand: Record<string, unknown> = {
       list_saved_connections: [
         {
@@ -11,7 +12,7 @@ test.beforeEach(async ({ page }) => {
           driver: 'postgres',
           host: 'localhost',
           port: 5432,
-          database: 'app',
+          database: '',
           username: 'user',
           password: 'pass',
         },
@@ -38,18 +39,32 @@ test.beforeEach(async ({ page }) => {
       ],
       load_schema: {
         schemaJson: JSON.stringify({
-          tables: [
-            {
-              name: 'users',
-              sizeBytes: 128,
-              columns: [
-                { name: 'id', type: 'integer', key: 'PRI' },
-                { name: 'email_address', type: 'text', key: '' },
-              ],
-            },
-          ],
+          tables: [],
           views: [],
           indexes: [],
+          databases: [
+            {
+              name: 'app',
+              schemas: [
+                {
+                  name: 'public',
+                  tables: [
+                    {
+                      name: 'users',
+                      sizeBytes: 128,
+                      columns: [
+                        { name: 'id', type: 'integer', key: 'PRI' },
+                        { name: 'email_address', type: 'text', key: '' },
+                      ],
+                    },
+                  ],
+                  views: [],
+                  indexes: [],
+                },
+              ],
+              relationships: [],
+            },
+          ],
         }),
       },
       get_saved_queries: [],
@@ -60,13 +75,14 @@ test.beforeEach(async ({ page }) => {
 
     (window as any).ipc = {
       postMessage: (raw: string) => {
-        let message: { id: string; command: string } | null = null;
+        let message: { id: string; command: string; args?: Record<string, unknown> } | null = null;
         try {
           message = JSON.parse(raw);
         } catch {
           return;
         }
         (window as any).__commands.push(message.command);
+        (window as any).__messages.push(message);
         const payload = Object.prototype.hasOwnProperty.call(responseByCommand, message.command)
           ? responseByCommand[message.command]
           : null;
@@ -101,6 +117,8 @@ test('navigator renders tables with a single row element per table entry', async
   await expect(page.locator('.navigator .conn-label').filter({ hasText: 'Test DB' })).toBeVisible();
 
   await page.locator('.navigator .conn-label').filter({ hasText: 'Test DB' }).click();
+  await page.locator('.navigator .database-node').filter({ hasText: 'app' }).click();
+  await page.locator('.navigator .schema-node').filter({ hasText: 'public' }).click();
   await page.locator('.navigator .section-label').filter({ hasText: 'Tables' }).click();
 
   await expect(page.locator('.navigator .table-label')).toContainText('users');
@@ -118,6 +136,45 @@ test('navigator renders tables with a single row element per table entry', async
   expect(regularName).not.toBeNull();
   expect(primaryName!.x).toBe(regularName!.x);
   await expect(primaryColumn.locator('.col-name + .col-key')).toHaveText('🔑');
+});
+
+test('postgres navigator nests schemas below each catalog database', async ({ page }) => {
+  await page.goto('/');
+
+  const connection = page.locator('.navigator .conn-label').filter({ hasText: 'Test DB' });
+  await connection.click();
+
+  const database = page.locator('.navigator .database-node').filter({ hasText: 'app' });
+  await expect(database).toBeVisible();
+  await database.click();
+
+  const publicSchema = page.locator('.navigator .schema-node').filter({ hasText: 'public' });
+  await expect(publicSchema).toBeVisible();
+  await publicSchema.click();
+
+  const tables = page.locator('.navigator .section-label').filter({ hasText: 'Tables' });
+  await expect(tables).toBeVisible();
+
+  const databaseBox = await database.boundingBox();
+  const schemaBox = await publicSchema.boundingBox();
+  const tablesBox = await tables.boundingBox();
+  expect(databaseBox).not.toBeNull();
+  expect(schemaBox).not.toBeNull();
+  expect(tablesBox).not.toBeNull();
+  expect(schemaBox!.x).toBeGreaterThan(databaseBox!.x);
+  expect(tablesBox!.x).toBeGreaterThan(schemaBox!.x);
+
+  await tables.click();
+  await page.locator('.navigator .table-label').filter({ hasText: 'users' }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /View Data/ }).click();
+  await page.getByRole('button', { name: /Run/ }).click();
+
+  await expect.poll(() => page.evaluate(() => {
+    const message = (window as any).__messages.find(
+      (entry: any) => entry.command === 'execute_query_streamed',
+    );
+    return message?.args?.databaseName;
+  })).toBe('app');
 });
 
 test('connection dropdown follows navigator group order and labels', async ({ page }) => {
@@ -142,7 +199,7 @@ test('database sections are indented below grouped connections', async ({ page }
   await page.locator('.navigator .group-label').filter({ hasText: 'Production' }).click();
   const connection = page.locator('.navigator .conn-label').filter({ hasText: 'Replica DB' });
   await connection.click();
-  const databaseSection = page.locator('.navigator .section-label').filter({ hasText: 'Tables' });
+  const databaseSection = page.locator('.navigator .database-node').filter({ hasText: 'app' });
   await expect(databaseSection).toBeVisible();
 
   const connectionChevron = await connection.locator('.chevron').boundingBox();

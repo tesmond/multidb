@@ -32,12 +32,12 @@ export function DropTable(connId, tableName, schemaName) {
   return invoke("drop_table", { connId, tableName, schemaName });
 }
 
-export function ExecuteQuery(connId, queryId, query, maxRows) {
-  return invoke("execute_query", { connId, queryId, query, maxRows });
+export function ExecuteQuery(connId, databaseName, queryId, query, maxRows) {
+  return invoke("execute_query", { connId, databaseName, queryId, query, maxRows });
 }
 
-export function ExecuteQueryStreamed(connId, queryId, query, maxRows) {
-  return invoke("execute_query_streamed", { connId, queryId, query, maxRows });
+export function ExecuteQueryStreamed(connId, databaseName, queryId, query, maxRows) {
+  return invoke("execute_query_streamed", { connId, databaseName, queryId, query, maxRows });
 }
 
 export function GetQueryHistory(limit) {
@@ -56,10 +56,11 @@ export function GetSchema(connId) {
   return invoke("get_schema", { connId });
 }
 
-export function GetTablePrimaryKeys(connId, driver, schemaName, tableName) {
+export function GetTablePrimaryKeys(connId, driver, databaseName, schemaName, tableName) {
   return invoke("get_table_primary_keys", {
     connId,
     driver,
+    databaseName,
     schemaName,
     tableName,
   });

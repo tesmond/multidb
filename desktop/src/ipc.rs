@@ -70,6 +70,8 @@ struct DisconnectArgs {
 #[serde(rename_all = "camelCase")]
 struct QueryArgs {
     conn_id: String,
+    #[serde(default)]
+    database_name: String,
     query_id: String,
     query: String,
     max_rows: i64,
@@ -86,6 +88,8 @@ struct CancelArgs {
 struct PrimaryKeyArgs {
     conn_id: String,
     driver: String,
+    #[serde(default)]
+    database_name: String,
     schema_name: String,
     table_name: String,
 }
@@ -194,6 +198,7 @@ pub async fn dispatch(
                 commands::execute_query(
                     state,
                     args.conn_id,
+                    args.database_name,
                     args.query_id,
                     args.query,
                     args.max_rows,
@@ -208,6 +213,7 @@ pub async fn dispatch(
                     emitter,
                     state,
                     args.conn_id,
+                    args.database_name,
                     args.query_id,
                     args.query,
                     args.max_rows,
@@ -237,6 +243,7 @@ pub async fn dispatch(
                     state,
                     args.conn_id,
                     args.driver,
+                    args.database_name,
                     args.schema_name,
                     args.table_name,
                 )

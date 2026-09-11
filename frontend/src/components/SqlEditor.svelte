@@ -57,7 +57,8 @@
 
     const activeTab = get(tabs).find(t => t.id === tabId);
     const connId = activeTab?.connId || get(selectedConnId) || '';
-    const dbSchema = getConnectionDbSchema(connId);
+    const databaseName = isSqlTab(activeTab) ? activeTab.databaseName : '';
+    const dbSchema = getConnectionDbSchema(connId, databaseName);
 
     if (dbSchema) {
       const semantic = findSqlSemanticDiagnostics(docText, dbSchema);
@@ -92,16 +93,18 @@
 
   // Convert the active-connection schema into the DbSchema shape used by
   // the smart completion engine.
-  function getConnectionDbSchema(connId: string): DbSchema | null {
+  function getConnectionDbSchema(connId: string, databaseName = ''): DbSchema | null {
     const conn = get(activeConnections).find(c => c.config.id === connId);
     if (!conn?.schema) return null;
 
     const driver = conn.config.driver ?? 'postgres';
+    const database = conn.schema.databases?.find(entry => entry.name === databaseName);
+    const schemas = database?.schemas ?? conn.schema.schemas;
 
-    if (conn.schema.schemas?.length) {
+    if (schemas?.length) {
       return {
         driver,
-        schemas: conn.schema.schemas.map(s => ({
+        schemas: schemas.map(s => ({
           name: s.name,
           tables: [
             ...(s.tables ?? []).map(t => ({
@@ -152,9 +155,9 @@
     return /^\s*(?:CREATE|DROP|ALTER|RENAME|TRUNCATE|COMMENT\s+ON)\b/im.test(sqlText);
   }
 
-  function makeSqlExtension(connId: string) {
+  function makeSqlExtension(connId: string, databaseName = '') {
     const dialect  = getDialect(connId);
-    const dbSchema = getConnectionDbSchema(connId);
+    const dbSchema = getConnectionDbSchema(connId, databaseName);
 
     // Build hierarchical namespace for the built-in schema completion
     // (handles schema.table and table.column dot-completions natively).
@@ -293,7 +296,7 @@
     cancelListeners = () => { offMeta(); offChunk(); offDone(); };
 
     // Fire and forget – all coordination flows through the events above.
-    ExecuteQueryStreamed(connId, queryId, sql, 1_000_000).catch((e: any) => {
+    ExecuteQueryStreamed(connId, tab.databaseName, queryId, sql, 1_000_000).catch((e: any) => {
       offMeta(); offChunk(); offDone();
       cancelListeners = null;
       tabs.updateTab(tabId, {
@@ -346,7 +349,9 @@
   }
 
   onMount(() => {
-    const initialConnId = get(tabs).find(t => t.id === tabId)?.connId ?? '';
+    const initialTab = get(tabs).find(t => t.id === tabId);
+    const initialConnId = initialTab?.connId ?? '';
+    const initialDatabaseName = isSqlTab(initialTab) ? initialTab.databaseName : '';
 
     view = new EditorView({
       parent: editorEl,
@@ -370,7 +375,7 @@
           }),
           lintGutter(),
           sqlLinter,
-          sqlCompartment.of(makeSqlExtension(initialConnId)),
+          sqlCompartment.of(makeSqlExtension(initialConnId, initialDatabaseName)),
           keymap.of([
             { key: 'Ctrl-Enter', mac: 'Cmd-Enter', run: () => { runQuery(); return true; } },
             ...closeBracketsKeymap,
@@ -411,7 +416,7 @@
       if (!view) return;
       const t = get(tabs).find(t => t.id === tabId);
       if (!isSqlTab(t)) return;
-      view.dispatch({ effects: sqlCompartment.reconfigure(makeSqlExtension(t.connId)) });
+      view.dispatch({ effects: sqlCompartment.reconfigure(makeSqlExtension(t.connId, t.databaseName)) });
     });
 
     return () => {
@@ -429,7 +434,7 @@
 
   // When connId changes on the tab, reconfigure the SQL dialect
   $: if (view && tab?.connId !== undefined) {
-    view.dispatch({ effects: sqlCompartment.reconfigure(makeSqlExtension(tab.connId)) });
+    view.dispatch({ effects: sqlCompartment.reconfigure(makeSqlExtension(tab.connId, tab.databaseName)) });
   }
 </script>
 
@@ -439,7 +444,7 @@
     <ConnectionSelect
       bind:value={tab.connId}
       options={connectionOptions}
-      onchange={(connId) => tabs.updateTab(tabId, { connId })}
+      onchange={(connId) => tabs.updateTab(tabId, { connId, databaseName: '' })}
     />
 
     {#if tab.running}
