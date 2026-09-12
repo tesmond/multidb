@@ -47,20 +47,14 @@ jobs:
         with:
           workspaces: desktop
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install dependencies
-        run: bun install
-
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y build-essential pkg-config libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libssl-dev libzstd-dev libvulkan1 libgit2-dev
 
       - name: Build desktop app
-        run: bun run build
+        run: make build
 
       - name: Rename macOS bundle for architecture
         if: runner.os == 'macOS'

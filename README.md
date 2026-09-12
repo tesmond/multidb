@@ -22,7 +22,7 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
   - Per-connection tab color with automatic contrasting tab text
   - Connection color swatch shown in the left navigator
 - SQL editor experience:
-  - CodeMirror-based SQL editor
+  - Native GPU-rendered SQL editor
   - Connection-aware SQL dialect switching
   - Schema-driven SQL autocomplete
   - Query cancellation support
@@ -46,53 +46,40 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 
 ## Tech Stack
 
-- Desktop shell: WRY + Tao
+- UI: [GPUI](https://www.gpui.rs/) (GPU-accelerated Rust UI framework)
 - Backend: Rust
-- Frontend: Svelte + TypeScript + Vite
-- Editor: CodeMirror 6
 - Database layer:
   - `sqlx` with MySQL, PostgreSQL, and SQLite support
   - Local metadata stored in SQLite
 
 ## Project Structure
 
-- `desktop`: WRY/Tao desktop shell, Rust backend, command handlers, and IPC bridge
-- `desktop/src/desktop.rs`: lightweight window/webview host and static asset protocol
-- `desktop/src/ipc.rs`: JSON IPC dispatcher used by the frontend compatibility bindings
+- `desktop`: the whole application - GPUI front end, Rust backend, and command handlers
+- `desktop/src/ui`: GPUI window, workspace layout, navigator, SQL editor, results grid, and dialogs
+- `desktop/src/commands.rs`: command handlers the UI calls into
 - `desktop/src/connections.rs`: connection manager, DSN logic, and Kubernetes port-forwarding
 - `desktop/src/queries.rs`: query execution, cancellation, result conversion, and non-query handling
 - `desktop/src/schema.rs`: schema and primary-key inspection
 - `desktop/src/history.rs`: local metadata persistence in `history.db`
 - `desktop/src/backup.rs`: table backup, import, pg_dump import, and drop workflows
-- `frontend/src`: Svelte UI components and stores
-- `frontend/desktop`: lightweight frontend bindings for the WRY IPC bridge
 
 ## Prerequisites
 
 - Rust stable
-- [Bun](https://bun.sh/)
 - `make`
-- Platform dependencies for WRY/WebKitGTK on Linux
+- Platform dependencies for GPUI on Linux (Vulkan, Wayland/X11, fontconfig)
 - Optional tools based on workflow:
   - `kubectl` for Kubernetes port-forwarded connections
 
 ## Install and build
 
-Install JavaScript dependencies once, from the repository root:
-
-```bash
-bun install
-```
-
-Then compile the production application:
+Compile the production application from the repository root:
 
 ```bash
 make
 ```
 
-`bun install` uses the root workspace definition and installs the frontend package too. Do not run an install command inside `frontend/`.
-
-The build compiles the Svelte frontend first, then builds the Rust desktop executable at `desktop/target/release/multidb`. On macOS it also creates the application bundle.
+The build produces the Rust desktop executable at `desktop/target/release/multidb`. On macOS it also creates the application bundle.
 
 For development, run:
 
@@ -119,7 +106,7 @@ The application should then run as expected.
 
 ## Testing And Checks
 
-Run both frontend and Rust checks with `make check`.
+Run `make check` for a type check and `make test` for the unit tests.
 
 ## Data Storage
 
