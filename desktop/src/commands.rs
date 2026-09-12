@@ -9,13 +9,20 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
-use serde::Serialize;
 use sqlx::{Column, Row, TypeInfo};
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 pub type CommandResult<T> = std::result::Result<T, String>;
-pub type EventEmitter = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync + 'static>;
+/// Streaming query events delivered to the UI.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    Meta(QueryStreamMeta),
+    Chunk(QueryStreamChunk),
+    Done(QueryStreamDone),
+}
+
+pub type EventEmitter = Arc<dyn Fn(StreamEvent) + Send + Sync + 'static>;
 
 fn command_err(err: impl Into<anyhow::Error>) -> String {
     let err: anyhow::Error = err.into();
@@ -533,15 +540,11 @@ async fn stream_mysql_rows(
                 .iter()
                 .map(|column| column.type_info().name().to_string())
                 .collect();
-            emit_payload(
-                emitter,
-                "query:meta",
-                &QueryStreamMeta {
-                    query_id: query_id.to_string(),
-                    columns,
-                    column_types,
-                },
-            )?;
+            emitter(StreamEvent::Meta(QueryStreamMeta {
+                query_id: query_id.to_string(),
+                columns,
+                column_types,
+            }));
             emitted_meta = true;
         }
 
@@ -620,15 +623,11 @@ async fn stream_rows(
                 .iter()
                 .map(|column| column.type_info().name().to_string())
                 .collect();
-            emit_payload(
-                emitter,
-                "query:meta",
-                &QueryStreamMeta {
-                    query_id: query_id.to_string(),
-                    columns,
-                    column_types,
-                },
-            )?;
+            emitter(StreamEvent::Meta(QueryStreamMeta {
+                query_id: query_id.to_string(),
+                columns,
+                column_types,
+            }));
             emitted_meta = true;
         }
 
@@ -707,15 +706,11 @@ async fn stream_postgres_rows(
                 .iter()
                 .map(|column| column.type_info().name().to_string())
                 .collect();
-            emit_payload(
-                emitter,
-                "query:meta",
-                &QueryStreamMeta {
-                    query_id: query_id.to_string(),
-                    columns,
-                    column_types,
-                },
-            )?;
+            emitter(StreamEvent::Meta(QueryStreamMeta {
+                query_id: query_id.to_string(),
+                columns,
+                column_types,
+            }));
             emitted_meta = true;
         }
 
@@ -754,25 +749,16 @@ fn flush_chunk(
     }
     let rows = std::mem::take(chunk);
     let offset = total_rows.saturating_sub(rows.len());
-    emit_payload(
-        emitter,
-        "query:chunk",
-        &QueryStreamChunk {
-            query_id: query_id.to_string(),
-            rows,
-            offset,
-        },
-    )?;
+    emitter(StreamEvent::Chunk(QueryStreamChunk {
+        query_id: query_id.to_string(),
+        rows,
+        offset,
+    }));
     Ok(())
 }
 
 fn emit_done(emitter: &EventEmitter, done: QueryStreamDone) -> Result<()> {
-    emit_payload(emitter, "query:done", &done)?;
-    Ok(())
-}
-
-fn emit_payload<T: Serialize>(emitter: &EventEmitter, event: &str, payload: &T) -> Result<()> {
-    emitter(event, serde_json::to_value(payload)?);
+    emitter(StreamEvent::Done(done));
     Ok(())
 }
 
