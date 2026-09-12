@@ -4,7 +4,8 @@
 
 use crate::ui::theme::{self, hsla};
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context, CursorStyle,
+    actions, div, fill, point, prelude::*, px, relative, size, AnyElement, App, Bounds, ClipboardItem, Context,
+    CursorStyle,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontWeight,
     GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     Pixels, Point, Rgba, ShapedLine, SharedString, Style, Task, TextRun, UTF16Selection, UnderlineStyle, Window,
@@ -943,6 +944,35 @@ impl Render for TextInput {
                 spread_radius: px(w),
             }]);
         }
-        outer.child(TextElement { input: cx.entity() })
+        let stepper = self.number.is_some().then(|| spin_button(self.look.font_size));
+        outer.child(TextElement { input: cx.entity() }).children(stepper)
     }
+}
+
+/// WebKit's `::-webkit-inner-spin-button`: a narrow control at the inner right
+/// edge of a number input with a stacked pair of arrows.
+fn spin_button(font_size: f32) -> AnyElement {
+    let arrow = |up: bool| {
+        div()
+            .w(px(0.62 * font_size))
+            .h(px(0.42 * font_size))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(0.5 * font_size))
+            .line_height(px(0.42 * font_size))
+            .text_color(theme::hex(0x6b6b6b))
+            .child(if up { "▲" } else { "▼" })
+    };
+    div()
+        .flex_shrink_0()
+        .ml(px(0.3 * font_size))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(1.))
+        .child(arrow(true))
+        .child(arrow(false))
+        .into_any_element()
 }
