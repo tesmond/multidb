@@ -1153,8 +1153,11 @@ mod tests {
 
     #[test]
     fn completes_alias_columns() {
+        // The smart source and the built-in schema source both resolve the
+        // alias, and CodeMirror keeps both entries because their `detail`
+        // differs; the smart ones sort first (boost 12 for the primary key).
         let l = labels("SELECT * FROM users u WHERE u.", false);
-        assert_eq!(l, vec!["id", "name"]);
+        assert_eq!(l, vec!["id", "name", "id", "name"]);
     }
 
     #[test]
