@@ -25,6 +25,7 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
   - Native GPU-rendered SQL editor
   - Connection-aware SQL dialect switching
   - Schema-driven SQL autocomplete
+  - Find/replace panel and go-to-line (`⌘F`, `⌘G`, `⌥⌘G`)
   - Query cancellation support
 - Query execution:
   - Streamed query results for large datasets
@@ -65,26 +66,62 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 
 ## Prerequisites
 
-- Rust stable
+- Rust stable (`rustup` toolchain, 1.85 or newer)
 - `make`
-- Platform dependencies for GPUI on Linux (Vulkan, Wayland/X11, fontconfig)
-- Optional tools based on workflow:
-  - `kubectl` for Kubernetes port-forwarded connections
+- macOS: the Command Line Tools are enough (`xcode-select --install`)
+- Linux: the GPUI build dependencies
 
-## Install and build
+  ```bash
+  sudo apt-get install -y build-essential pkg-config libasound2-dev \
+      libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libssl-dev \
+      libzstd-dev libvulkan1 libgit2-dev
+  ```
 
-Compile the production application from the repository root:
+  A Vulkan-capable driver is required at runtime.
+- Windows: the MSVC toolchain (`rustup default stable-msvc`) and the Windows SDK
+- Optional, per workflow: `kubectl` for Kubernetes port-forwarded connections
+
+## Build
+
+From the repository root:
 
 ```bash
-make
+make build     # release build (+ MultiDB.app on macOS)
+make dev       # debug build and run
+make check     # cargo check
+make test      # unit tests
 ```
 
-The build produces the Rust desktop executable at `desktop/target/release/multidb`. On macOS it also creates the application bundle.
-
-For development, run:
+`make build` produces `desktop/target/release/multidb`; on macOS it also writes
+`desktop/target/release/MultiDB.app` and a zip beside it. Plain cargo works
+just as well:
 
 ```bash
-make dev
+cargo build --release --manifest-path desktop/Cargo.toml
+```
+
+### Metal shaders on macOS
+
+GPUI renders through Metal, and its shaders are normally compiled at build time
+with `xcrun metal` — a tool that ships with Xcode but **not** with the Command
+Line Tools. So that a Command Line Tools install is enough, this crate enables
+GPUI's `runtime_shaders` feature by default, which compiles the shaders when the
+app starts (a few milliseconds at launch).
+
+With Xcode installed you can build the shaders ahead of time instead:
+
+```bash
+make build CARGO_FLAGS=--no-default-features
+```
+
+### Fonts
+
+The SQL editor asks for JetBrains Mono, then Fira Code, then Cascadia Code, and
+falls back to the system fixed-width font. Set `MULTIDB_MONO_FONT` to pick a
+different family:
+
+```bash
+MULTIDB_MONO_FONT="SF Mono" make dev
 ```
 
 ## Running the macOS download
@@ -106,7 +143,11 @@ The application should then run as expected.
 
 ## Testing And Checks
 
-Run `make check` for a type check and `make test` for the unit tests.
+```bash
+make check   # cargo check
+make test    # unit tests (SQL tokenizer, completion, lint, value formatting,
+             # column sizing, diagram layout, connection helpers)
+```
 
 ## Data Storage
 
@@ -118,6 +159,15 @@ Stored data includes:
 - Query history
 - Saved queries
 - Cached schema snapshots
+
+UI preferences (font scale, server groups, connection order, saved diagram
+layouts) live beside it in `ui-settings.json`. To run against a throwaway
+profile, start the app with a different `HOME`:
+
+```bash
+HOME=/tmp/multidb-demo CFFIXED_USER_HOME=/tmp/multidb-demo \
+    cargo run --manifest-path desktop/Cargo.toml
+```
 
 ## App Icons
 

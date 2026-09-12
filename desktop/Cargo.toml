@@ -13,20 +13,25 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "multidb"
 path = "src/main.rs"
 
+[features]
+# gpui compiles its Metal shaders with `xcrun metal`, which ships with Xcode but
+# not with the Command Line Tools. The default build compiles them at startup
+# instead; turn this off (`--no-default-features`) when Xcode is installed.
+default = ["runtime-shaders"]
+runtime-shaders = ["gpui/runtime_shaders"]
+
 [dependencies]
 anyhow = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-rds = "1"
+chrono = "0.4"
 dirs = "6"
 flate2 = "1"
 futures = "0.3"
 futures-util = "0.3"
-gpui = { version = "0.2.2", features = ["runtime_shaders"] }
-chrono = "0.4"
-regex = "1"
-unicode-segmentation = "1"
-uuid = { version = "1", features = ["v4"] }
+gpui = "0.2.2"
 keyring = { version = "3", features = ["apple-native"] }
+regex = "1"
 rfd = "0.15"
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
 serde = { version = "1", features = ["derive"] }
@@ -35,7 +40,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "any", "mysql", "p
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
+unicode-segmentation = "1"
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]

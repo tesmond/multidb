@@ -31,8 +31,14 @@ use workspace::Workspace;
 actions!(multidb, [Quit, MenuUndo, MenuRedo, MenuCut, MenuCopy, MenuPaste, MenuSelectAll]);
 
 /// First installed family from the old editor stack
-/// (`'JetBrains Mono','Fira Code','Cascadia Code',monospace`).
+/// (`'JetBrains Mono','Fira Code','Cascadia Code',monospace`), unless
+/// `MULTIDB_MONO_FONT` names one.
 pub fn pick_mono_family(cx: &App) -> String {
+    if let Ok(family) = std::env::var("MULTIDB_MONO_FONT") {
+        if !family.trim().is_empty() {
+            return family;
+        }
+    }
     let names = cx.text_system().all_font_names();
     for candidate in ["JetBrains Mono", "Fira Code", "Cascadia Code"] {
         if names.iter().any(|n| n == candidate) {
@@ -40,7 +46,7 @@ pub fn pick_mono_family(cx: &App) -> String {
         }
     }
     // WebKit's generic `monospace` on macOS.
-    std::env::var("MULTIDB_MONO_FONT").unwrap_or_else(|_| "Courier".to_string())
+    "Courier".to_string()
 }
 
 pub fn run() -> anyhow::Result<()> {
