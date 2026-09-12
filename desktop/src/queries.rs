@@ -1,6 +1,5 @@
 use crate::models::ExecuteResult;
 use anyhow::Result;
-use futures_util::StreamExt;
 use serde_json::{Number, Value};
 use sqlx::{
     mysql::MySqlRow,
@@ -8,7 +7,6 @@ use sqlx::{
     AnyPool, Column, MySqlPool, PgPool, Row, TypeInfo, Value as SqlxValue, ValueRef,
 };
 use std::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 pub fn looks_like_row_returning_query(query: &str) -> bool {
     let q = strip_leading_comments(query);
@@ -23,63 +21,6 @@ pub fn looks_like_row_returning_query(query: &str) -> bool {
     .any(|prefix| upper.starts_with(prefix))
 }
 
-pub async fn execute(
-    pool: &AnyPool,
-    query: &str,
-    max_rows: i64,
-    cancel: CancellationToken,
-) -> ExecuteResult {
-    let max_rows = if max_rows <= 0 {
-        1_000_000
-    } else {
-        max_rows as usize
-    };
-    if !looks_like_row_returning_query(query) {
-        return execute_non_query(pool, query).await;
-    }
-
-    let start = Instant::now();
-    let mut stream = sqlx::query(query).fetch(pool);
-    let mut result = ExecuteResult::default();
-
-    while result.rows.len() < max_rows {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                result.duration = elapsed_ms(start);
-                result.error = "query cancelled".to_string();
-                return result;
-            }
-            row = stream.next() => {
-                let Some(row) = row else { break };
-                let row = match row {
-                    Ok(row) => row,
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = err.to_string();
-                        return result;
-                    }
-                };
-
-                if result.columns.is_empty() {
-                    result.columns = row.columns().iter().map(|col| col.name().to_string()).collect();
-                    result.column_types = row.columns().iter().map(|col| col.type_info().name().to_string()).collect();
-                }
-
-                match row_to_json_values(&row) {
-                    Ok(values) => result.rows.push(values),
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = format!("scan: {err}");
-                        return result;
-                    }
-                }
-            }
-        }
-    }
-
-    result.duration = elapsed_ms(start);
-    result
-}
 
 pub async fn execute_non_query(pool: &AnyPool, query: &str) -> ExecuteResult {
     let start = Instant::now();
@@ -105,63 +46,6 @@ pub async fn execute_non_query(pool: &AnyPool, query: &str) -> ExecuteResult {
     }
 }
 
-pub async fn execute_postgres(
-    pool: &PgPool,
-    query: &str,
-    max_rows: i64,
-    cancel: CancellationToken,
-) -> ExecuteResult {
-    let max_rows = if max_rows <= 0 {
-        1_000_000
-    } else {
-        max_rows as usize
-    };
-    if !looks_like_row_returning_query(query) {
-        return execute_postgres_non_query(pool, query).await;
-    }
-
-    let start = Instant::now();
-    let mut stream = sqlx::query(query).fetch(pool);
-    let mut result = ExecuteResult::default();
-
-    while result.rows.len() < max_rows {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                result.duration = elapsed_ms(start);
-                result.error = "query cancelled".to_string();
-                return result;
-            }
-            row = stream.next() => {
-                let Some(row) = row else { break };
-                let row = match row {
-                    Ok(row) => row,
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = err.to_string();
-                        return result;
-                    }
-                };
-
-                if result.columns.is_empty() {
-                    result.columns = row.columns().iter().map(|col| col.name().to_string()).collect();
-                    result.column_types = row.columns().iter().map(|col| col.type_info().name().to_string()).collect();
-                }
-
-                match pg_row_to_json_values(&row) {
-                    Ok(values) => result.rows.push(values),
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = format!("scan: {err}");
-                        return result;
-                    }
-                }
-            }
-        }
-    }
-
-    result.duration = elapsed_ms(start);
-    result
-}
 
 pub async fn execute_postgres_non_query(pool: &PgPool, query: &str) -> ExecuteResult {
     let start = Instant::now();
@@ -187,63 +71,6 @@ pub async fn execute_postgres_non_query(pool: &PgPool, query: &str) -> ExecuteRe
     }
 }
 
-pub async fn execute_mysql(
-    pool: &MySqlPool,
-    query: &str,
-    max_rows: i64,
-    cancel: CancellationToken,
-) -> ExecuteResult {
-    let max_rows = if max_rows <= 0 {
-        1_000_000
-    } else {
-        max_rows as usize
-    };
-    if !looks_like_row_returning_query(query) {
-        return execute_mysql_non_query(pool, query).await;
-    }
-
-    let start = Instant::now();
-    let mut stream = sqlx::query(query).fetch(pool);
-    let mut result = ExecuteResult::default();
-
-    while result.rows.len() < max_rows {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                result.duration = elapsed_ms(start);
-                result.error = "query cancelled".to_string();
-                return result;
-            }
-            row = stream.next() => {
-                let Some(row) = row else { break };
-                let row = match row {
-                    Ok(row) => row,
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = err.to_string();
-                        return result;
-                    }
-                };
-
-                if result.columns.is_empty() {
-                    result.columns = row.columns().iter().map(|col| col.name().to_string()).collect();
-                    result.column_types = row.columns().iter().map(|col| col.type_info().name().to_string()).collect();
-                }
-
-                match mysql_row_to_json_values(&row) {
-                    Ok(values) => result.rows.push(values),
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = format!("scan: {err}");
-                        return result;
-                    }
-                }
-            }
-        }
-    }
-
-    result.duration = elapsed_ms(start);
-    result
-}
 
 pub async fn execute_mysql_non_query(pool: &MySqlPool, query: &str) -> ExecuteResult {
     let start = Instant::now();

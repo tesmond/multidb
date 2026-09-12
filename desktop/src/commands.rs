@@ -1,7 +1,7 @@
 use crate::{
     backup,
     models::{
-        ConnectionConfig, DatabaseConnection, ExecuteResult, QueryRecord, QueryStreamChunk,
+        ConnectionConfig, DatabaseConnection, QueryRecord, QueryStreamChunk,
         QueryStreamDone, QueryStreamMeta, SavedQuery, SchemaCacheEntry, SchemaTree,
     },
     queries, schema,
@@ -85,70 +85,12 @@ pub async fn disconnect(state: Arc<AppState>, id: String) -> CommandResult<()> {
     result.map_err(command_err)
 }
 
-pub async fn list_connections(state: Arc<AppState>) -> CommandResult<Vec<ConnectionConfig>> {
-    Ok(state.connections.list_connections().await)
-}
 
 pub async fn list_saved_connections(state: Arc<AppState>) -> CommandResult<Vec<ConnectionConfig>> {
     let store = state.store().await.map_err(command_err)?;
     store.list_saved_connections().await.map_err(command_err)
 }
 
-pub async fn execute_query(
-    state: Arc<AppState>,
-    conn_id: String,
-    database_name: String,
-    query_id: String,
-    query: String,
-    max_rows: i64,
-) -> CommandResult<ExecuteResult> {
-    let cfg = state
-        .get_config_or_saved(&conn_id)
-        .await
-        .map_err(command_err)?;
-    let cancel = CancellationToken::new();
-    state
-        .query_cancels
-        .lock()
-        .await
-        .insert(query_id.clone(), cancel.clone());
-
-    let result = if cfg.driver == "postgres" {
-        let pool = state
-            .get_pg_pool_for_database_or_reconnect(&conn_id, &database_name)
-            .await
-            .map_err(command_err)?;
-        queries::execute_postgres(&pool, &query, max_rows, cancel).await
-    } else if cfg.driver == "mysql" {
-        let pool = state
-            .get_mysql_pool_or_reconnect(&conn_id)
-            .await
-            .map_err(command_err)?;
-        queries::execute_mysql(&pool, &query, max_rows, cancel).await
-    } else {
-        let pool = state
-            .get_pool_or_reconnect(&conn_id)
-            .await
-            .map_err(command_err)?;
-        queries::execute(&pool, &query, max_rows, cancel).await
-    };
-    state.query_cancels.lock().await.remove(&query_id);
-
-    if let Ok(store) = state.store().await {
-        let _ = store
-            .add_query_history(QueryRecord {
-                conn_id,
-                query,
-                duration: result.duration,
-                result_count: result.rows.len() as i64,
-                error: result.error.clone(),
-                ..QueryRecord::default()
-            })
-            .await;
-    }
-
-    Ok(result)
-}
 
 pub async fn cancel_query(state: Arc<AppState>, query_id: String) -> CommandResult<()> {
     if let Some(cancel) = state.query_cancels.lock().await.get(&query_id) {
@@ -972,34 +914,7 @@ pub fn save_csv(csv_content: String, default_filename: String) -> CommandResult<
     std::fs::write(&path, csv_content).map_err(command_err)
 }
 
-pub fn save_file(path: String, data: Vec<u8>, perm: u32) -> CommandResult<()> {
-    if path.is_empty() {
-        return Err("empty path".to_string());
-    }
-    let path = PathBuf::from(path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(command_err)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, data).map_err(command_err)?;
-    #[cfg(not(unix))]
-    let _ = perm;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(perm))
-            .map_err(command_err)?;
-    }
-    std::fs::rename(&tmp, &path).map_err(command_err)
-}
 
-pub async fn get_query_history(
-    state: Arc<AppState>,
-    limit: i64,
-) -> CommandResult<Vec<QueryRecord>> {
-    let store = state.store().await.map_err(command_err)?;
-    store.get_query_history(limit).await.map_err(command_err)
-}
 
 pub async fn get_query_history_by_conn_id(
     state: Arc<AppState>,

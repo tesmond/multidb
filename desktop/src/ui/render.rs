@@ -2,7 +2,7 @@
 //! plus window-level overlays (menus, dialogs).
 
 use crate::ui::dialogs::{self, Btn};
-use crate::ui::theme::{self, hsla};
+use crate::ui::theme;
 use crate::ui::widgets::{overlay, shadow, Scale, TextExt};
 use crate::ui::workspace::{PaneDrag, Workspace};
 use gpui::{
@@ -473,9 +473,6 @@ pub trait FlexRatio: Styled + Sized {
 }
 impl<T: Styled> FlexRatio for T {}
 
-pub fn color(c: theme::Rgba) -> gpui::Hsla {
-    hsla(c)
-}
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

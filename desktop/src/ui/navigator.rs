@@ -10,8 +10,8 @@ use crate::ui::widgets::spaced_text::spaced_text;
 use crate::ui::widgets::{overlay, separator, shadow, Scale, TextExt};
 use crate::ui::workspace::{DragKind, NavDrag, NavMenu, Workspace};
 use gpui::{
-    anchored, deferred, div, point, prelude::*, px, AnyElement, App, Context, Corner, CursorStyle, Div, FontWeight,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
+    deferred, div, point, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, FontWeight, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
 };
 
 const CHEVRON_OPEN: &str = "▾";
@@ -587,11 +587,6 @@ impl Workspace {
             .child(filter_box)
             .child(content)
             .into_any_element()
-    }
-
-    fn drop_shadow(&self, is_before: bool, is_after: bool) -> Option<Vec<gpui::BoxShadow>> {
-        let _ = (is_before, is_after);
-        None
     }
 
     fn render_group_label(&mut self, id: String, title: String, count: usize, filtering: bool, s: Scale, cx: &mut Context<Self>) -> AnyElement {
@@ -1317,9 +1312,6 @@ fn drop_line(after: bool) -> Div {
     }
 }
 
-pub fn anchored_at(pos: Point<Pixels>, child: impl IntoElement) -> impl IntoElement {
-    anchored().position(pos).anchor(Corner::TopLeft).child(child)
-}
 
 /// Wraps a navigator row so its bounds are recorded each frame; drag and drop
 /// needs the row midpoint to decide between dropping above and below it.

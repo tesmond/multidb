@@ -1,13 +1,13 @@
 //! Query tab bar (tabs, rename, drag reorder, overflow scroll, context menu)
 //! and the editor toolbar with the connection selector.
 
-use crate::ui::theme::{self, hsla, Rgba};
+use crate::ui::theme::{self, Rgba};
 use crate::ui::widgets::text_input::{InputEvent, InputLook, TextInput};
 use crate::ui::widgets::{separator, shadow, Scale, TextExt};
 use crate::ui::workspace::{TabDrag, TabKind, Workspace};
 use gpui::{
     anchored, deferred, div, point, prelude::*, px, Animation, AnimationExt, AnyElement, Bounds, Context, Corner,
-    CursorStyle, FontWeight, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window,
+    MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Window,
 };
 use std::time::Duration;
 
@@ -440,18 +440,6 @@ impl MapBounds for AnyElement {
     }
 }
 
-pub fn point_in(b: &Bounds<Pixels>, p: Point<Pixels>) -> bool {
-    b.contains(&p)
-}
 
-pub fn weight_medium() -> FontWeight {
-    FontWeight::MEDIUM
-}
 
-pub fn cursor_pointer() -> CursorStyle {
-    CursorStyle::PointingHand
-}
 
-pub fn hs(c: Rgba) -> gpui::Hsla {
-    hsla(c)
-}
