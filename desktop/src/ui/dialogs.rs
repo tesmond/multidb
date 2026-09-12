@@ -35,7 +35,7 @@ pub fn font_scale_look(scale: f32) -> InputLook {
 pub fn save_title_look(scale: f32) -> InputLook {
     let mut l = InputLook::dialog(scale);
     l.pad_x = (12.0, 12.0);
-    l.height = l.line_height + 16.0 + 2.0;
+    l.height = crate::ui::metrics::input_inner_height(l.font_size) + 16.0 + 2.0;
     l.focus_ring = Some((3.0, theme::rgba8(88, 166, 255, 0.1)));
     l
 }

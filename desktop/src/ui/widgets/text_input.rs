@@ -134,7 +134,7 @@ impl InputLook {
             border_width: 1.0,
             radius: 4.0,
             pad_x: (10.0, 10.0),
-            height: lh + 14.0 + 2.0,
+            height: crate::ui::metrics::input_inner_height(fs) + 14.0 + 2.0,
             line_height: lh,
             focus_ring: None,
         }
