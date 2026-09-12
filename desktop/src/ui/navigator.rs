@@ -180,7 +180,6 @@ impl Workspace {
             .font_weight(FontWeight::NORMAL)
             .text_color(theme::TEXT_MUTED)
             .cursor_pointer()
-            .hover(|st| st.text_color(theme::TEXT))
             .child(glyph)
     }
 
@@ -346,7 +345,7 @@ impl Workspace {
             .items_center()
             .justify_center()
             .rounded(px(4.))
-            .hover(|st| st.bg(theme::BG_HOVER))
+            .hover(|st| st.bg(theme::BG_HOVER).text_color(theme::TEXT))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.add_menu_open = !this.add_menu_open;
                 this.settings_open = false;
@@ -360,7 +359,7 @@ impl Workspace {
             .items_center()
             .justify_center()
             .rounded(px(4.))
-            .hover(|st| st.bg(theme::BG_HOVER))
+            .hover(|st| st.bg(theme::BG_HOVER).text_color(theme::TEXT))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.settings_open = !this.settings_open;
                 this.add_menu_open = false;
@@ -636,7 +635,7 @@ impl Workspace {
             }))
             .child(chevron(s, open))
             .child(div().flex_shrink_0().child("▣"))
-            .child(div().min_w(px(0.)).overflow_hidden().text_ellipsis().child(title))
+            .child(div().flex_shrink_0().child(title))
             .child(div().font_weight(FontWeight::NORMAL).opacity(0.7).child(format!("({count})")))
             .when(show_line, |d| d.child(drop_line(after)));
         record_row(row.into_any_element(), format!("group:{id}"), cx)
@@ -654,6 +653,7 @@ impl Workspace {
         let swatch = swatch_color(&conn.config.tab_color);
         let size_label = format_bytes(conn.schema.as_ref().and_then(|s| s.size_bytes));
         let group_name = SharedString::from(format!("conn-{id}"));
+        let row_hovered = self.hover_conn.as_deref() == Some(id.as_str());
         let (i1, i2, i3, i4, i5, i6) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
         let g1 = group.clone();
         let cfg = conn.config.clone();
@@ -673,6 +673,17 @@ impl Workspace {
             .hover(|st| st.bg(theme::BG_HOVER))
             .when(selected, |d| d.bg(theme::BG_SELECTED))
             .when(dragging, |d| d.opacity(0.6))
+            .on_hover(cx.listener({
+                let id = id.clone();
+                move |this, hovered: &bool, _w, cx| {
+                    if *hovered {
+                        this.hover_conn = Some(id.clone());
+                    } else if this.hover_conn.as_deref() == Some(id.as_str()) {
+                        this.hover_conn = None;
+                    }
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, _, _cx| {
                 this.nav_drag = Some(NavDrag { kind: DragKind::Conn(i1.clone()), start: e.position, active: false, target_conn: None, target_group: None, after: false });
             }))
@@ -716,7 +727,7 @@ impl Workspace {
                     .min_w(px(0.))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(div().min_w(px(0.)).overflow_hidden().text_ellipsis().child(cfg.name.clone()))
+                    .child(div().overflow_hidden().text_ellipsis().child(cfg.name.clone()))
                     .when(!size_label.is_empty(), |d| {
                         d.child(div().flex_shrink_0().t(s, 11.0).font_weight(FontWeight::NORMAL).text_color(theme::TEXT_MUTED).opacity(0.72).child(size_label.clone()))
                     }),
@@ -733,16 +744,16 @@ impl Workspace {
             )
             .child(
                 div()
-                    .hidden()
-                    .group_hover(group_name.clone(), |st| st.flex())
+                    .when(!row_hovered, |d| d.hidden())
+                    .when(row_hovered, |d| d.flex())
                     .gap(px(2.))
                     .items_center()
-                    .child(self.nav_icon_btn(format!("edit-{id}"), s, "✏️").on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(cx.listener(move |this, _, window, cx| {
+                    .child(self.nav_icon_btn(format!("edit-{id}"), s, "✏️").hover(|st| st.text_color(theme::TEXT)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         let cfg = this.connection(&i5).map(|c| c.config.clone());
                         this.open_connection_dialog(cfg, window, cx);
                     })))
-                    .child(self.nav_icon_btn(format!("disc-{id}"), s, "✕").on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(cx.listener(move |this, _, _, cx| {
+                    .child(self.nav_icon_btn(format!("disc-{id}"), s, "✕").hover(|st| st.text_color(theme::TEXT)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.disconnect_conn(&i6, cx);
                     }))),
@@ -760,7 +771,9 @@ impl Workspace {
     fn render_conn_children(&mut self, conn: &ActiveConnection, filter: &str, s: Scale, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let filtering = !filter.is_empty();
         let id = conn.config.id.clone();
-        let mut children = div().flex().flex_col().pl(px(16.));
+        // Section margins collapsed in the old block layout: 2px between
+        // sections and 2px after the last one.
+        let mut children = div().flex().flex_col().pl(px(16.)).pb(px(2.));
         if conn.schema_loading {
             return children.child(nav_info(s, "Loading schema…", theme::TEXT_MUTED)).into_any_element();
         }
@@ -778,10 +791,10 @@ impl Workspace {
                 if !dbname.is_empty() {
                     let k = db_key.clone();
                     children = children.child(
-                        div().my(px(2.)).ml(px(16.)).child(
+                        div().mt(px(2.)).ml(px(16.)).child(
                             self.section_label(format!("db-{db_key}"), s, filtering || self.expanded_tables.contains(&db_key), true, cx.listener(move |this, _, _, cx| this.toggle_key(&k, cx)))
                                 .child(div().flex_shrink_0().child("🗄"))
-                                .child(div().min_w(px(0.)).overflow_hidden().text_ellipsis().child(dbname.clone())),
+                                .child(div().flex_shrink_0().child(dbname.clone())),
                         ),
                     );
                 }
@@ -801,10 +814,10 @@ impl Workspace {
                         let sk = schema_key.clone();
                         let sopen = filtering || self.expanded_tables.contains(&schema_key);
                         let size = format_bytes(sc.size_bytes);
-                        let mut section = div().my(px(2.)).when(nested, |d| d.ml(px(16.))).when(!nested, |d| d.ml(px(16.))).child(
+                        let mut section = div().mt(px(2.)).when(nested, |d| d.ml(px(16.))).when(!nested, |d| d.ml(px(16.))).child(
                             self.section_label(format!("s-{schema_key}"), s, sopen, true, cx.listener(move |this, _, _, cx| this.toggle_key(&sk, cx)))
                                 .child(div().flex_shrink_0().child("🗂"))
-                                .child(div().min_w(px(0.)).overflow_hidden().text_ellipsis().child(sc.name.clone()))
+                                .child(div().flex_shrink_0().child(sc.name.clone()))
                                 .when(!size.is_empty(), |d| d.child(size_label(s, &size))),
                         );
                         if sopen {
@@ -871,7 +884,7 @@ impl Workspace {
     ) -> AnyElement {
         let open = filtering || self.expanded_tables.contains(key);
         let k = key.to_string();
-        let mut section = div().my(px(2.)).ml(px(16.)).flex().flex_col().child(
+        let mut section = div().mt(px(2.)).ml(px(16.)).flex().flex_col().child(
             div()
                 .id(SharedString::from(format!("sec-{key}")))
                 .flex()
@@ -920,7 +933,7 @@ impl Workspace {
                         }))
                         .child(chevron(s, topen))
                         .child(div().flex_shrink_0().child("📋"))
-                        .child(div().min_w(px(0.)).overflow_hidden().text_ellipsis().child(t.name.clone()))
+                        .child(div().flex_shrink_0().child(t.name.clone()))
                         .when(!size.is_empty(), |d| d.child(size_label(s, &size))),
                 );
                 if topen {
@@ -950,7 +963,7 @@ impl Workspace {
     fn render_leaf_section(&mut self, key: &str, label: &'static str, icon: &'static str, names: Vec<String>, s: Scale, cx: &mut Context<Self>) -> AnyElement {
         let open = self.expanded_tables.contains(key);
         let k = key.to_string();
-        let mut section = div().my(px(2.)).ml(px(16.)).flex().flex_col().child(
+        let mut section = div().mt(px(2.)).ml(px(16.)).flex().flex_col().child(
             div()
                 .id(SharedString::from(format!("sec-{key}")))
                 .flex()

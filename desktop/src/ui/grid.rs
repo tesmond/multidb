@@ -669,3 +669,21 @@ impl Element for GridBody {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `columnSizing.test.ts`.
+    #[test]
+    fn auto_fit_uses_the_wider_of_header_and_cells() {
+        assert_eq!(auto_fit_width(12.0, 140.0, 10.0, 1.0), 188.0);
+        assert_eq!(auto_fit_width(120.0, 10.0, 10.0, 1.0), 152.0);
+    }
+
+    #[test]
+    fn auto_fit_is_clamped() {
+        assert_eq!(auto_fit_width(0.0, 0.0, 10.0, 1.0), 50.0);
+        assert_eq!(auto_fit_width(4000.0, 0.0, 10.0, 1.0), 800.0);
+    }
+}

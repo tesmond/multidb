@@ -132,6 +132,10 @@ pub struct Workspace {
     /// Bounds of navigator rows (`conn:<id>` / `group:<id>`), used to decide
     /// whether a drag drops above or below a row.
     pub nav_row_bounds: std::collections::HashMap<String, gpui::Bounds<Pixels>>,
+    /// Connection row under the pointer (the old `.conn-row:hover .row-actions`
+    /// rule). Tracked in state rather than with `group_hover` so the row's
+    /// layout is identical in prepaint and paint.
+    pub hover_conn: Option<String>,
 
     // Navigator
     pub expanded: std::collections::HashSet<String>,
@@ -224,6 +228,7 @@ impl Workspace {
             tab_menu: None,
             tab_bounds: Vec::new(),
             nav_row_bounds: std::collections::HashMap::new(),
+            hover_conn: None,
             expanded: Default::default(),
             expanded_tables: Default::default(),
             expanded_groups: Default::default(),

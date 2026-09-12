@@ -128,7 +128,7 @@ fn update_quote(q: &mut Option<Quote>, ch: char) -> bool {
 
 /// `findSqlCommonSyntaxDiagnostics`.
 pub fn common_syntax(sql: &str) -> Vec<Diagnostic> {
-    static SELECT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is-u)\bSELECT\b(.*?)\bFROM\b").unwrap());
+    static SELECT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)(?-u:\b)SELECT(?-u:\b)(.*?)(?-u:\b)FROM(?-u:\b)").unwrap());
     let mut out = Vec::new();
     for m in SELECT.captures_iter(sql) {
         let body = m.get(1).unwrap();
@@ -365,7 +365,7 @@ fn find_column_refs(expr: &str) -> Vec<ColumnRef> {
 
 /// `findSqlSemanticDiagnostics`.
 pub fn semantic(sql: &str, db: &DbSchema) -> Vec<Diagnostic> {
-    static SELECT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is-u)\bSELECT\b(.*?)\bFROM\b").unwrap());
+    static SELECT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)(?-u:\b)SELECT(?-u:\b)(.*?)(?-u:\b)FROM(?-u:\b)").unwrap());
     static DISTINCT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i-u)\bDISTINCT\b\s*\*?").unwrap());
     let mut out = Vec::new();
     let refs = resolve_table_refs(sql, db, &mut out);
