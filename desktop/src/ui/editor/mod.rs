@@ -6,8 +6,11 @@
 pub mod buffer;
 mod element;
 pub mod popup;
+pub mod search;
+mod search_panel;
 
 use crate::ui::sql::complete::{rank, Engine, RankedOption, SourceResult};
+use crate::ui::widgets::text_input::{InputEvent, TextInput};
 use crate::ui::sql::lint::{lint, Diagnostic};
 use crate::ui::sql::schema::DbSchema;
 use crate::ui::sql::{tokenize, Dialect, Tok, Token};
@@ -78,6 +81,11 @@ actions!(
         Escape,
         CursorMatchingBracket,
         SelectNextOccurrence,
+        OpenSearch,
+        FindNext,
+        FindPrevious,
+        SelectSelectionMatches,
+        GotoLine,
     ]
 );
 
@@ -157,6 +165,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Escape, c),
         KeyBinding::new("cmd-shift-\\", CursorMatchingBracket, c),
         KeyBinding::new("cmd-d", SelectNextOccurrence, c),
+        // searchKeymap
+        KeyBinding::new("cmd-f", OpenSearch, c),
+        KeyBinding::new("ctrl-f", OpenSearch, c),
+        KeyBinding::new("cmd-g", FindNext, c),
+        KeyBinding::new("f3", FindNext, c),
+        KeyBinding::new("cmd-shift-g", FindPrevious, c),
+        KeyBinding::new("shift-f3", FindPrevious, c),
+        KeyBinding::new("cmd-shift-l", SelectSelectionMatches, c),
+        KeyBinding::new("cmd-alt-g", GotoLine, c),
     ]);
 }
 
@@ -201,6 +218,9 @@ pub struct SqlEditor {
     pub(crate) layout: Option<EditorLayout>,
     selecting: Option<SelectMode>,
     marked_range: Option<Range<usize>>,
+    pub search: Option<search::SearchPanel>,
+    pub goto: Option<search::GotoDialog>,
+    _search_subs: Vec<gpui::Subscription>,
     pub hover_pos: Option<Point<Pixels>>,
     /// Diagnostics under the pointer plus whether the pointer is on the gutter
     /// marker, and whether the 300ms `hoverTime` has elapsed.
@@ -246,6 +266,9 @@ impl SqlEditor {
             layout: None,
             selecting: None,
             marked_range: None,
+            search: None,
+            goto: None,
+            _search_subs: Vec::new(),
             hover_pos: None,
             hover_target: None,
             hover_ready: false,
@@ -1168,8 +1191,10 @@ impl SqlEditor {
     fn a_start_completion(&mut self, _: &StartCompletion, _: &mut Window, cx: &mut Context<Self>) {
         self.start_completion(true, false, cx);
     }
-    fn a_escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
-        if self.completion.take().is_some() {
+    fn a_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.goto.is_some() || self.search.is_some() {
+            self.close_search(window, cx);
+        } else if self.completion.take().is_some() {
             cx.notify();
         } else if !self.buffer.selection.is_empty() {
             let head = self.buffer.selection.head;
@@ -1199,6 +1224,234 @@ impl SqlEditor {
                 self.buffer.selection = Selection { anchor: i, head: i + needle.len() };
             }
         }
+        self.after_selection(cx);
+    }
+
+
+    // ─── Search panel (@codemirror/search) ──────────────────────────────────
+
+    fn a_open_search(&mut self, _: &OpenSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.search {
+            panel.search_input.update(cx, |i, cx| {
+                i.select_all_text(cx);
+                i.focus(window);
+            });
+            cx.notify();
+            return;
+        }
+        let look = search::textfield_look(13.0 * self.font_scale);
+        // The panel opens seeded with the selection, like CodeMirror.
+        let seed = {
+            let sel = self.buffer.selection.range();
+            let text = &self.buffer.text()[sel.clone()];
+            if !sel.is_empty() && !text.contains('\n') { text.to_string() } else { String::new() }
+        };
+        let search_input = cx.new(|cx| {
+            let mut t = TextInput::new(cx, look.clone()).with_placeholder("Find".to_string());
+            t.set_text(seed.clone(), cx);
+            t
+        });
+        let replace_input = cx.new(|cx| TextInput::new(cx, look).with_placeholder("Replace".to_string()));
+        let subs = vec![
+            cx.subscribe_in(&search_input, window, |this, _e, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Changed => this.search_query_changed(cx),
+                InputEvent::Submit => this.find_next(cx),
+                InputEvent::Cancel => this.close_search(window, cx),
+                InputEvent::Focus | InputEvent::Blur => {}
+            }),
+            cx.subscribe_in(&replace_input, window, |this, _e, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Changed => this.search_query_changed(cx),
+                InputEvent::Submit => this.replace_next(cx),
+                InputEvent::Cancel => this.close_search(window, cx),
+                InputEvent::Focus | InputEvent::Blur => {}
+            }),
+        ];
+        search_input.update(cx, |i, _| i.focus(window));
+        search_input.update(cx, |i, cx| i.select_all_text(cx));
+        self._search_subs = subs;
+        self.search = Some(search::SearchPanel {
+            query: search::Query { search: seed, ..Default::default() },
+            search_input,
+            replace_input,
+            matches: Vec::new(),
+        });
+        self.search_query_changed(cx);
+    }
+
+    pub fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
+        self._search_subs.clear();
+        self.goto = None;
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    /// Re-read the fields into the query and recompute the match list.
+    pub fn search_query_changed(&mut self, cx: &mut Context<Self>) {
+        let (search, replace) = match &self.search {
+            Some(p) => (p.search_input.read(cx).text().to_string(), p.replace_input.read(cx).text().to_string()),
+            None => return,
+        };
+        let doc = self.buffer.text().to_string();
+        if let Some(p) = &mut self.search {
+            p.query.search = search;
+            p.query.replace = replace;
+            p.matches = p.query.matches(&doc);
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_search_option(&mut self, option: &'static str, cx: &mut Context<Self>) {
+        if let Some(p) = &mut self.search {
+            match option {
+                "case" => p.query.case_sensitive = !p.query.case_sensitive,
+                "re" => p.query.regexp = !p.query.regexp,
+                _ => p.query.whole_word = !p.query.whole_word,
+            }
+        }
+        self.search_query_changed(cx);
+    }
+
+    fn a_find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.find_next(cx);
+    }
+
+    fn a_find_previous(&mut self, _: &FindPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.find_previous(cx);
+    }
+
+    pub fn find_next(&mut self, cx: &mut Context<Self>) {
+        let Some(query) = self.search.as_ref().map(|p| p.query.clone()) else { return };
+        let from = self.buffer.selection.range().start + 1;
+        let doc = self.buffer.text().to_string();
+        if let Some(m) = query.next(&doc, from.min(doc.len())) {
+            self.select_range(m, cx);
+        }
+    }
+
+    pub fn find_previous(&mut self, cx: &mut Context<Self>) {
+        let Some(query) = self.search.as_ref().map(|p| p.query.clone()) else { return };
+        let to = self.buffer.selection.range().start;
+        let doc = self.buffer.text().to_string();
+        if let Some(m) = query.previous(&doc, to) {
+            self.select_range(m, cx);
+        }
+    }
+
+    /// `selectMatches`: this editor has a single selection, so the matches are
+    /// all highlighted and the last one is selected.
+    pub fn select_all_matches(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = &self.search else { return };
+        let Some(last) = p.matches.last().cloned() else { return };
+        self.select_range(last, cx);
+    }
+
+    pub fn replace_next(&mut self, cx: &mut Context<Self>) {
+        let Some(query) = self.search.as_ref().map(|p| p.query.clone()) else { return };
+        let doc = self.buffer.text().to_string();
+        let sel = self.buffer.selection.range();
+        // Replace the selection when it is already a match, else find one first.
+        let target = query
+            .matches(&doc)
+            .into_iter()
+            .find(|m| *m == sel)
+            .or_else(|| query.next(&doc, sel.start));
+        let Some(target) = target else { return };
+        if target != sel {
+            self.select_range(target, cx);
+            return;
+        }
+        let text = query.replacement(&doc, &target);
+        self.buffer.edit(target.clone(), &text, EditKind::Other);
+        self.after_change(false, cx);
+        let after = target.start + text.len();
+        let doc = self.buffer.text().to_string();
+        if let Some(next) = query.next(&doc, after) {
+            self.select_range(next, cx);
+        }
+        self.search_query_changed(cx);
+    }
+
+    pub fn replace_all(&mut self, cx: &mut Context<Self>) {
+        let Some(query) = self.search.as_ref().map(|p| p.query.clone()) else { return };
+        let doc = self.buffer.text().to_string();
+        let matches = query.matches(&doc);
+        if matches.is_empty() {
+            return;
+        }
+        // Apply back to front so earlier offsets stay valid.
+        for m in matches.into_iter().rev() {
+            let text = query.replacement(&doc, &m);
+            self.buffer.edit(m, &text, EditKind::Other);
+        }
+        self.after_change(false, cx);
+        self.search_query_changed(cx);
+    }
+
+    fn a_select_selection_matches(&mut self, _: &SelectSelectionMatches, window: &mut Window, cx: &mut Context<Self>) {
+        let sel = self.buffer.selection.range();
+        if sel.is_empty() {
+            return;
+        }
+        let needle = self.buffer.text()[sel].to_string();
+        if self.search.is_none() {
+            self.a_open_search(&OpenSearch, window, cx);
+        }
+        if let Some(p) = &self.search {
+            p.search_input.update(cx, |i, cx| i.set_text(needle, cx));
+        }
+        self.search_query_changed(cx);
+        self.select_all_matches(cx);
+    }
+
+    fn a_goto_line(&mut self, _: &GotoLine, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dialog) = &self.goto {
+            dialog.input.update(cx, |i, cx| {
+                i.select_all_text(cx);
+                i.focus(window);
+            });
+            cx.notify();
+            return;
+        }
+        let line = self.buffer.line_of(self.buffer.selection.head) + 1;
+        // The field sits inside the dialog's 80% label, so its own 70% is
+        // relative to that.
+        let look = search::textfield_look(0.8 * 13.0 * self.font_scale);
+        let input = cx.new(|cx| {
+            let mut t = TextInput::new(cx, look);
+            t.set_text(line.to_string(), cx);
+            t
+        });
+        let sub = cx.subscribe_in(&input, window, |this, _e, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Submit => this.goto_line_apply(window, cx),
+            InputEvent::Cancel => this.close_search(window, cx),
+            _ => {}
+        });
+        input.update(cx, |i, _| i.focus(window));
+        input.update(cx, |i, cx| i.select_all_text(cx));
+        self._search_subs.push(sub);
+        self.goto = Some(search::GotoDialog { input });
+        cx.notify();
+    }
+
+    pub fn goto_line_apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &self.goto else { return };
+        let value = dialog.input.read(cx).text().to_string();
+        let lines = self.buffer.line_count();
+        let current = self.buffer.line_of(self.buffer.selection.head) + 1;
+        if let Some((line, col)) = search::goto_target(&value, lines, current) {
+            let start = self.buffer.line_start(line - 1);
+            let len = self.buffer.line_text(line - 1).len();
+            let pos = start + col.min(len);
+            self.move_to(pos, false, cx);
+        }
+        self.goto = None;
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.buffer.selection = Selection { anchor: range.start, head: range.end };
         self.after_selection(cx);
     }
 
@@ -1547,12 +1800,27 @@ impl Render for SqlEditor {
             .on_action(cx.listener(Self::a_escape))
             .on_action(cx.listener(Self::a_matching_bracket))
             .on_action(cx.listener(Self::a_select_next))
+            .on_action(cx.listener(Self::a_open_search))
+            .on_action(cx.listener(Self::a_find_next))
+            .on_action(cx.listener(Self::a_find_previous))
+            .on_action(cx.listener(Self::a_select_selection_matches))
+            .on_action(cx.listener(Self::a_goto_line))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .child(element::EditorElement { editor: cx.entity() })
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .w_full()
+                    .child(element::EditorElement { editor: cx.entity() }),
+            )
+            .children(self.render_search_panels(window, cx))
             .children(popup::build(self, cx.entity(), window, cx))
             .children(self.hover_tooltip_data().map(|(messages, anchor, above)| {
                 popup::lint_tooltip(&messages, anchor, above, self.font_scale, window, cx)

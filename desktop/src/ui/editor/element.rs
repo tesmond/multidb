@@ -356,6 +356,46 @@ impl Element for EditorElement {
                 }
             }
 
+            // Search matches (.cm-searchMatch / .cm-searchMatch-selected).
+            let (matches, selected_match) = editor.search_highlights();
+            if !matches.is_empty() {
+                for m in matches {
+                    let color = if Some(m) == selected_match.as_ref() {
+                        hsla(super::search::MATCH_SELECTED)
+                    } else {
+                        hsla(super::search::MATCH)
+                    };
+                    let l0 = buffer.line_of(m.start);
+                    let l1 = buffer.line_of(m.end);
+                    for (line, shaped) in &pp.lines {
+                        let line = *line;
+                        if line < l0 || line > l1 {
+                            continue;
+                        }
+                        let ls = buffer.line_start(line);
+                        let le = ls + buffer.line_text(line).len();
+                        let x0 = text_left + shaped.x_for_index(m.start.clamp(ls, le) - ls);
+                        let x1 = text_left + shaped.x_for_index(m.end.clamp(ls, le) - ls);
+                        let x1 = if line < l1 { x1.max(x0 + px(2.)) } else { x1 };
+                        if x1 > x0 {
+                            let top = line_top(line) + px(box_pad);
+                            let box_ = Bounds::from_corners(point(x0, top), point(x1, top + px(layout.text_box_height)));
+                            window.paint_quad(fill(box_, color));
+                            // one-dark's `outline: 1px solid #457dff` (CSS
+                            // outlines sit outside the box).
+                            window.paint_quad(gpui::outline(
+                                Bounds::from_corners(
+                                    point(box_.left() - px(1.), box_.top() - px(1.)),
+                                    point(box_.right() + px(1.), box_.bottom() + px(1.)),
+                                ),
+                                hsla(super::search::MATCH_OUTLINE),
+                                gpui::BorderStyle::Solid,
+                            ));
+                        }
+                    }
+                }
+            }
+
             // Matching brackets.
             if focused {
                 if let Some((a, b)) = editor.matching_brackets() {
