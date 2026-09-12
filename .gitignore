@@ -19,52 +19,14 @@ desktop/target/
 *.dll
 *.so
 *.dylib
-*.test
 
 # Output directories
-/bin/
 /dist/
-
-# Coverage
-*.out
-coverage.out
-
-# =========================
-# Svelte / Node (frontend)
-# =========================
-node_modules/
-
-# Build output (Vite/SvelteKit)
-frontend/dist/
-.svelte-kit/
-.output/
-
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
 
 # Env files
 .env
 .env.*
 !.env.example
-
-# Package managers
-yarn.lock
-pnpm-lock.yaml
-
-# =========================
-# Testing / tooling
-# =========================
-coverage/
-.nyc_output/
-frontend/test-results/
-
-# =========================
-# Desktop build output
-# =========================
-build/bin/
 
 # =========================
 # Misc

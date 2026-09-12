@@ -1,14 +1,13 @@
 use crate::models::ExecuteResult;
 use anyhow::Result;
-use futures_util::StreamExt;
 use serde_json::{Number, Value};
 use sqlx::{
     mysql::MySqlRow,
     postgres::{PgRow, PgValueFormat},
-    AnyPool, Column, MySqlPool, PgPool, Row, TypeInfo, Value as SqlxValue, ValueRef,
+    sqlite::SqliteRow,
+    AnyPool, Column, MySqlPool, PgPool, Row, SqlitePool, TypeInfo, Value as SqlxValue, ValueRef,
 };
 use std::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 pub fn looks_like_row_returning_query(query: &str) -> bool {
     let q = strip_leading_comments(query);
@@ -23,63 +22,6 @@ pub fn looks_like_row_returning_query(query: &str) -> bool {
     .any(|prefix| upper.starts_with(prefix))
 }
 
-pub async fn execute(
-    pool: &AnyPool,
-    query: &str,
-    max_rows: i64,
-    cancel: CancellationToken,
-) -> ExecuteResult {
-    let max_rows = if max_rows <= 0 {
-        1_000_000
-    } else {
-        max_rows as usize
-    };
-    if !looks_like_row_returning_query(query) {
-        return execute_non_query(pool, query).await;
-    }
-
-    let start = Instant::now();
-    let mut stream = sqlx::query(query).fetch(pool);
-    let mut result = ExecuteResult::default();
-
-    while result.rows.len() < max_rows {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                result.duration = elapsed_ms(start);
-                result.error = "query cancelled".to_string();
-                return result;
-            }
-            row = stream.next() => {
-                let Some(row) = row else { break };
-                let row = match row {
-                    Ok(row) => row,
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = err.to_string();
-                        return result;
-                    }
-                };
-
-                if result.columns.is_empty() {
-                    result.columns = row.columns().iter().map(|col| col.name().to_string()).collect();
-                    result.column_types = row.columns().iter().map(|col| col.type_info().name().to_string()).collect();
-                }
-
-                match row_to_json_values(&row) {
-                    Ok(values) => result.rows.push(values),
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = format!("scan: {err}");
-                        return result;
-                    }
-                }
-            }
-        }
-    }
-
-    result.duration = elapsed_ms(start);
-    result
-}
 
 pub async fn execute_non_query(pool: &AnyPool, query: &str) -> ExecuteResult {
     let start = Instant::now();
@@ -105,63 +47,6 @@ pub async fn execute_non_query(pool: &AnyPool, query: &str) -> ExecuteResult {
     }
 }
 
-pub async fn execute_postgres(
-    pool: &PgPool,
-    query: &str,
-    max_rows: i64,
-    cancel: CancellationToken,
-) -> ExecuteResult {
-    let max_rows = if max_rows <= 0 {
-        1_000_000
-    } else {
-        max_rows as usize
-    };
-    if !looks_like_row_returning_query(query) {
-        return execute_postgres_non_query(pool, query).await;
-    }
-
-    let start = Instant::now();
-    let mut stream = sqlx::query(query).fetch(pool);
-    let mut result = ExecuteResult::default();
-
-    while result.rows.len() < max_rows {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                result.duration = elapsed_ms(start);
-                result.error = "query cancelled".to_string();
-                return result;
-            }
-            row = stream.next() => {
-                let Some(row) = row else { break };
-                let row = match row {
-                    Ok(row) => row,
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = err.to_string();
-                        return result;
-                    }
-                };
-
-                if result.columns.is_empty() {
-                    result.columns = row.columns().iter().map(|col| col.name().to_string()).collect();
-                    result.column_types = row.columns().iter().map(|col| col.type_info().name().to_string()).collect();
-                }
-
-                match pg_row_to_json_values(&row) {
-                    Ok(values) => result.rows.push(values),
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = format!("scan: {err}");
-                        return result;
-                    }
-                }
-            }
-        }
-    }
-
-    result.duration = elapsed_ms(start);
-    result
-}
 
 pub async fn execute_postgres_non_query(pool: &PgPool, query: &str) -> ExecuteResult {
     let start = Instant::now();
@@ -187,65 +72,32 @@ pub async fn execute_postgres_non_query(pool: &PgPool, query: &str) -> ExecuteRe
     }
 }
 
-pub async fn execute_mysql(
-    pool: &MySqlPool,
-    query: &str,
-    max_rows: i64,
-    cancel: CancellationToken,
-) -> ExecuteResult {
-    let max_rows = if max_rows <= 0 {
-        1_000_000
-    } else {
-        max_rows as usize
-    };
-    if !looks_like_row_returning_query(query) {
-        return execute_mysql_non_query(pool, query).await;
-    }
 
+pub async fn execute_mysql_non_query(pool: &MySqlPool, query: &str) -> ExecuteResult {
     let start = Instant::now();
-    let mut stream = sqlx::query(query).fetch(pool);
-    let mut result = ExecuteResult::default();
+    let mut rows_affected = 0_i64;
 
-    while result.rows.len() < max_rows {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                result.duration = elapsed_ms(start);
-                result.error = "query cancelled".to_string();
-                return result;
-            }
-            row = stream.next() => {
-                let Some(row) = row else { break };
-                let row = match row {
-                    Ok(row) => row,
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = err.to_string();
-                        return result;
-                    }
+    for statement in split_statements(query) {
+        match sqlx::query(&statement).execute(pool).await {
+            Ok(done) => rows_affected += done.rows_affected() as i64,
+            Err(err) => {
+                return ExecuteResult {
+                    duration: elapsed_ms(start),
+                    error: err.to_string(),
+                    ..ExecuteResult::default()
                 };
-
-                if result.columns.is_empty() {
-                    result.columns = row.columns().iter().map(|col| col.name().to_string()).collect();
-                    result.column_types = row.columns().iter().map(|col| col.type_info().name().to_string()).collect();
-                }
-
-                match mysql_row_to_json_values(&row) {
-                    Ok(values) => result.rows.push(values),
-                    Err(err) => {
-                        result.duration = elapsed_ms(start);
-                        result.error = format!("scan: {err}");
-                        return result;
-                    }
-                }
             }
         }
     }
 
-    result.duration = elapsed_ms(start);
-    result
+    ExecuteResult {
+        rows_affected,
+        duration: elapsed_ms(start),
+        ..ExecuteResult::default()
+    }
 }
 
-pub async fn execute_mysql_non_query(pool: &MySqlPool, query: &str) -> ExecuteResult {
+pub async fn execute_sqlite_non_query(pool: &SqlitePool, query: &str) -> ExecuteResult {
     let start = Instant::now();
     let mut rows_affected = 0_i64;
 
@@ -309,6 +161,67 @@ pub fn row_to_json_values(row: &sqlx::any::AnyRow) -> Result<Vec<Value>> {
         out.push(value_at(row, idx)?);
     }
     Ok(out)
+}
+
+pub fn sqlite_row_to_json_values(row: &SqliteRow) -> Result<Vec<Value>> {
+    let mut out = Vec::with_capacity(row.len());
+    for idx in 0..row.len() {
+        out.push(sqlite_value_at(row, idx)?);
+    }
+    Ok(out)
+}
+
+pub fn sqlite_value_at(row: &SqliteRow, idx: usize) -> Result<Value> {
+    let raw = row.try_get_raw(idx)?;
+    if raw.is_null() {
+        return Ok(Value::Null);
+    }
+
+    let ty = row
+        .columns()
+        .get(idx)
+        .map(|col| col.type_info().name().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    if is_boolean_type(&ty) {
+        if let Ok(value) = row.try_get::<bool, _>(idx) {
+            return Ok(Value::Bool(value));
+        }
+    }
+    if let Ok(value) = row.try_get::<i64, _>(idx) {
+        return Ok(Value::Number(Number::from(value)));
+    }
+    if let Ok(value) = row.try_get::<f64, _>(idx) {
+        if let Some(number) = Number::from_f64(value) {
+            return Ok(Value::Number(number));
+        }
+    }
+    if let Ok(value) = row.try_get::<sqlx::types::chrono::NaiveDateTime, _>(idx) {
+        return Ok(Value::String(value.to_string()));
+    }
+    if let Ok(value) = row.try_get::<sqlx::types::chrono::NaiveDate, _>(idx) {
+        return Ok(Value::String(value.to_string()));
+    }
+    if let Ok(value) = row.try_get::<sqlx::types::chrono::NaiveTime, _>(idx) {
+        return Ok(Value::String(value.to_string()));
+    }
+    if let Ok(value) = row.try_get::<String, _>(idx) {
+        return Ok(Value::String(format_text_value(&ty, value)));
+    }
+    if let Ok(value) = row.try_get::<Vec<u8>, _>(idx) {
+        return Ok(Value::String(format_binary_value(&ty, &value)));
+    }
+    // SQLite's declared affinity can be DATETIME/DATE/TIME while the stored
+    // value is arbitrary text. If chrono cannot parse it, preserve the raw
+    // value instead of replacing it with an unsupported marker.
+    if let Ok(value) = row.try_get_unchecked::<String, _>(idx) {
+        return Ok(Value::String(format_text_value(&ty, value)));
+    }
+    if let Ok(value) = row.try_get_unchecked::<Vec<u8>, _>(idx) {
+        return Ok(Value::String(format_binary_value(&ty, &value)));
+    }
+
+    Ok(Value::String(format!("<unsupported sqlite:{ty}>")))
 }
 
 pub fn value_at(row: &sqlx::any::AnyRow, idx: usize) -> Result<Value> {
@@ -1467,7 +1380,7 @@ mod tests {
     use super::{
         decode_pg_numeric, format_binary_value, format_pg_array_binary, format_pg_binary_value,
         format_text_value, geometry_bytes_to_text, is_boolean_type, json_value_to_text,
-        looks_like_row_returning_query, split_statements,
+        looks_like_row_returning_query, row_to_json_values, split_statements, sqlite_row_to_json_values,
     };
     use serde_json::json;
 
@@ -1509,15 +1422,19 @@ mod tests {
         assert!(!is_boolean_type("TINYINT"));
     }
 
-    #[tokio::test]
-    async fn sqlite_count_result_stays_numeric() {
+    /// An empty in-memory sqlite pool.
+    async fn sqlite_pool() -> sqlx::AnyPool {
         sqlx::any::install_default_drivers();
-        let pool = sqlx::any::AnyPoolOptions::new()
+        sqlx::any::AnyPoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
-            .expect("create in-memory sqlite pool");
+            .expect("create in-memory sqlite pool")
+    }
 
+    #[tokio::test]
+    async fn sqlite_count_result_stays_numeric() {
+        let pool = sqlite_pool().await;
         sqlx::query("CREATE TABLE items (id INTEGER PRIMARY KEY)")
             .execute(&pool)
             .await
@@ -1527,36 +1444,87 @@ mod tests {
             .await
             .expect("insert test row");
 
-        let result = super::execute(
-            &pool,
-            "SELECT COUNT(*) FROM items",
-            100,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
+        let rows = sqlx::query("SELECT COUNT(*) FROM items")
+            .fetch_all(&pool)
+            .await
+            .expect("count rows");
+        let values: Vec<_> = rows
+            .iter()
+            .map(|row| row_to_json_values(row).expect("convert row"))
+            .collect();
 
-        assert_eq!(result.rows, vec![vec![json!(1)]]);
+        assert_eq!(values, vec![vec![json!(1)]]);
     }
 
     #[tokio::test]
     async fn sqlite_query_with_leading_comment_returns_rows() {
-        sqlx::any::install_default_drivers();
-        let pool = sqlx::any::AnyPoolOptions::new()
+        let query = "-- query data\nSELECT 1";
+        // The comment must not stop the query being treated as row-returning.
+        assert!(looks_like_row_returning_query(query));
+
+        let pool = sqlite_pool().await;
+        let rows = sqlx::query(query).fetch_all(&pool).await.expect("run query");
+        let values: Vec<_> = rows
+            .iter()
+            .map(|row| row_to_json_values(row).expect("convert row"))
+            .collect();
+
+        assert_eq!(values, vec![vec![json!(1)]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_datetime_column_renders_as_text() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
-            .expect("create in-memory sqlite pool");
+            .expect("create native sqlite pool");
+        sqlx::query("CREATE TABLE people (birthday DATETIME NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create people table");
+        sqlx::query("INSERT INTO people (birthday) VALUES ('1990-04-23 12:34:56')")
+            .execute(&pool)
+            .await
+            .expect("insert birthday");
 
-        let result = super::execute(
-            &pool,
-            "-- query data\nSELECT 1",
-            100,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
+        let rows = sqlx::query("SELECT birthday FROM people")
+            .fetch_all(&pool)
+            .await
+            .expect("fetch birthday");
+        let values: Vec<_> = rows
+            .iter()
+            .map(|row| sqlite_row_to_json_values(row).expect("convert birthday"))
+            .collect();
 
-        assert_eq!(result.error, "");
-        assert_eq!(result.rows, vec![vec![json!(1)]]);
+        assert_eq!(values, vec![vec![json!("1990-04-23 12:34:56")]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_unparseable_datetime_preserves_its_text() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create native sqlite pool");
+        sqlx::query("CREATE TABLE people (birthday DATETIME NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create people table");
+        sqlx::query("INSERT INTO people (birthday) VALUES ('spring 1990')")
+            .execute(&pool)
+            .await
+            .expect("insert birthday");
+
+        let row = sqlx::query("SELECT birthday FROM people")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch birthday");
+
+        assert_eq!(
+            sqlite_row_to_json_values(&row).expect("convert birthday"),
+            vec![json!("spring 1990")]
+        );
     }
 
     #[test]

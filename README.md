@@ -22,9 +22,10 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
   - Per-connection tab color with automatic contrasting tab text
   - Connection color swatch shown in the left navigator
 - SQL editor experience:
-  - CodeMirror-based SQL editor
+  - Native GPU-rendered SQL editor
   - Connection-aware SQL dialect switching
   - Schema-driven SQL autocomplete
+  - Find/replace panel and go-to-line (`⌘F`, `⌘G`, `⌥⌘G`)
   - Query cancellation support
 - Query execution:
   - Streamed query results for large datasets
@@ -46,58 +47,81 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 
 ## Tech Stack
 
-- Desktop shell: WRY + Tao
+- UI: [GPUI](https://www.gpui.rs/) (GPU-accelerated Rust UI framework)
 - Backend: Rust
-- Frontend: Svelte + TypeScript + Vite
-- Editor: CodeMirror 6
 - Database layer:
   - `sqlx` with MySQL, PostgreSQL, and SQLite support
   - Local metadata stored in SQLite
 
 ## Project Structure
 
-- `desktop`: WRY/Tao desktop shell, Rust backend, command handlers, and IPC bridge
-- `desktop/src/desktop.rs`: lightweight window/webview host and static asset protocol
-- `desktop/src/ipc.rs`: JSON IPC dispatcher used by the frontend compatibility bindings
+- `desktop`: the whole application - GPUI front end, Rust backend, and command handlers
+- `desktop/src/ui`: GPUI window, workspace layout, navigator, SQL editor, results grid, and dialogs
+- `desktop/src/commands.rs`: command handlers the UI calls into
 - `desktop/src/connections.rs`: connection manager, DSN logic, and Kubernetes port-forwarding
 - `desktop/src/queries.rs`: query execution, cancellation, result conversion, and non-query handling
 - `desktop/src/schema.rs`: schema and primary-key inspection
 - `desktop/src/history.rs`: local metadata persistence in `history.db`
 - `desktop/src/backup.rs`: table backup, import, pg_dump import, and drop workflows
-- `frontend/src`: Svelte UI components and stores
-- `frontend/desktop`: lightweight frontend bindings for the WRY IPC bridge
 
 ## Prerequisites
 
-- Rust stable
-- [Bun](https://bun.sh/)
+- Rust stable (`rustup` toolchain, 1.85 or newer)
 - `make`
-- Platform dependencies for WRY/WebKitGTK on Linux
-- Optional tools based on workflow:
-  - `kubectl` for Kubernetes port-forwarded connections
+- macOS: the Command Line Tools are enough (`xcode-select --install`)
+- Linux: the GPUI build dependencies
 
-## Install and build
+  ```bash
+  sudo apt-get install -y build-essential pkg-config libasound2-dev \
+      libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libssl-dev \
+      libzstd-dev libvulkan1 libgit2-dev
+  ```
 
-Install JavaScript dependencies once, from the repository root:
+  A Vulkan-capable driver is required at runtime.
+- Windows: the MSVC toolchain (`rustup default stable-msvc`) and the Windows SDK
+- Optional, per workflow: `kubectl` for Kubernetes port-forwarded connections
+
+## Build
+
+From the repository root:
 
 ```bash
-bun install
+make build     # release build (+ MultiDB.app on macOS)
+make dev       # debug build and run
+make check     # cargo check
+make test      # unit tests
 ```
 
-Then compile the production application:
+`make build` produces `desktop/target/release/multidb`; on macOS it also writes
+`desktop/target/release/MultiDB.app` and a zip beside it. Plain cargo works
+just as well:
 
 ```bash
-make
+cargo build --release --manifest-path desktop/Cargo.toml
 ```
 
-`bun install` uses the root workspace definition and installs the frontend package too. Do not run an install command inside `frontend/`.
+### Metal shaders on macOS
 
-The build compiles the Svelte frontend first, then builds the Rust desktop executable at `desktop/target/release/multidb`. On macOS it also creates the application bundle.
+GPUI renders through Metal, and its shaders are normally compiled at build time
+with `xcrun metal` — a tool that ships with Xcode but **not** with the Command
+Line Tools. So that a Command Line Tools install is enough, this crate enables
+GPUI's `runtime_shaders` feature by default, which compiles the shaders when the
+app starts (a few milliseconds at launch).
 
-For development, run:
+With Xcode installed you can build the shaders ahead of time instead:
 
 ```bash
-make dev
+make build CARGO_FLAGS=--no-default-features
+```
+
+### Fonts
+
+The SQL editor asks for JetBrains Mono, then Fira Code, then Cascadia Code, and
+falls back to the system fixed-width font. Set `MULTIDB_MONO_FONT` to pick a
+different family:
+
+```bash
+MULTIDB_MONO_FONT="SF Mono" make dev
 ```
 
 ## Running the macOS download
@@ -119,7 +143,11 @@ The application should then run as expected.
 
 ## Testing And Checks
 
-Run both frontend and Rust checks with `make check`.
+```bash
+make check   # cargo check
+make test    # unit tests (SQL tokenizer, completion, lint, value formatting,
+             # column sizing, diagram layout, connection helpers)
+```
 
 ## Data Storage
 
@@ -132,10 +160,19 @@ Stored data includes:
 - Saved queries
 - Cached schema snapshots
 
+UI preferences (font scale, server groups, connection order, saved diagram
+layouts) live beside it in `ui-settings.json`. To run against a throwaway
+profile, start the app with a different `HOME`:
+
+```bash
+HOME=/tmp/multidb-demo CFFIXED_USER_HOME=/tmp/multidb-demo \
+    cargo run --manifest-path desktop/Cargo.toml
+```
+
 ## App Icons
 
 Desktop icon assets are committed for packaging:
 
-- macOS icon: `build/appicon.icns`
-- Windows icon: `build/appicon.ico`
+- macOS icon: `build/appicon.icns` (built from `build/icon.iconset/`)
+- Windows icon: `build/windows/icon.ico`, embedded by `desktop/app.rc`
 - PNG icon: `build/icon.png`

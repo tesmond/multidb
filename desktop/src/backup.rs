@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Result};
 use flate2::read::GzDecoder;
-use futures_util::StreamExt;
+use futures::StreamExt;
 use serde_json::{Map, Value};
 use sqlx::{any::AnyRow, AnyPool, Column, ColumnIndex, Row};
 use std::{

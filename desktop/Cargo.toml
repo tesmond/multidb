@@ -13,26 +13,34 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "multidb"
 path = "src/main.rs"
 
+[features]
+# gpui compiles its Metal shaders with `xcrun metal`, which ships with Xcode but
+# not with the Command Line Tools. The default build compiles them at startup
+# instead; turn this off (`--no-default-features`) when Xcode is installed.
+default = ["runtime-shaders"]
+runtime-shaders = ["gpui/runtime_shaders"]
+
 [dependencies]
 anyhow = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-rds = "1"
+chrono = "0.4"
 dirs = "6"
 flate2 = "1"
-futures-util = "0.3"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+futures = "0.3"
+gpui = "0.2.2"
 keyring = { version = "3", features = ["apple-native"] }
+regex = "1"
 rfd = "0.15"
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "any", "mysql", "postgres", "sqlite", "chrono", "json", "bigdecimal", "uuid"] }
-tao = "0.35.3"
-thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
+unicode-segmentation = "1"
 url = "2"
-wry = { version = "0.55.1", features = ["devtools"] }
+uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -40,8 +48,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Securit
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSEvent", "NSMenu", "NSMenuItem"] }
-objc2-foundation = { version = "0.3.2", features = ["NSString", "NSObjCRuntime"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSColor", "NSColorPanel", "NSColorSpace", "NSPanel", "NSResponder", "NSWindow"] }
 
 [build-dependencies]
 embed-resource = "3.0.9"
