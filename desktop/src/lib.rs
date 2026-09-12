@@ -1,17 +1,18 @@
 mod backup;
 mod commands;
 mod connections;
-mod desktop;
 mod history;
-mod ipc;
 mod ipc_diagnostics;
 mod models;
 mod password_vault;
 mod queries;
 mod schema;
-mod startup_profile;
 mod state;
+pub mod ui;
 
 pub fn run() {
-    desktop::run().expect("failed to run multidb");
+    if let Err(e) = ui::run() {
+        eprintln!("multidb: {e:#}");
+        std::process::exit(1);
+    }
 }
