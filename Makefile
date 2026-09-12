@@ -1,17 +1,17 @@
-.PHONY: build install dev check
+.PHONY: build install dev check test
 
 build:
-	@bun run --silent --cwd frontend build
 	@cargo build --manifest-path desktop/Cargo.toml --release
 	@if [ "$$(uname -s)" = "Darwin" ]; then sh build/darwin/bundle.sh; fi
 
 install:
-	@bun install
+	@cargo fetch --manifest-path desktop/Cargo.toml
 
 dev:
-	@bun run --silent --cwd frontend build
 	@cargo run --manifest-path desktop/Cargo.toml
 
 check:
-	@bun run --silent --cwd frontend check
 	@cargo check --quiet --manifest-path desktop/Cargo.toml
+
+test:
+	@cargo test --quiet --manifest-path desktop/Cargo.toml
