@@ -1294,7 +1294,7 @@ mod tests {
     use super::{
         decode_pg_numeric, format_binary_value, format_pg_array_binary, format_pg_binary_value,
         format_text_value, geometry_bytes_to_text, is_boolean_type, json_value_to_text,
-        looks_like_row_returning_query, split_statements,
+        looks_like_row_returning_query, row_to_json_values, split_statements,
     };
     use serde_json::json;
 
@@ -1336,15 +1336,19 @@ mod tests {
         assert!(!is_boolean_type("TINYINT"));
     }
 
-    #[tokio::test]
-    async fn sqlite_count_result_stays_numeric() {
+    /// An empty in-memory sqlite pool.
+    async fn sqlite_pool() -> sqlx::AnyPool {
         sqlx::any::install_default_drivers();
-        let pool = sqlx::any::AnyPoolOptions::new()
+        sqlx::any::AnyPoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
-            .expect("create in-memory sqlite pool");
+            .expect("create in-memory sqlite pool")
+    }
 
+    #[tokio::test]
+    async fn sqlite_count_result_stays_numeric() {
+        let pool = sqlite_pool().await;
         sqlx::query("CREATE TABLE items (id INTEGER PRIMARY KEY)")
             .execute(&pool)
             .await
@@ -1354,36 +1358,32 @@ mod tests {
             .await
             .expect("insert test row");
 
-        let result = super::execute(
-            &pool,
-            "SELECT COUNT(*) FROM items",
-            100,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
+        let rows = sqlx::query("SELECT COUNT(*) FROM items")
+            .fetch_all(&pool)
+            .await
+            .expect("count rows");
+        let values: Vec<_> = rows
+            .iter()
+            .map(|row| row_to_json_values(row).expect("convert row"))
+            .collect();
 
-        assert_eq!(result.rows, vec![vec![json!(1)]]);
+        assert_eq!(values, vec![vec![json!(1)]]);
     }
 
     #[tokio::test]
     async fn sqlite_query_with_leading_comment_returns_rows() {
-        sqlx::any::install_default_drivers();
-        let pool = sqlx::any::AnyPoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("create in-memory sqlite pool");
+        let query = "-- query data\nSELECT 1";
+        // The comment must not stop the query being treated as row-returning.
+        assert!(looks_like_row_returning_query(query));
 
-        let result = super::execute(
-            &pool,
-            "-- query data\nSELECT 1",
-            100,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
+        let pool = sqlite_pool().await;
+        let rows = sqlx::query(query).fetch_all(&pool).await.expect("run query");
+        let values: Vec<_> = rows
+            .iter()
+            .map(|row| row_to_json_values(row).expect("convert row"))
+            .collect();
 
-        assert_eq!(result.error, "");
-        assert_eq!(result.rows, vec![vec![json!(1)]]);
+        assert_eq!(values, vec![vec![json!(1)]]);
     }
 
     #[test]
