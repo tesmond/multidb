@@ -78,10 +78,10 @@ pub fn line_height_normal(font_size: f32) -> f32 {
     a.round() + d.round()
 }
 
-/// Content height of a WebKit text input: its inner editor is one pixel
-/// taller than the equivalent line box.
+/// Content height of a WebKit text input's inner editor (the same line box a
+/// block would get; the accessibility rect reports one pixel more).
 pub fn input_inner_height(font_size: f32) -> f32 {
-    line_height_normal(font_size) + 1.0
+    line_height_normal(font_size)
 }
 
 pub fn mono_line_height_normal(font_size: f32) -> f32 {
