@@ -17,6 +17,137 @@ pub const BASE_ROW_HEIGHT: f32 = 28.0;
 pub const BASE_CELL_PAD_X: f32 = 10.0;
 const EXPLAIN_DEFAULT_TEXT_LEN: usize = 120;
 pub const SCROLLBAR: f32 = 12.0;
+/// `::-webkit-scrollbar-thumb` sits inside a 3px border of the track colour.
+pub const SCROLLBAR_INSET: f32 = 3.0;
+/// Shortest the thumb is allowed to get.
+const MIN_THUMB: f32 = 20.0;
+
+/// Which scrollbar a press or a drag is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bar {
+    Vertical,
+    Horizontal,
+}
+
+/// A scrollbar drag: which bar, and where inside the thumb it was grabbed.
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollDrag {
+    pub bar: Bar,
+    pub grab: f32,
+}
+
+/// The body/scrollbar layout for one paint of the grid: how big the content is,
+/// which scrollbars that needs, and therefore how much room the rows get. Paint
+/// and hit-testing both go through this so a click lands on the thumb that was
+/// drawn.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScrollGeom {
+    /// Body size, i.e. the outer size minus whichever scrollbars are shown.
+    pub view_w: f32,
+    pub view_h: f32,
+    pub content_w: f32,
+    pub content_h: f32,
+    pub has_v: bool,
+    pub has_h: bool,
+}
+
+impl ScrollGeom {
+    pub fn new(outer_w: f32, outer_h: f32, content_w: f32, content_h: f32) -> Self {
+        // Each scrollbar eats into the space the other one measures against.
+        let mut has_v = content_h > outer_h;
+        let mut has_h = content_w > outer_w - if has_v { SCROLLBAR } else { 0.0 };
+        if has_h && !has_v {
+            has_v = content_h > outer_h - SCROLLBAR;
+        }
+        if has_v && !has_h {
+            has_h = content_w > outer_w - SCROLLBAR;
+        }
+        ScrollGeom {
+            view_w: outer_w - if has_v { SCROLLBAR } else { 0.0 },
+            view_h: outer_h - if has_h { SCROLLBAR } else { 0.0 },
+            content_w,
+            content_h,
+            has_v,
+            has_h,
+        }
+    }
+
+    pub fn max_scroll_y(&self) -> f32 {
+        (self.content_h - self.view_h).max(0.0)
+    }
+
+    pub fn max_scroll_x(&self) -> f32 {
+        (self.content_w - self.view_w).max(0.0)
+    }
+
+    /// `(offset, length)` of the vertical thumb along the track.
+    pub fn v_thumb(&self, scroll_y: f32) -> (f32, f32) {
+        thumb(self.view_h, self.content_h, scroll_y)
+    }
+
+    pub fn h_thumb(&self, scroll_x: f32) -> (f32, f32) {
+        thumb(self.view_w, self.content_w, scroll_x)
+    }
+
+    /// The scroll offset that puts the thumb's near edge at `pos` along the
+    /// track — the inverse of [`ScrollGeom::v_thumb`].
+    pub fn scroll_for_v_thumb(&self, pos: f32) -> f32 {
+        let (_, th) = self.v_thumb(0.0);
+        scroll_for(pos, self.view_h, th, self.max_scroll_y())
+    }
+
+    pub fn scroll_for_h_thumb(&self, pos: f32) -> f32 {
+        let (_, tw) = self.h_thumb(0.0);
+        scroll_for(pos, self.view_w, tw, self.max_scroll_x())
+    }
+
+    /// Which scrollbar, if any, is under a point in body-local coordinates.
+    pub fn bar_at(&self, local: Point<Pixels>) -> Option<Bar> {
+        let (x, y): (f32, f32) = (local.x.into(), local.y.into());
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        if self.has_v && x >= self.view_w && y < self.view_h {
+            return Some(Bar::Vertical);
+        }
+        if self.has_h && y >= self.view_h && x < self.view_w {
+            return Some(Bar::Horizontal);
+        }
+        None
+    }
+
+    /// Distance along the track of a point on `bar`.
+    pub fn pos_on(&self, bar: Bar, local: Point<Pixels>) -> f32 {
+        match bar {
+            Bar::Vertical => local.y.into(),
+            Bar::Horizontal => local.x.into(),
+        }
+    }
+}
+
+fn thumb(view: f32, content: f32, scroll: f32) -> (f32, f32) {
+    if content <= view || view <= 0.0 {
+        return (0.0, view.max(0.0));
+    }
+    let len = (view * (view / content)).max(MIN_THUMB).min(view);
+    let pos = (scroll / (content - view)).clamp(0.0, 1.0) * (view - len);
+    (pos, len)
+}
+
+fn scroll_for(thumb_pos: f32, view: f32, thumb_len: f32, max_scroll: f32) -> f32 {
+    let travel = view - thumb_len;
+    if travel <= 0.0 {
+        return 0.0;
+    }
+    (thumb_pos / travel).clamp(0.0, 1.0) * max_scroll
+}
+
+/// Where a cmd/ctrl-arrow, Home or End jump lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Jump {
+    First,
+    Last,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellSel {
@@ -66,6 +197,10 @@ pub struct GridState {
     pub did_resize: bool,
     pub body_bounds: Option<Bounds<Pixels>>,
     pub header_left: f32,
+    /// In-progress scrollbar-thumb drag.
+    pub scroll_drag: Option<ScrollDrag>,
+    /// Scrollbar the pointer is over, for the thumb's `:hover` colour.
+    pub hovered_bar: Option<Bar>,
     sort_cache: Option<(u64, usize, usize, SortDirection, Arc<Vec<usize>>)>,
     advance_cache: HashMap<char, f32>,
     pub focus: Option<gpui::FocusHandle>,
@@ -242,6 +377,17 @@ impl GridState {
         row_num_width(total_rows, self.font_scale) + self.col_widths.iter().sum::<f32>()
     }
 
+    /// Scrollbar layout for the body as it was last painted.
+    pub fn geom(&self, total_rows: usize) -> ScrollGeom {
+        let Some(b) = self.body_bounds else { return ScrollGeom::default() };
+        ScrollGeom::new(
+            b.size.width.into(),
+            b.size.height.into(),
+            self.total_width(total_rows),
+            total_rows as f32 * row_height(self.font_scale),
+        )
+    }
+
     pub fn clamp_scroll(&mut self, total_rows: usize, view_w: f32, view_h: f32) {
         let rh = row_height(self.font_scale);
         let max_y = (total_rows as f32 * rh - view_h).max(0.0);
@@ -333,14 +479,55 @@ impl GridState {
         }
         let max_row = total_rows as isize - 1;
         let max_col = cols as isize - 1;
-        let current = match self.sel {
-            Some(s) => (s.r1, s.c1),
-            None => self.last_selected.unwrap_or((0, 0)),
-        };
+        let current = self.head();
         let next = (
             (current.0 as isize + dr).clamp(0, max_row) as usize,
             (current.1 as isize + dc).clamp(0, max_col) as usize,
         );
+        self.set_head(next, extend, total_rows, view);
+    }
+
+    /// Jump the selection to the first/last row or column — what cmd (or ctrl)
+    /// with an arrow, and Home/End, do. `extend` keeps the anchor, so
+    /// shift-cmd-down selects everything from the cursor to the last row.
+    pub fn jump_selection(
+        &mut self,
+        row: Option<Jump>,
+        col: Option<Jump>,
+        extend: bool,
+        total_rows: usize,
+        cols: usize,
+        view: (f32, f32),
+    ) {
+        if cols == 0 || total_rows == 0 {
+            return;
+        }
+        let current = self.head();
+        let next = (
+            match row {
+                Some(Jump::First) => 0,
+                Some(Jump::Last) => total_rows - 1,
+                None => current.0.min(total_rows - 1),
+            },
+            match col {
+                Some(Jump::First) => 0,
+                Some(Jump::Last) => cols - 1,
+                None => current.1.min(cols - 1),
+            },
+        );
+        self.set_head(next, extend, total_rows, view);
+    }
+
+    /// The moving end of the selection.
+    fn head(&self) -> (usize, usize) {
+        match self.sel {
+            Some(s) => (s.r1, s.c1),
+            None => self.last_selected.unwrap_or((0, 0)),
+        }
+    }
+
+    fn set_head(&mut self, next: (usize, usize), extend: bool, total_rows: usize, view: (f32, f32)) {
+        let current = self.head();
         if extend {
             let anchor = match self.sel {
                 Some(s) => (s.r0, s.c0),
@@ -351,18 +538,30 @@ impl GridState {
             self.sel = Some(CellSel { r0: next.0, c0: next.1, r1: next.0, c1: next.1 });
             self.last_selected = Some(next);
         }
-        // ensureRowVisible / ensureColVisible
+        self.ensure_row_visible(next.0, total_rows, view);
+        self.ensure_col_visible(next.1, total_rows, view);
+    }
+
+    /// `ensureRowVisible`: scroll the row into view by the smallest amount.
+    pub fn ensure_row_visible(&mut self, row: usize, total_rows: usize, view: (f32, f32)) {
         let rh = row_height(self.font_scale);
         let (w, h) = view;
         let visible_rows = (h / rh).floor().max(1.0) as usize;
         let start = (self.scroll_y / rh).floor() as usize;
-        if next.0 < start {
-            self.scroll_y = next.0 as f32 * rh;
-        } else if next.0 > start + visible_rows - 1 {
-            self.scroll_y = (next.0 + 1 - visible_rows) as f32 * rh;
+        if row < start {
+            self.scroll_y = row as f32 * rh;
+        } else if row > start + visible_rows - 1 {
+            self.scroll_y = (row + 1 - visible_rows) as f32 * rh;
         }
-        let col_left: f32 = self.col_widths[..next.1].iter().sum();
-        let col_right = col_left + self.col_widths.get(next.1).copied().unwrap_or(0.0);
+        self.clamp_scroll(total_rows, w, h);
+    }
+
+    /// `ensureColVisible`.
+    pub fn ensure_col_visible(&mut self, col: usize, total_rows: usize, view: (f32, f32)) {
+        let (w, h) = view;
+        let end = col.min(self.col_widths.len());
+        let col_left: f32 = self.col_widths[..end].iter().sum();
+        let col_right = col_left + self.col_widths.get(col).copied().unwrap_or(0.0);
         let data_w = (w - row_num_width(total_rows, self.font_scale)).max(1.0);
         if col_left < self.scroll_x {
             self.scroll_x = col_left;
@@ -384,6 +583,8 @@ pub struct GridBody {
     pub sel: Option<CellSel>,
     pub selected_rows: BTreeSet<usize>,
     pub hovered_row: Option<usize>,
+    /// Scrollbar being hovered or dragged, drawn with the thumb's hover colour.
+    pub active_bar: Option<Bar>,
     pub pending: PendingEdits,
     pub editing: Option<(usize, usize)>,
     pub on_bounds: Box<dyn Fn(Bounds<Pixels>, &mut App)>,
@@ -441,16 +642,9 @@ impl Element for GridBody {
         let ow: f32 = outer.size.width.into();
         let oh: f32 = outer.size.height.into();
         // Scrollbars take 12px when content overflows (custom WebKit scrollbar styling).
-        let mut has_v = content_h > oh;
-        let mut has_h = content_w > ow - if has_v { SCROLLBAR } else { 0.0 };
-        if has_h && !has_v {
-            has_v = content_h > oh - SCROLLBAR;
-        }
-        if has_v && !has_h {
-            has_h = content_w > ow - SCROLLBAR;
-        }
-        let w = ow - if has_v { SCROLLBAR } else { 0.0 };
-        let h = oh - if has_h { SCROLLBAR } else { 0.0 };
+        let geom = ScrollGeom::new(ow, oh, content_w, content_h);
+        let (has_v, has_h) = (geom.has_v, geom.has_h);
+        let (w, h) = (geom.view_w, geom.view_h);
         let origin = outer.origin;
         let bounds = Bounds::new(origin, size(px(w), px(h)));
         let (sl, st) = self.scroll;
@@ -644,24 +838,34 @@ impl Element for GridBody {
         // Custom scrollbars: track rgba(255,255,255,.2), thumb rgba(236,240,248,.35)
         // inset by a 3px border, fully rounded.
         let track = theme::rgba8(255, 255, 255, 0.2);
-        let thumb = theme::rgba8(236, 240, 248, 0.35);
+        let thumb_color = |bar: Bar| {
+            if self.active_bar == Some(bar) {
+                // `::-webkit-scrollbar-thumb:hover`
+                theme::rgba8(246, 249, 255, 0.68)
+            } else {
+                theme::rgba8(236, 240, 248, 0.35)
+            }
+        };
+        let inset = SCROLLBAR_INSET;
         if has_v {
             let tr = Bounds::new(point(origin.x + px(w), origin.y), size(px(SCROLLBAR), px(h)));
             window.paint_quad(fill(tr, hsla(track)));
-            let ratio = h / content_h;
-            let th = (h * ratio).max(20.0);
-            let ty = if content_h > h { (st / (content_h - h)) * (h - th) } else { 0.0 };
-            let tb = Bounds::new(point(origin.x + px(w + 3.0), origin.y + px(ty + 3.0)), size(px(SCROLLBAR - 6.0), px(th - 6.0)));
-            window.paint_quad(fill(tb, hsla(thumb)).corner_radii(px(999.)));
+            let (ty, th) = geom.v_thumb(st);
+            let tb = Bounds::new(
+                point(origin.x + px(w + inset), origin.y + px(ty + inset)),
+                size(px(SCROLLBAR - 2.0 * inset), px((th - 2.0 * inset).max(1.0))),
+            );
+            window.paint_quad(fill(tb, hsla(thumb_color(Bar::Vertical))).corner_radii(px(999.)));
         }
         if has_h {
             let tr = Bounds::new(point(origin.x, origin.y + px(h)), size(px(w), px(SCROLLBAR)));
             window.paint_quad(fill(tr, hsla(track)));
-            let ratio = w / content_w;
-            let tw = (w * ratio).max(20.0);
-            let tx = if content_w > w { (sl / (content_w - w)) * (w - tw) } else { 0.0 };
-            let tb = Bounds::new(point(origin.x + px(tx + 3.0), origin.y + px(h + 3.0)), size(px(tw - 6.0), px(SCROLLBAR - 6.0)));
-            window.paint_quad(fill(tb, hsla(thumb)).corner_radii(px(999.)));
+            let (tx, tw) = geom.h_thumb(sl);
+            let tb = Bounds::new(
+                point(origin.x + px(tx + inset), origin.y + px(h + inset)),
+                size(px((tw - 2.0 * inset).max(1.0)), px(SCROLLBAR - 2.0 * inset)),
+            );
+            window.paint_quad(fill(tb, hsla(thumb_color(Bar::Horizontal))).corner_radii(px(999.)));
         }
         if has_v && has_h {
             let corner = Bounds::new(point(origin.x + px(w), origin.y + px(h)), size(px(SCROLLBAR), px(SCROLLBAR)));
@@ -685,5 +889,110 @@ mod tests {
     fn auto_fit_is_clamped() {
         assert_eq!(auto_fit_width(0.0, 0.0, 10.0, 1.0), 50.0);
         assert_eq!(auto_fit_width(4000.0, 0.0, 10.0, 1.0), 800.0);
+    }
+
+    #[test]
+    fn a_scrollbar_only_appears_when_the_content_overflows() {
+        let fits = ScrollGeom::new(400.0, 300.0, 400.0, 300.0);
+        assert!(!fits.has_v && !fits.has_h);
+        assert_eq!((fits.view_w, fits.view_h), (400.0, 300.0));
+
+        // Tall content: the vertical bar narrows the body, which is enough to
+        // push the (only just fitting) width into overflowing too.
+        let tall = ScrollGeom::new(400.0, 300.0, 395.0, 900.0);
+        assert!(tall.has_v && tall.has_h);
+        assert_eq!((tall.view_w, tall.view_h), (388.0, 288.0));
+    }
+
+    #[test]
+    fn the_thumb_spans_the_visible_fraction_and_tracks_the_scroll() {
+        let g = ScrollGeom::new(400.0, 300.0, 300.0, 900.0);
+        // No horizontal bar, so the body keeps its full height.
+        let (top, len) = g.v_thumb(0.0);
+        assert_eq!((top, len), (0.0, 100.0));
+        // Scrolled to the end the thumb sits at the end of its travel.
+        let (top, len) = g.v_thumb(g.max_scroll_y());
+        assert_eq!((top, len), (200.0, 100.0));
+        // Halfway down.
+        assert_eq!(g.v_thumb(300.0).0, 100.0);
+    }
+
+    #[test]
+    fn dragging_the_thumb_maps_back_to_the_scroll_offset() {
+        let g = ScrollGeom::new(400.0, 300.0, 300.0, 900.0);
+        assert_eq!(g.scroll_for_v_thumb(0.0), 0.0);
+        assert_eq!(g.scroll_for_v_thumb(100.0), 300.0);
+        assert_eq!(g.scroll_for_v_thumb(200.0), g.max_scroll_y());
+        // Past the end of the track the scroll saturates.
+        assert_eq!(g.scroll_for_v_thumb(9999.0), g.max_scroll_y());
+    }
+
+    #[test]
+    fn tiny_thumbs_keep_a_usable_length() {
+        let g = ScrollGeom::new(400.0, 300.0, 300.0, 300_000.0);
+        assert_eq!(g.v_thumb(0.0).1, MIN_THUMB);
+        // And the ends of the track still map to the ends of the content.
+        assert_eq!(g.scroll_for_v_thumb(300.0 - MIN_THUMB), g.max_scroll_y());
+    }
+
+    /// A grid with `rows` rows of three 100px columns, showing ten rows.
+    fn grid(rows: usize) -> (GridState, (f32, f32)) {
+        let mut g = GridState { font_scale: 1.0, col_widths: vec![100.0; 3], ..Default::default() };
+        g.sel = Some(CellSel { r0: 0, c0: 0, r1: 0, c1: 0 });
+        g.last_selected = Some((0, 0));
+        assert!(rows > 0);
+        (g, (200.0, 10.0 * BASE_ROW_HEIGHT))
+    }
+
+    #[test]
+    fn cmd_down_and_end_go_to_the_last_row() {
+        let (mut g, view) = grid(100);
+        g.jump_selection(Some(Jump::Last), None, false, 100, 3, view);
+        let sel = g.sel.unwrap();
+        assert_eq!((sel.r0, sel.r1), (99, 99), "a plain jump moves the whole selection");
+        assert_eq!(sel.c1, 0, "the column is left alone");
+        // The last row is scrolled into view, at the bottom of the body.
+        assert_eq!(g.scroll_y, 90.0 * BASE_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn shift_cmd_down_selects_everything_below_and_lands_on_the_last_row() {
+        let (mut g, view) = grid(100);
+        g.jump_selection(None, None, false, 100, 3, view);
+        g.move_selection(3, 0, false, 100, 3, view); // start on row 3
+        g.jump_selection(Some(Jump::Last), None, true, 100, 3, view);
+        let sel = g.sel.unwrap();
+        assert_eq!(sel.norm(), (3, 99, 0, 0), "row 3 through the last row stays selected");
+        assert_eq!(g.scroll_y, 90.0 * BASE_ROW_HEIGHT, "and the view follows the moving end");
+    }
+
+    #[test]
+    fn home_returns_to_the_first_row() {
+        let (mut g, view) = grid(100);
+        g.jump_selection(Some(Jump::Last), None, false, 100, 3, view);
+        g.jump_selection(Some(Jump::First), None, false, 100, 3, view);
+        assert_eq!(g.sel.unwrap().norm(), (0, 0, 0, 0));
+        assert_eq!(g.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn jumping_sideways_scrolls_the_column_into_view() {
+        let (mut g, view) = grid(100);
+        g.jump_selection(None, Some(Jump::Last), false, 100, 3, view);
+        assert_eq!(g.sel.unwrap().c1, 2);
+        assert!(g.scroll_x > 0.0, "the last column is brought into a 200px-wide body");
+        g.jump_selection(None, Some(Jump::First), false, 100, 3, view);
+        assert_eq!(g.sel.unwrap().c1, 0);
+        assert_eq!(g.scroll_x, 0.0);
+    }
+
+    #[test]
+    fn points_hit_the_bar_they_are_over() {
+        let g = ScrollGeom::new(400.0, 300.0, 900.0, 900.0);
+        assert_eq!(g.bar_at(point(px(200.), px(150.))), None);
+        assert_eq!(g.bar_at(point(px(394.), px(150.))), Some(Bar::Vertical));
+        assert_eq!(g.bar_at(point(px(200.), px(294.))), Some(Bar::Horizontal));
+        // The corner square belongs to neither.
+        assert_eq!(g.bar_at(point(px(394.), px(294.))), None);
     }
 }

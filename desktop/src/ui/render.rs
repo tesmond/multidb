@@ -11,7 +11,9 @@ use gpui::{
 };
 
 actions!(workspace, [CloseOverlay, GridCopy, GridSelectAll, GridUp, GridDown, GridLeft, GridRight, GridPageUp, GridPageDown,
-    GridExtendUp, GridExtendDown, GridExtendLeft, GridExtendRight, GridExtendPageUp, GridExtendPageDown, GridEscape]);
+    GridExtendUp, GridExtendDown, GridExtendLeft, GridExtendRight, GridExtendPageUp, GridExtendPageDown, GridEscape,
+    GridFirstRow, GridLastRow, GridFirstCol, GridLastCol,
+    GridExtendFirstRow, GridExtendLastRow, GridExtendFirstCol, GridExtendLastCol]);
 
 pub fn bind_keys(cx: &mut App) {
     let g = Some("ResultsGrid");
@@ -34,6 +36,29 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-pageup", GridExtendPageUp, g),
         KeyBinding::new("shift-pagedown", GridExtendPageDown, g),
         KeyBinding::new("escape", GridEscape, g),
+        // Jump to an edge: cmd on macOS, ctrl elsewhere (both are accepted, as
+        // they already are for copy and select-all), plus Home and End.
+        KeyBinding::new("cmd-up", GridFirstRow, g),
+        KeyBinding::new("ctrl-up", GridFirstRow, g),
+        KeyBinding::new("home", GridFirstRow, g),
+        KeyBinding::new("cmd-down", GridLastRow, g),
+        KeyBinding::new("ctrl-down", GridLastRow, g),
+        KeyBinding::new("end", GridLastRow, g),
+        KeyBinding::new("cmd-left", GridFirstCol, g),
+        KeyBinding::new("ctrl-left", GridFirstCol, g),
+        KeyBinding::new("cmd-right", GridLastCol, g),
+        KeyBinding::new("ctrl-right", GridLastCol, g),
+        // …and the same with shift held, which extends the selection to it.
+        KeyBinding::new("cmd-shift-up", GridExtendFirstRow, g),
+        KeyBinding::new("ctrl-shift-up", GridExtendFirstRow, g),
+        KeyBinding::new("shift-home", GridExtendFirstRow, g),
+        KeyBinding::new("cmd-shift-down", GridExtendLastRow, g),
+        KeyBinding::new("ctrl-shift-down", GridExtendLastRow, g),
+        KeyBinding::new("shift-end", GridExtendLastRow, g),
+        KeyBinding::new("cmd-shift-left", GridExtendFirstCol, g),
+        KeyBinding::new("ctrl-shift-left", GridExtendFirstCol, g),
+        KeyBinding::new("cmd-shift-right", GridExtendLastCol, g),
+        KeyBinding::new("ctrl-shift-right", GridExtendLastCol, g),
     ]);
 }
 

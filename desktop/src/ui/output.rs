@@ -1,7 +1,7 @@
 //! Editor panel (toolbar + SQL editor), output panel (results grid,
 //! messages, history, saved queries) and the status bar.
 
-use crate::ui::grid::{self, CellSel, EditOverlay, GridBody};
+use crate::ui::grid::{self, Bar, CellSel, EditOverlay, GridBody, Jump, ScrollDrag};
 use crate::ui::js;
 use crate::ui::model::{OutputTab, QueryResult, SortDirection};
 use crate::ui::render::*;
@@ -725,6 +725,7 @@ impl Workspace {
             sel: self.grid.sel,
             selected_rows: self.grid.selected_rows.clone(),
             hovered_row: self.grid.hovered_row,
+            active_bar: self.grid.scroll_drag.map(|d| d.bar).or(self.grid.hovered_bar),
             pending,
             editing: self.grid.edit.as_ref().map(|e| (e.row_data_idx, e.col)),
             on_bounds: Box::new(move |b, cx| {
@@ -805,6 +806,14 @@ impl Workspace {
                 let p = this.grid_page();
                 this.grid_move(p, 0, true, cx)
             }))
+            .on_action(cx.listener(|this, _: &GridFirstRow, _, cx| this.grid_jump(Some(Jump::First), None, false, cx)))
+            .on_action(cx.listener(|this, _: &GridLastRow, _, cx| this.grid_jump(Some(Jump::Last), None, false, cx)))
+            .on_action(cx.listener(|this, _: &GridFirstCol, _, cx| this.grid_jump(None, Some(Jump::First), false, cx)))
+            .on_action(cx.listener(|this, _: &GridLastCol, _, cx| this.grid_jump(None, Some(Jump::Last), false, cx)))
+            .on_action(cx.listener(|this, _: &GridExtendFirstRow, _, cx| this.grid_jump(Some(Jump::First), None, true, cx)))
+            .on_action(cx.listener(|this, _: &GridExtendLastRow, _, cx| this.grid_jump(Some(Jump::Last), None, true, cx)))
+            .on_action(cx.listener(|this, _: &GridExtendFirstCol, _, cx| this.grid_jump(None, Some(Jump::First), true, cx)))
+            .on_action(cx.listener(|this, _: &GridExtendLastCol, _, cx| this.grid_jump(None, Some(Jump::Last), true, cx)))
             .on_action(cx.listener(|this, _: &GridEscape, _, cx| {
                 this.grid.clear_selection();
                 cx.notify();
@@ -878,15 +887,12 @@ impl Workspace {
     }
 
     fn grid_view_size(&self) -> (f32, f32) {
-        let Some(b) = self.grid.body_bounds else { return (800.0, 300.0) };
+        if self.grid.body_bounds.is_none() {
+            return (800.0, 300.0);
+        }
         let total = self.active_result().map(|r| r.rows.len()).unwrap_or(0);
-        let s = self.grid.font_scale;
-        let content_h = total as f32 * grid::row_height(s);
-        let content_w = self.grid.total_width(total);
-        let (ow, oh): (f32, f32) = (b.size.width.into(), b.size.height.into());
-        let has_v = content_h > oh;
-        let has_h = content_w > ow - if has_v { grid::SCROLLBAR } else { 0.0 };
-        (ow - if has_v { grid::SCROLLBAR } else { 0.0 }, oh - if has_h { grid::SCROLLBAR } else { 0.0 })
+        let geom = self.grid.geom(total);
+        (geom.view_w, geom.view_h)
     }
 
     fn grid_page(&self) -> isize {
@@ -911,6 +917,46 @@ impl Workspace {
         let Some(r) = self.active_result() else { return };
         let view = self.grid_view_size();
         self.grid.move_selection(dr, dc, extend, r.rows.len(), r.columns.len(), view);
+        cx.notify();
+    }
+
+    /// cmd/ctrl with an arrow, and Home/End: jump to the first or last row or
+    /// column. With `extend` the anchor stays put, so shift-cmd-down selects
+    /// everything from the cursor down to the last row.
+    fn grid_jump(&mut self, row: Option<Jump>, col: Option<Jump>, extend: bool, cx: &mut Context<Self>) {
+        let Some(r) = self.active_result() else { return };
+        let (total, cols) = (r.rows.len(), r.columns.len());
+        if total == 0 || cols == 0 {
+            return;
+        }
+        let view = self.grid_view_size();
+        // Whole rows are selected (the row-number gutter), so keep selecting
+        // whole rows rather than switching to a cell range.
+        if self.grid.sel.is_none() && !self.grid.selected_rows.is_empty() {
+            if let Some(jump) = row {
+                let target = match jump {
+                    Jump::First => 0,
+                    Jump::Last => total - 1,
+                };
+                let g = &mut self.grid;
+                let anchor = g.row_anchor.or(g.last_selected.map(|s| s.0)).unwrap_or(target);
+                if extend {
+                    for i in anchor.min(target)..=anchor.max(target) {
+                        g.selected_rows.insert(i);
+                    }
+                } else {
+                    g.selected_rows.clear();
+                    g.selected_rows.insert(target);
+                    g.row_anchor = Some(target);
+                }
+                let col = g.last_selected.map(|s| s.1).unwrap_or(0);
+                g.last_selected = Some((target, col));
+                g.ensure_row_visible(target, total, view);
+                cx.notify();
+                return;
+            }
+        }
+        self.grid.jump_selection(row, col, extend, total, cols, view);
         cx.notify();
     }
 
@@ -943,6 +989,15 @@ impl Workspace {
         }
         let total = r.rows.len();
         let local = point(e.position.x - b.left(), e.position.y - b.top());
+        let geom = self.grid.geom(total);
+        if let Some(bar) = geom.bar_at(local) {
+            self.on_scrollbar_press(bar, local, total, cx);
+            return;
+        }
+        if f32::from(local.x) >= geom.view_w || f32::from(local.y) >= geom.view_h {
+            // The corner square between the two scrollbars.
+            return;
+        }
         if e.click_count >= 2 {
             self.on_grid_double_click(local, editable, &r, window, cx);
             return;
@@ -987,6 +1042,36 @@ impl Workspace {
         self.grid.selected_rows.clear();
         self.grid.row_anchor = None;
         self.grid.last_selected = Some(hit);
+        cx.notify();
+    }
+
+    /// A press on a scrollbar: grab the thumb, or page towards a click on the
+    /// track, the way a native scrollbar does.
+    fn on_scrollbar_press(&mut self, bar: Bar, local: Point<Pixels>, total: usize, cx: &mut Context<Self>) {
+        let geom = self.grid.geom(total);
+        let pos = geom.pos_on(bar, local);
+        let (start, len, scroll, page) = match bar {
+            Bar::Vertical => {
+                let (s, l) = geom.v_thumb(self.grid.scroll_y);
+                (s, l, self.grid.scroll_y, geom.view_h)
+            }
+            Bar::Horizontal => {
+                let (s, l) = geom.h_thumb(self.grid.scroll_x);
+                (s, l, self.grid.scroll_x, geom.view_w)
+            }
+        };
+        if pos >= start && pos < start + len {
+            self.grid.scroll_drag = Some(ScrollDrag { bar, grab: pos - start });
+        } else {
+            // Track click: one page towards the pointer.
+            let delta = if pos < start { -page } else { page };
+            match bar {
+                Bar::Vertical => self.grid.scroll_y = scroll + delta,
+                Bar::Horizontal => self.grid.scroll_x = scroll + delta,
+            }
+            self.clamp_grid_scroll();
+        }
+        self.grid.hovered_bar = Some(bar);
         cx.notify();
     }
 
@@ -1093,6 +1178,29 @@ impl Workspace {
     }
 
     pub fn on_grid_drag_move(&mut self, e: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some(drag) = self.grid.scroll_drag {
+            let Some(b) = self.grid.body_bounds else { return };
+            let total = self.active_result().map(|r| r.rows.len()).unwrap_or(0);
+            let geom = self.grid.geom(total);
+            let local = point(e.position.x - b.left(), e.position.y - b.top());
+            let pos = geom.pos_on(drag.bar, local) - drag.grab;
+            match drag.bar {
+                Bar::Vertical => self.grid.scroll_y = geom.scroll_for_v_thumb(pos),
+                Bar::Horizontal => self.grid.scroll_x = geom.scroll_for_h_thumb(pos),
+            }
+            self.clamp_grid_scroll();
+            cx.notify();
+            return;
+        }
+        // Hover state for the thumb (`::-webkit-scrollbar-thumb:hover`).
+        let hovered = self.grid.body_bounds.and_then(|b| {
+            let total = self.active_result().map(|r| r.rows.len()).unwrap_or(0);
+            self.grid.geom(total).bar_at(point(e.position.x - b.left(), e.position.y - b.top()))
+        });
+        if hovered != self.grid.hovered_bar {
+            self.grid.hovered_bar = hovered;
+            cx.notify();
+        }
         if let Some((idx, start_x, start_w)) = self.grid.resizing {
             let delta: f32 = (e.position.x - start_x).into();
             if delta.abs() > 2.0 {
@@ -1135,6 +1243,9 @@ impl Workspace {
     }
 
     pub fn on_grid_drag_end(&mut self, _e: &MouseUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.grid.scroll_drag.take().is_some() {
+            cx.notify();
+        }
         if self.grid.resizing.take().is_some() {
             self.grid.did_resize = false;
             cx.notify();
