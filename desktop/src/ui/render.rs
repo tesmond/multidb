@@ -94,7 +94,9 @@ impl Workspace {
     }
 
     fn close_overlay(&mut self, _: &CloseOverlay, _: &mut Window, cx: &mut Context<Self>) {
-        if self.import_dialog.is_some() {
+        if self.cell_popup.is_some() {
+            self.cell_popup = None;
+        } else if self.import_dialog.is_some() {
             self.import_dialog = None;
         } else if self.title_dialog.is_some() {
             self.title_dialog = None;
@@ -269,7 +271,72 @@ impl Workspace {
         if let Some(el) = self.render_terminate_confirm(window, cx) {
             root = root.child(el);
         }
+        if let Some(el) = self.render_cell_popup(window, cx) {
+            root = root.child(el);
+        }
         root.into_any_element()
+    }
+
+    /// The whole of a cell value that was too long to show in the grid.
+    pub fn render_cell_popup(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let popup = self.cell_popup.as_ref()?;
+        let s = Scale(self.scale());
+        let title = format!("{} · row {}", popup.column, popup.row);
+        let text = popup.text.clone();
+        let chars = crate::ui::js::char_len(&text);
+        let copy = text.clone();
+        let modal = dialogs::modal_box(720.0)
+            .id("cell-popup")
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(dialogs::modal_header(s, &title, cx.listener(|this, _, _, cx| {
+                this.cell_popup = None;
+                cx.notify();
+            })))
+            .child(
+                div()
+                    .id("cell-popup-text")
+                    .overflow_y_scroll()
+                    .max_h(px(420.))
+                    .p(px(16.))
+                    .t(s, 12.0)
+                    .font_family(crate::ui::pick_mono_family(cx))
+                    .text_color(theme::TEXT)
+                    .child(text),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .px(px(20.))
+                    .py(px(14.))
+                    .border_t_1()
+                    .border_color(theme::BORDER)
+                    .child(div().t(s, 12.0).text_color(theme::TEXT_MUTED).child(format!("{chars} characters")))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(dialogs::button("cell-popup-copy", s, "Copy", Btn::Secondary, false, cx.listener(move |this, _, _, cx| {
+                                this.copy_to_clipboard(copy.clone(), cx);
+                            })))
+                            .child(dialogs::button("cell-popup-close", s, "Close", Btn::Primary, false, cx.listener(|this, _, _, cx| {
+                                this.cell_popup = None;
+                                cx.notify();
+                            }))),
+                    ),
+            );
+        Some(
+            overlay(0.5)
+                .id("cell-popup-overlay")
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.cell_popup = None;
+                    cx.notify();
+                }))
+                .child(modal)
+                .into_any_element(),
+        )
     }
 
     pub fn render_import_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {

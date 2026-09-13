@@ -7,8 +7,8 @@ use crate::ui::textfmt::{escape_tsv_cell, format_value_for_clipboard};
 use crate::ui::theme::{self, hsla, Rgba};
 use gpui::{
     fill, point, px, quad, size, App, Bounds, BorderStyle, ContentMask, Corners, Edges, Element, ElementId, Entity,
-    Font, FontStyle, FontWeight, GlobalElementId, IntoElement, LayoutId, Pixels, Point, SharedString, Style, TextRun,
-    Window,
+    Font, FontStyle, FontWeight, GlobalElementId, IntoElement, LayoutId, PathBuilder, Pixels, Point, SharedString,
+    Style, TextRun, Window,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -16,6 +16,12 @@ use std::sync::Arc;
 pub const BASE_ROW_HEIGHT: f32 = 28.0;
 pub const BASE_CELL_PAD_X: f32 = 10.0;
 const EXPLAIN_DEFAULT_TEXT_LEN: usize = 120;
+/// How much of a value a column will widen to show when it is expanded
+/// (double-clicking the header's right edge). Anything longer than this keeps
+/// its eye button, which opens the whole value in a window.
+pub const EXPAND_CHARS: usize = 256;
+/// Side of the eye button drawn in cells whose value is longer than that.
+pub const EYE_SIZE: f32 = 13.0;
 pub const SCROLLBAR: f32 = 12.0;
 /// `::-webkit-scrollbar-thumb` sits inside a 3px border of the track colour.
 pub const SCROLLBAR_INSET: f32 = 3.0;
@@ -133,6 +139,52 @@ impl ScrollGeom {
     }
 }
 
+/// The eye button: a lens outline with a pupil, drawn as paths because gpui
+/// can only shape text it has a glyph for and this has to scale with the grid.
+fn paint_eye(window: &mut Window, center: Point<Pixels>, size: f32, color: Rgba) {
+    let (hw, hh) = (size * 0.5, size * 0.3);
+    let at = |dx: f32, dy: f32| point(center.x + px(dx), center.y + px(dy));
+    let steps = 10;
+    // A lid is a parabola from one corner of the lens to the other.
+    let lid = |t: f32, up: bool| {
+        let x = -hw + size * t;
+        let bulge = hh * (1.0 - (2.0 * t - 1.0).powi(2));
+        (x, if up { -bulge } else { bulge })
+    };
+    let mut pb = PathBuilder::stroke(px((size * 0.09).max(1.0)));
+    for i in 0..=steps {
+        let (x, y) = lid(i as f32 / steps as f32, true);
+        if i == 0 {
+            pb.move_to(at(x, y));
+        } else {
+            pb.line_to(at(x, y));
+        }
+    }
+    for i in (0..=steps).rev() {
+        let (x, y) = lid(i as f32 / steps as f32, false);
+        pb.line_to(at(x, y));
+    }
+    if let Ok(path) = pb.build() {
+        window.paint_path(path, hsla(color));
+    }
+
+    let r = size * 0.17;
+    let mut pb = PathBuilder::fill();
+    for i in 0..=16 {
+        let a = std::f32::consts::TAU * i as f32 / 16.0;
+        let p = at(r * a.cos(), r * a.sin());
+        if i == 0 {
+            pb.move_to(p);
+        } else {
+            pb.line_to(p);
+        }
+    }
+    pb.close();
+    if let Ok(path) = pb.build() {
+        window.paint_path(path, hsla(color));
+    }
+}
+
 fn thumb(view: f32, content: f32, scroll: f32) -> (f32, f32) {
     if content <= view || view <= 0.0 {
         return (0.0, view.max(0.0));
@@ -169,6 +221,14 @@ impl CellSel {
     pub fn norm(&self) -> (usize, usize, usize, usize) {
         (self.r0.min(self.r1), self.r0.max(self.r1), self.c0.min(self.c1), self.c0.max(self.c1))
     }
+}
+
+/// A cell value shown in full, opened from its eye button.
+pub struct CellPopup {
+    pub column: String,
+    /// 1-based row number, as the grid shows it.
+    pub row: usize,
+    pub text: String,
 }
 
 pub struct EditOverlay {
@@ -231,11 +291,13 @@ fn initial_text_len(col: &str) -> usize {
     }
 }
 
-/// `calculateAutoFitColumnWidth` from lib/columnSizing.ts.
+/// `calculateAutoFitColumnWidth` from lib/columnSizing.ts. There is no upper
+/// clamp here: the width comes from cell text already cut to [`EXPAND_CHARS`],
+/// which is what bounds how far a column can expand.
 pub fn auto_fit_width(max_cell_text_width: f32, header_text_width: f32, pad: f32, scale: f32) -> f32 {
     let cell = max_cell_text_width * scale + pad * 2.0 + 12.0 * scale;
     let header = header_text_width * scale + pad * 2.0 + 28.0 * scale;
-    cell.max(header).max(50.0 * scale).min(800.0 * scale)
+    cell.max(header).max(50.0 * scale)
 }
 
 impl GridState {
@@ -331,7 +393,9 @@ impl GridState {
                     if len > self.max_len[c] {
                         self.max_len[c] = len;
                     }
-                    let w = self.measure(&text, cx);
+                    // Expanding stops at EXPAND_CHARS; the rest of a longer
+                    // value is reached through its eye button.
+                    let w = self.measure(js::slice_chars(&text, EXPAND_CHARS), cx);
                     if w > self.max_base_width[c] {
                         self.max_base_width[c] = w;
                     }
@@ -429,6 +493,23 @@ impl GridState {
             }
         }
         None
+    }
+
+    /// Where the eye button sits in a cell, in body coordinates. Cells whose
+    /// value is longer than [`EXPAND_CHARS`] draw one at their right edge.
+    pub fn eye_at(&self, row: usize, col: usize, total_rows: usize) -> Bounds<Pixels> {
+        let s = self.font_scale;
+        let rh = row_height(s);
+        let pad = BASE_CELL_PAD_X * s;
+        let size = EYE_SIZE * s;
+        let left: f32 = self.col_widths[..col.min(self.col_widths.len())].iter().sum();
+        let x = row_num_width(total_rows, s) + left - self.scroll_x;
+        let cw = self.col_widths.get(col).copied().unwrap_or(0.0);
+        let y = row as f32 * rh - self.scroll_y;
+        Bounds::new(
+            point(px(x + cw - pad - size), px(y + (rh - size) / 2.0)),
+            gpui::size(px(size), px(size)),
+        )
     }
 
     pub fn row_at(&self, local: Point<Pixels>, total_rows: usize) -> Option<usize> {
@@ -780,6 +861,19 @@ impl Element for GridBody {
                         },
                     };
                     if let Some(text) = text {
+                        // Values too long to ever fit get an eye button that
+                        // opens the whole thing; the text stops short of it.
+                        let long = js::char_len(&text) > EXPAND_CHARS;
+                        let eye = EYE_SIZE * s;
+                        let clip = if long { rect(x + 1.0, y, (cw - 2.0 - eye - pad * 0.5).max(0.0), rh) } else { clip };
+                        if long {
+                            paint_eye(
+                                window,
+                                at(x + cw - pad - eye / 2.0, y + rh / 2.0),
+                                eye,
+                                theme::TEXT_MUTED,
+                            );
+                        }
                         // Canvas fillText renders the string on one line.
                         let text: String = text.replace(['\n', '\r'], " ");
                         let text = if text.len() > 4000 { js::slice_chars(&text, 1000).to_string() } else { text };
@@ -891,9 +985,36 @@ mod tests {
     }
 
     #[test]
-    fn auto_fit_is_clamped() {
+    fn auto_fit_has_a_floor_but_no_ceiling() {
         assert_eq!(auto_fit_width(0.0, 0.0, 10.0, 1.0), 50.0);
-        assert_eq!(auto_fit_width(4000.0, 0.0, 10.0, 1.0), 800.0);
+        // What bounds an expanded column is the measured text, which is cut to
+        // EXPAND_CHARS before it is measured — not a fixed pixel clamp.
+        assert_eq!(auto_fit_width(4000.0, 0.0, 10.0, 1.0), 4032.0);
+    }
+
+    #[test]
+    fn expanding_measures_at_most_256_characters() {
+        // A 5,000-character value measures the same as a 256-character one, so
+        // one enormous cell cannot stretch the column past the limit.
+        let long = "x".repeat(5000);
+        assert_eq!(js::char_len(js::slice_chars(&long, EXPAND_CHARS)), EXPAND_CHARS);
+        assert_eq!(js::slice_chars(&long, EXPAND_CHARS), &long[..EXPAND_CHARS]);
+    }
+
+    #[test]
+    fn the_eye_button_sits_at_the_right_of_its_cell() {
+        let mut g = GridState { font_scale: 1.0, col_widths: vec![100.0, 200.0], ..Default::default() };
+        let rnw = row_num_width(10, 1.0);
+        let eye = g.eye_at(0, 1, 10);
+        // Second column: right edge less the cell padding and the button.
+        assert_eq!(f32::from(eye.right()), rnw + 300.0 - BASE_CELL_PAD_X);
+        assert_eq!(f32::from(eye.size.width), EYE_SIZE);
+        // It travels with the scroll.
+        g.scroll_x = 40.0;
+        g.scroll_y = 15.0;
+        let moved = g.eye_at(2, 1, 10);
+        assert_eq!(f32::from(moved.left()), f32::from(eye.left()) - 40.0);
+        assert_eq!(f32::from(moved.top()), f32::from(eye.top()) + 2.0 * BASE_ROW_HEIGHT - 15.0);
     }
 
     #[test]

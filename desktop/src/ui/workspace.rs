@@ -4,7 +4,7 @@
 use crate::commands::{self, StreamEvent};
 use crate::models::{ConnectionConfig, DatabaseConnection, QueryRecord, SavedQuery, SchemaTree};
 use crate::ui::editor::{EditorEvent, SqlEditor};
-use crate::ui::grid::GridState;
+use crate::ui::grid::{self, GridState};
 use crate::ui::model::*;
 use crate::ui::runtime;
 use crate::ui::sql::schema::{db_schema_for, DbSchema};
@@ -166,6 +166,8 @@ pub struct Workspace {
     pub import_dialog: Option<dialogs::ImportDialog>,
     pub title_dialog: Option<dialogs::TitleDialog>,
     pub terminate_confirm: Option<(TabId, DatabaseConnection)>,
+    /// A long cell value opened in full from its eye button.
+    pub cell_popup: Option<grid::CellPopup>,
 
     // Results grid
     pub grid: GridState,
@@ -253,6 +255,7 @@ impl Workspace {
             import_dialog: None,
             title_dialog: None,
             terminate_confirm: None,
+            cell_popup: None,
             grid: GridState::default(),
             conn_select_open: None,
             hovered: None,

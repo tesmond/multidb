@@ -766,7 +766,17 @@ impl Workspace {
                                 let w = this.grid.col_widths.get(i).copied().unwrap_or(100.0);
                                 this.grid.resizing = Some((i, e.position.x, w));
                             }))
-                            .on_click(|_, _, cx| cx.stop_propagation()),
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                // A click ends here rather than at the root, so
+                                // the resize has to be finished here too —
+                                // otherwise the column stays glued to the
+                                // pointer after the button comes up. Stopping
+                                // propagation is what keeps the header from
+                                // treating the release as a sort.
+                                this.grid.resizing = None;
+                                this.grid.did_resize = false;
+                                cx.stop_propagation();
+                            })),
                     ),
             );
         }
@@ -1118,6 +1128,17 @@ impl Workspace {
             cx.notify();
             return;
         };
+        // The eye button on a value too long to show opens it in full.
+        if self.grid.eye_at(hit.0, hit.1, total).contains(&local) {
+            if let Some(text) = self.cell_text(&r, hit.0, hit.1) {
+                if js::char_len(&text) > grid::EXPAND_CHARS {
+                    let column = r.columns.get(hit.1).cloned().unwrap_or_default();
+                    self.cell_popup = Some(grid::CellPopup { column, row: hit.0 + 1, text });
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         let anchor = if e.modifiers.shift { self.grid.last_selected.unwrap_or(hit) } else { hit };
         self.grid.selecting = true;
         self.grid.sel_anchor = Some(anchor);
@@ -1126,6 +1147,21 @@ impl Workspace {
         self.grid.row_anchor = None;
         self.grid.last_selected = Some(hit);
         cx.notify();
+    }
+
+    /// The text a cell shows, following the current sort and any pending edit.
+    fn cell_text(&mut self, r: &QueryResult, row: usize, col: usize) -> Option<String> {
+        let sort = self.active_tab().and_then(|t| t.sql()).and_then(|s| s.sort_col.map(|c| (c, s.sort_dir)));
+        let idx = self.grid.sort_index(r, sort);
+        let data_idx = idx.as_ref().and_then(|i| i.get(row).copied()).unwrap_or(row);
+        let pending = self.active_tab().and_then(|t| t.sql()).map(|s| s.pending_edits.clone()).unwrap_or_default();
+        if let Some(edited) = crate::ui::model::pending_get(&pending, data_idx, col) {
+            return Some(edited.clone());
+        }
+        match r.rows.get(data_idx)?.get(col)? {
+            serde_json::Value::Null => None,
+            v => Some(js::value_to_string(v)),
+        }
     }
 
     /// A press on a scrollbar: grab the thumb, or page towards a click on the
@@ -1289,8 +1325,11 @@ impl Workspace {
             if delta.abs() > 2.0 {
                 self.grid.did_resize = true;
             }
+            let min = 50.0 * self.grid.font_scale;
             if let Some(w) = self.grid.col_widths.get_mut(idx) {
-                *w = (start_w + delta).max(50.0);
+                // Live resize: the column follows the pointer and stays where
+                // the button came up.
+                *w = (start_w + delta).max(min);
             }
             cx.notify();
             return;
