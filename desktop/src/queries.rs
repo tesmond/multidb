@@ -4,7 +4,8 @@ use serde_json::{Number, Value};
 use sqlx::{
     mysql::MySqlRow,
     postgres::{PgRow, PgValueFormat},
-    AnyPool, Column, MySqlPool, PgPool, Row, TypeInfo, Value as SqlxValue, ValueRef,
+    sqlite::SqliteRow,
+    AnyPool, Column, MySqlPool, PgPool, Row, SqlitePool, TypeInfo, Value as SqlxValue, ValueRef,
 };
 use std::time::Instant;
 
@@ -96,6 +97,30 @@ pub async fn execute_mysql_non_query(pool: &MySqlPool, query: &str) -> ExecuteRe
     }
 }
 
+pub async fn execute_sqlite_non_query(pool: &SqlitePool, query: &str) -> ExecuteResult {
+    let start = Instant::now();
+    let mut rows_affected = 0_i64;
+
+    for statement in split_statements(query) {
+        match sqlx::query(&statement).execute(pool).await {
+            Ok(done) => rows_affected += done.rows_affected() as i64,
+            Err(err) => {
+                return ExecuteResult {
+                    duration: elapsed_ms(start),
+                    error: err.to_string(),
+                    ..ExecuteResult::default()
+                };
+            }
+        }
+    }
+
+    ExecuteResult {
+        rows_affected,
+        duration: elapsed_ms(start),
+        ..ExecuteResult::default()
+    }
+}
+
 pub fn split_statements(query: &str) -> Vec<String> {
     query
         .split(';')
@@ -136,6 +161,67 @@ pub fn row_to_json_values(row: &sqlx::any::AnyRow) -> Result<Vec<Value>> {
         out.push(value_at(row, idx)?);
     }
     Ok(out)
+}
+
+pub fn sqlite_row_to_json_values(row: &SqliteRow) -> Result<Vec<Value>> {
+    let mut out = Vec::with_capacity(row.len());
+    for idx in 0..row.len() {
+        out.push(sqlite_value_at(row, idx)?);
+    }
+    Ok(out)
+}
+
+pub fn sqlite_value_at(row: &SqliteRow, idx: usize) -> Result<Value> {
+    let raw = row.try_get_raw(idx)?;
+    if raw.is_null() {
+        return Ok(Value::Null);
+    }
+
+    let ty = row
+        .columns()
+        .get(idx)
+        .map(|col| col.type_info().name().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    if is_boolean_type(&ty) {
+        if let Ok(value) = row.try_get::<bool, _>(idx) {
+            return Ok(Value::Bool(value));
+        }
+    }
+    if let Ok(value) = row.try_get::<i64, _>(idx) {
+        return Ok(Value::Number(Number::from(value)));
+    }
+    if let Ok(value) = row.try_get::<f64, _>(idx) {
+        if let Some(number) = Number::from_f64(value) {
+            return Ok(Value::Number(number));
+        }
+    }
+    if let Ok(value) = row.try_get::<sqlx::types::chrono::NaiveDateTime, _>(idx) {
+        return Ok(Value::String(value.to_string()));
+    }
+    if let Ok(value) = row.try_get::<sqlx::types::chrono::NaiveDate, _>(idx) {
+        return Ok(Value::String(value.to_string()));
+    }
+    if let Ok(value) = row.try_get::<sqlx::types::chrono::NaiveTime, _>(idx) {
+        return Ok(Value::String(value.to_string()));
+    }
+    if let Ok(value) = row.try_get::<String, _>(idx) {
+        return Ok(Value::String(format_text_value(&ty, value)));
+    }
+    if let Ok(value) = row.try_get::<Vec<u8>, _>(idx) {
+        return Ok(Value::String(format_binary_value(&ty, &value)));
+    }
+    // SQLite's declared affinity can be DATETIME/DATE/TIME while the stored
+    // value is arbitrary text. If chrono cannot parse it, preserve the raw
+    // value instead of replacing it with an unsupported marker.
+    if let Ok(value) = row.try_get_unchecked::<String, _>(idx) {
+        return Ok(Value::String(format_text_value(&ty, value)));
+    }
+    if let Ok(value) = row.try_get_unchecked::<Vec<u8>, _>(idx) {
+        return Ok(Value::String(format_binary_value(&ty, &value)));
+    }
+
+    Ok(Value::String(format!("<unsupported sqlite:{ty}>")))
 }
 
 pub fn value_at(row: &sqlx::any::AnyRow, idx: usize) -> Result<Value> {
@@ -1294,7 +1380,7 @@ mod tests {
     use super::{
         decode_pg_numeric, format_binary_value, format_pg_array_binary, format_pg_binary_value,
         format_text_value, geometry_bytes_to_text, is_boolean_type, json_value_to_text,
-        looks_like_row_returning_query, row_to_json_values, split_statements,
+        looks_like_row_returning_query, row_to_json_values, split_statements, sqlite_row_to_json_values,
     };
     use serde_json::json;
 
@@ -1384,6 +1470,61 @@ mod tests {
             .collect();
 
         assert_eq!(values, vec![vec![json!(1)]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_datetime_column_renders_as_text() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create native sqlite pool");
+        sqlx::query("CREATE TABLE people (birthday DATETIME NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create people table");
+        sqlx::query("INSERT INTO people (birthday) VALUES ('1990-04-23 12:34:56')")
+            .execute(&pool)
+            .await
+            .expect("insert birthday");
+
+        let rows = sqlx::query("SELECT birthday FROM people")
+            .fetch_all(&pool)
+            .await
+            .expect("fetch birthday");
+        let values: Vec<_> = rows
+            .iter()
+            .map(|row| sqlite_row_to_json_values(row).expect("convert birthday"))
+            .collect();
+
+        assert_eq!(values, vec![vec![json!("1990-04-23 12:34:56")]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_unparseable_datetime_preserves_its_text() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create native sqlite pool");
+        sqlx::query("CREATE TABLE people (birthday DATETIME NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create people table");
+        sqlx::query("INSERT INTO people (birthday) VALUES ('spring 1990')")
+            .execute(&pool)
+            .await
+            .expect("insert birthday");
+
+        let row = sqlx::query("SELECT birthday FROM people")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch birthday");
+
+        assert_eq!(
+            sqlite_row_to_json_values(&row).expect("convert birthday"),
+            vec![json!("spring 1990")]
+        );
     }
 
     #[test]

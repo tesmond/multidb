@@ -134,6 +134,21 @@ impl AppState {
         }
     }
 
+    pub async fn get_sqlite_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::SqlitePool> {
+        match self.connections.get_sqlite_pool(conn_id).await {
+            Ok(pool) => Ok(pool),
+            Err(original) => {
+                let store = self.store().await?;
+                let cfg = store.load_saved_connection(conn_id).await?;
+                self.connections.connect(cfg).await?;
+                self.connections
+                    .get_sqlite_pool(conn_id)
+                    .await
+                    .map_err(|err| anyhow!("{original}; reconnect failed: {err}"))
+            }
+        }
+    }
+
     async fn refresh_aws_iam_connection_if_needed(&self, conn_id: &str) -> Result<()> {
         if !self
             .connections

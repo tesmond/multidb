@@ -6,7 +6,8 @@ use sqlx::{
     any::AnyPoolOptions,
     mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
     postgres::PgPoolOptions,
-    AnyPool, ConnectOptions, MySqlPool, PgPool,
+    sqlite::SqlitePoolOptions,
+    AnyPool, ConnectOptions, MySqlPool, PgPool, SqlitePool,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -33,6 +34,7 @@ struct ManagedConnection {
     pg_pool: Option<PgPool>,
     pg_database_pools: HashMap<String, PgPool>,
     mysql_pool: Option<MySqlPool>,
+    sqlite_pool: Option<SqlitePool>,
     config: ConnectionConfig,
     port_forward: Option<PortForwardProcess>,
     connected_at: Instant,
@@ -119,9 +121,9 @@ impl ConnectionManager {
         let (effective, mut port_forward) = prepare_runtime_connection_config(&cfg, None).await?;
         let connection_result = async {
             let max_connections = max_connections_for(&effective);
-            let (pool, pg_pool, mysql_pool) = if effective.driver == "mysql" {
+            let (pool, pg_pool, mysql_pool, sqlite_pool) = if effective.driver == "mysql" {
                 let mysql_pool = connect_mysql_pool(&effective, max_connections, &cfg.name).await?;
-                (None, None, Some(mysql_pool))
+                (None, None, Some(mysql_pool), None)
             } else {
                 let dsn = build_dsn(&effective)?;
                 let pool = AnyPoolOptions::new()
@@ -147,16 +149,28 @@ impl ConnectionManager {
                 } else {
                     None
                 };
-                (Some(pool), pg_pool, None)
+                let sqlite_pool = if effective.driver == "sqlite" {
+                    Some(
+                        SqlitePoolOptions::new()
+                            .max_connections(max_connections)
+                            .min_connections(0)
+                            .connect(&dsn)
+                            .await
+                            .with_context(|| format!("connect sqlite {}", cfg.name))?,
+                    )
+                } else {
+                    None
+                };
+                (Some(pool), pg_pool, None, sqlite_pool)
             };
 
-            Result::<(Option<AnyPool>, Option<PgPool>, Option<MySqlPool>)>::Ok((
-                pool, pg_pool, mysql_pool,
+            Result::<(Option<AnyPool>, Option<PgPool>, Option<MySqlPool>, Option<SqlitePool>)>::Ok((
+                pool, pg_pool, mysql_pool, sqlite_pool,
             ))
         }
         .await;
 
-        let (pool, pg_pool, mysql_pool) = match connection_result {
+        let (pool, pg_pool, mysql_pool, sqlite_pool) = match connection_result {
             Ok(resources) => resources,
             Err(err) => {
                 kill_port_forward(&mut port_forward);
@@ -178,6 +192,9 @@ impl ConnectionManager {
             if let Some(mysql_pool) = old.mysql_pool {
                 mysql_pool.close().await;
             }
+            if let Some(sqlite_pool) = old.sqlite_pool {
+                sqlite_pool.close().await;
+            }
             kill_port_forward(&mut old.port_forward);
         }
         inner.insert(
@@ -187,6 +204,7 @@ impl ConnectionManager {
                 pg_pool,
                 pg_database_pools: HashMap::new(),
                 mysql_pool,
+                sqlite_pool,
                 config: cfg,
                 port_forward,
                 connected_at: Instant::now(),
@@ -211,6 +229,17 @@ impl ConnectionManager {
                         Ok(())
                     }
                     Err(err) => Err(err),
+                }
+            } else if effective.driver == "sqlite" {
+                let dsn = build_dsn(&effective)?;
+                ipc_diagnostics::set_test_connection_stage("sqlite_connect");
+                match SqlitePoolOptions::new().max_connections(1).connect(&dsn).await {
+                    Ok(pool) => {
+                        let result = sqlx::query("SELECT 1").execute(&pool).await.map(|_| ()).map_err(Into::into);
+                        pool.close().await;
+                        result
+                    }
+                    Err(err) => Err(err.into()),
                 }
             } else {
                 let dsn = build_dsn(&effective)?;
@@ -261,6 +290,9 @@ impl ConnectionManager {
         }
         if let Some(mysql_pool) = conn.mysql_pool {
             mysql_pool.close().await;
+        }
+        if let Some(sqlite_pool) = conn.sqlite_pool {
+            sqlite_pool.close().await;
         }
         kill_port_forward(&mut conn.port_forward);
         Ok(())
@@ -338,6 +370,14 @@ impl ConnectionManager {
             .get(id)
             .and_then(|conn| conn.mysql_pool.clone())
             .ok_or_else(|| anyhow!("mysql connection {id:?} not found"))
+    }
+
+    pub async fn get_sqlite_pool(&self, id: &str) -> Result<SqlitePool> {
+        let inner = self.inner.read().await;
+        inner
+            .get(id)
+            .and_then(|conn| conn.sqlite_pool.clone())
+            .ok_or_else(|| anyhow!("sqlite connection {id:?} not found"))
     }
 
     pub async fn get_config(&self, id: &str) -> Option<ConnectionConfig> {

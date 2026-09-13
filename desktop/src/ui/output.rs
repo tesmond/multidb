@@ -288,7 +288,7 @@ impl Workspace {
         }
         let content: AnyElement = match self.output_tab {
             OutputTab::Results => self.render_results(window, cx),
-            OutputTab::Messages => self.render_messages(s),
+            OutputTab::Messages => self.render_messages(s, cx),
             OutputTab::History => self.render_history(s, cx),
             OutputTab::Saved => self.render_saved(s, cx),
         };
@@ -302,10 +302,10 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_messages(&self, s: Scale) -> AnyElement {
+    fn render_messages(&mut self, s: Scale, cx: &mut Context<Self>) -> AnyElement {
         let result = self.active_tab().and_then(|t| t.sql()).and_then(|t| t.result.clone());
         let msg = match result {
-            Some(r) if !r.error.is_empty() => msg_box(s, theme::ERROR, Some(theme::rgba8(255, 80, 80, 0.08)), format!("ERROR: {}", r.error)),
+            Some(r) if !r.error.is_empty() => self.render_error_box(s, r.error, cx),
             Some(r) => msg_box(
                 s,
                 theme::SUCCESS,
@@ -315,6 +315,89 @@ impl Workspace {
             None => msg_box(s, theme::TEXT_MUTED, None, "No messages.".into()),
         };
         div().id("messages").size_full().overflow_y_scroll().px(px(12.)).py(px(8.)).child(msg).into_any_element()
+    }
+
+    fn render_error_box(&mut self, s: Scale, error: String, cx: &mut Context<Self>) -> AnyElement {
+        let display = format!("ERROR: {error}");
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(cx, InputLook {
+                font_size: 12.0 * s.0,
+                line_height: crate::ui::metrics::line_height_normal(12.0 * s.0),
+                height: 26.0 * s.0,
+                pad_x: (0.0, 6.0),
+                radius: 0.0,
+                border_width: 0.0,
+                text: theme::ERROR,
+                bg: theme::rgba8(0, 0, 0, 0.0),
+                focus_bg: None,
+                border: theme::rgba8(0, 0, 0, 0.0),
+                focus_border: theme::rgba8(0, 0, 0, 0.0),
+                focus_ring: None,
+                ..InputLook::dialog(s.0)
+            });
+            input.readonly = true;
+            input.set_text(display, cx);
+            input
+        });
+        let copy_error = error.clone();
+
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .t(s, 12.0)
+            .px(px(10.))
+            .py(px(4.))
+            .rounded(px(4.))
+            .bg(theme::rgba8(255, 80, 80, 0.08))
+            .child(div().flex_1().min_w(px(0.)).child(input))
+            .child(
+                div()
+                    .id("copy-error-message")
+                    .flex_shrink_0()
+                    .w(px(26.))
+                    .h(px(26.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(3.))
+                    .text_color(theme::ERROR)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme::rgba8(255, 80, 80, 0.16)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.copy_to_clipboard(copy_error.clone(), cx);
+                    }))
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(14.))
+                            .h(px(14.))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(1.))
+                                    .top(px(1.))
+                                    .w(px(9.))
+                                    .h(px(9.))
+                                    .border_1()
+                                    .border_color(theme::ERROR)
+                                    .rounded(px(1.)),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(4.))
+                                    .top(px(4.))
+                                    .w(px(9.))
+                                    .h(px(9.))
+                                    .border_1()
+                                    .border_color(theme::ERROR)
+                                    .rounded(px(1.))
+                                    .bg(theme::BG_PANEL),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_history(&mut self, s: Scale, cx: &mut Context<Self>) -> AnyElement {
@@ -595,7 +678,7 @@ impl Workspace {
             return empty_state(s, theme::TEXT_MUTED, "Run a query to see results here.".into());
         };
         if !result.error.is_empty() {
-            return empty_state(s, theme::ERROR, result.error.clone());
+            return self.render_error_box(s, result.error.clone(), cx);
         }
         if result.columns.is_empty() {
             return empty_state(s, theme::TEXT_MUTED, format!("Query executed. {} row(s) affected in {}ms.", result.rows_affected, result.duration));
