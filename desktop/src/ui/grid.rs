@@ -19,8 +19,16 @@ const EXPLAIN_DEFAULT_TEXT_LEN: usize = 120;
 pub const SCROLLBAR: f32 = 12.0;
 /// `::-webkit-scrollbar-thumb` sits inside a 3px border of the track colour.
 pub const SCROLLBAR_INSET: f32 = 3.0;
-/// Shortest the thumb is allowed to get.
-const MIN_THUMB: f32 = 20.0;
+/// Shortest the thumb is allowed to get, so that there is always something
+/// big enough to see and grab however many rows the query returned.
+const MIN_THUMB: f32 = 28.0;
+
+/// Radius of a pill of this size. gpui does *not* clamp corner radii to the
+/// quad — a radius larger than the box makes the arcs miss it and the quad
+/// disappears — so `border-radius: 999px` has to be worked out for real.
+pub fn pill_radius(w: f32, h: f32) -> f32 {
+    0.5 * w.min(h).max(0.0)
+}
 
 /// Which scrollbar a press or a drag is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -847,25 +855,22 @@ impl Element for GridBody {
             }
         };
         let inset = SCROLLBAR_INSET;
+        let thickness = SCROLLBAR - 2.0 * inset;
         if has_v {
             let tr = Bounds::new(point(origin.x + px(w), origin.y), size(px(SCROLLBAR), px(h)));
             window.paint_quad(fill(tr, hsla(track)));
             let (ty, th) = geom.v_thumb(st);
-            let tb = Bounds::new(
-                point(origin.x + px(w + inset), origin.y + px(ty + inset)),
-                size(px(SCROLLBAR - 2.0 * inset), px((th - 2.0 * inset).max(1.0))),
-            );
-            window.paint_quad(fill(tb, hsla(thumb_color(Bar::Vertical))).corner_radii(px(999.)));
+            let len = (th - 2.0 * inset).max(1.0);
+            let tb = Bounds::new(point(origin.x + px(w + inset), origin.y + px(ty + inset)), size(px(thickness), px(len)));
+            window.paint_quad(fill(tb, hsla(thumb_color(Bar::Vertical))).corner_radii(px(pill_radius(thickness, len))));
         }
         if has_h {
             let tr = Bounds::new(point(origin.x, origin.y + px(h)), size(px(w), px(SCROLLBAR)));
             window.paint_quad(fill(tr, hsla(track)));
             let (tx, tw) = geom.h_thumb(sl);
-            let tb = Bounds::new(
-                point(origin.x + px(tx + inset), origin.y + px(h + inset)),
-                size(px((tw - 2.0 * inset).max(1.0)), px(SCROLLBAR - 2.0 * inset)),
-            );
-            window.paint_quad(fill(tb, hsla(thumb_color(Bar::Horizontal))).corner_radii(px(999.)));
+            let len = (tw - 2.0 * inset).max(1.0);
+            let tb = Bounds::new(point(origin.x + px(tx + inset), origin.y + px(h + inset)), size(px(len), px(thickness)));
+            window.paint_quad(fill(tb, hsla(thumb_color(Bar::Horizontal))).corner_radii(px(pill_radius(len, thickness))));
         }
         if has_v && has_h {
             let corner = Bounds::new(point(origin.x + px(w), origin.y + px(h)), size(px(SCROLLBAR), px(SCROLLBAR)));
@@ -984,6 +989,15 @@ mod tests {
         g.jump_selection(None, Some(Jump::First), false, 100, 3, view);
         assert_eq!(g.sel.unwrap().c1, 0);
         assert_eq!(g.scroll_x, 0.0);
+    }
+
+    #[test]
+    fn a_pill_radius_never_exceeds_the_box() {
+        // gpui draws nothing when the radius overshoots the quad, so the
+        // 6px-wide thumb has to ask for 3px, not `border-radius: 999px`.
+        assert_eq!(pill_radius(6.0, 28.0), 3.0);
+        assert_eq!(pill_radius(28.0, 6.0), 3.0);
+        assert_eq!(pill_radius(6.0, 1.0), 0.5);
     }
 
     #[test]
