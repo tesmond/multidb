@@ -19,30 +19,14 @@ desktop/target/
 *.dll
 *.so
 *.dylib
-*.test
 
 # Output directories
-/bin/
 /dist/
-
-# Coverage
-*.out
-coverage.out
 
 # Env files
 .env
 .env.*
 !.env.example
-
-# =========================
-# Testing / tooling
-# =========================
-coverage/
-
-# =========================
-# Desktop build output
-# =========================
-build/bin/
 
 # =========================
 # Misc

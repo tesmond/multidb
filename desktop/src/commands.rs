@@ -8,7 +8,7 @@ use crate::{
     state::AppState,
 };
 use anyhow::{anyhow, Context, Result};
-use futures_util::StreamExt;
+use futures::StreamExt;
 use sqlx::{Column, Row, TypeInfo};
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;

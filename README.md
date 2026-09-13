@@ -173,6 +173,6 @@ HOME=/tmp/multidb-demo CFFIXED_USER_HOME=/tmp/multidb-demo \
 
 Desktop icon assets are committed for packaging:
 
-- macOS icon: `build/appicon.icns`
-- Windows icon: `build/appicon.ico`
+- macOS icon: `build/appicon.icns` (built from `build/icon.iconset/`)
+- Windows icon: `build/windows/icon.ico`, embedded by `desktop/app.rc`
 - PNG icon: `build/icon.png`
