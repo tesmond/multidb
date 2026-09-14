@@ -168,6 +168,22 @@ pub struct Workspace {
     pub terminate_confirm: Option<(TabId, DatabaseConnection)>,
     /// A long cell value opened in full from its eye button.
     pub cell_popup: Option<grid::CellPopup>,
+    /// Scroll handle for the cell popup's text.
+    pub cell_popup_scroll: ScrollHandle,
+    /// Per-connection search index for the navigator filter, rebuilt when a
+    /// schema loads.
+    pub nav_indexes: std::collections::HashMap<String, Arc<crate::ui::nav_index::SchemaIndex>>,
+    /// Result of the last filter search, or None when not filtering.
+    pub nav_matches: Option<Arc<crate::ui::nav_index::Matches>>,
+    /// The debounce + background search in flight.
+    nav_filter_task: Option<Task<()>>,
+    /// Bumped whenever a schema is replaced, so stale searches are dropped.
+    nav_generation: u64,
+    /// The scrollbar thumb currently being dragged on a list.
+    pub bar_drag: Option<crate::ui::widgets::scroll::HandleDrag>,
+    /// Lists that have been rendered once, so their scrollbars can be drawn
+    /// from measurements that only exist after the first frame.
+    bars_primed: std::collections::HashSet<&'static str>,
 
     // Results grid
     pub grid: GridState,
@@ -256,6 +272,13 @@ impl Workspace {
             title_dialog: None,
             terminate_confirm: None,
             cell_popup: None,
+            cell_popup_scroll: ScrollHandle::new(),
+            nav_indexes: std::collections::HashMap::new(),
+            nav_matches: None,
+            nav_filter_task: None,
+            nav_generation: 0,
+            bar_drag: None,
+            bars_primed: std::collections::HashSet::new(),
             grid: GridState::default(),
             conn_select_open: None,
             hovered: None,
@@ -574,6 +597,7 @@ impl Workspace {
                         if let Some(c) = this.connection_mut(&conn_id) {
                             c.schema = Some(Arc::new(tree));
                         }
+                        this.reindex_schema(&conn_id, cx);
                         this.configure_editors(cx);
                         cx.notify();
                     })
@@ -613,6 +637,7 @@ impl Workspace {
                         Err(e) => c.schema_error = Some(e),
                     }
                 }
+                this.reindex_schema(&conn_id, cx);
                 this.configure_editors(cx);
                 cx.notify();
             })
@@ -823,7 +848,51 @@ impl Workspace {
 
     // ─── Navigator filter ───────────────────────────────────────────────────
 
+    /// Re-index one connection after its schema changed.
+    pub fn reindex_schema(&mut self, conn_id: &str, cx: &mut Context<Self>) {
+        self.nav_generation += 1;
+        let generation = self.nav_generation;
+        let index = self
+            .connection(conn_id)
+            .and_then(|c| c.schema.clone())
+            .map(|schema| Arc::new(crate::ui::nav_index::SchemaIndex::build(conn_id, generation, &schema)));
+        match index {
+            Some(index) => {
+                self.nav_indexes.insert(conn_id.to_string(), index);
+            }
+            None => {
+                self.nav_indexes.remove(conn_id);
+            }
+        }
+        // Whatever was on screen was filtered against the old schema.
+        self.search_navigator(cx);
+    }
+
+    /// Run the navigator filter: debounced, then off the UI thread, so typing
+    /// stays responsive however large the schemas are.
+    pub fn search_navigator(&mut self, cx: &mut Context<Self>) {
+        let filter = self.filter_text(cx);
+        if filter.is_empty() {
+            self.nav_filter_task = None;
+            if self.nav_matches.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
+        let indexes: Vec<Arc<crate::ui::nav_index::SchemaIndex>> = self.nav_indexes.values().cloned().collect();
+        self.nav_filter_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(60)).await;
+            let matches = cx.background_spawn(async move { crate::ui::nav_index::search(&indexes, &filter) }).await;
+            this.update(cx, |this, cx| {
+                this.nav_matches = Some(Arc::new(matches));
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     fn on_filter_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        self.search_navigator(cx);
         let filtering = !text.trim().is_empty();
         if filtering {
             let mut missing: Vec<String> = self
@@ -1364,4 +1433,93 @@ fn next_generation() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static GEN: AtomicU64 = AtomicU64::new(1);
     GEN.fetch_add(1, Ordering::Relaxed)
+}
+
+impl Workspace {
+    /// Wrap a `ScrollHandle` list with visible scrollbars: the bars sit over
+    /// the list's right and bottom edges, the thumb can be dragged, and a press
+    /// on the track pages towards it.
+    /// The wrapper is returned unsized: the scrolling child keeps whatever
+    /// bounds it had (a flex item, or its own `max_h`), because that bound is
+    /// what makes it scroll at all. Callers add the sizing they need.
+    pub fn scrollable(
+        &mut self,
+        id: &'static str,
+        handle: &ScrollHandle,
+        content: gpui::AnyElement,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        use crate::ui::widgets::scroll::{self, Bar, HandleDrag, Press};
+        use gpui::{div, prelude::*};
+
+        let handle = handle.clone();
+        // A list's size and content height are only known once it has been
+        // laid out, so the first frame has nothing to draw a bar from: ask for
+        // one more frame, once per list.
+        if handle.bounds().size.height <= gpui::px(0.) && self.bars_primed.insert(id) {
+            let this = cx.entity();
+            cx.defer(move |cx| this.update(cx, |_, cx| cx.notify()));
+        }
+        let active = self.bar_drag.as_ref().filter(|d| d.id.as_ref() == id).map(|d| d.bar);
+        let for_press = handle.clone();
+        let bars = scroll::overlay_bars(
+            &handle,
+            active,
+            cx.listener(move |this: &mut Self, args: &(Bar, f32), _window, cx| {
+                let (bar, along) = *args;
+                let geom = scroll::ScrollGeom::of_handle(&for_press);
+                let offset = for_press.offset();
+                let scroll = (f32::from(offset.x).abs(), f32::from(offset.y).abs());
+                match scroll::press(geom, bar, along, scroll) {
+                    Press::Grabbed(grab) => {
+                        this.bar_drag =
+                            Some(HandleDrag { id: id.into(), handle: for_press.clone(), bar, grab });
+                    }
+                    Press::Paged(to) => set_scroll(&for_press, bar, to),
+                }
+                cx.notify();
+            }),
+        );
+        let mut wrap = div().relative().flex().flex_col().child(content);
+        if let Some(bars) = bars {
+            wrap = wrap.child(bars);
+        }
+        wrap
+    }
+
+    /// Follow the pointer while a list's scrollbar thumb is held.
+    pub fn on_bar_drag_move(&mut self, e: &gpui::MouseMoveEvent, cx: &mut Context<Self>) {
+        use crate::ui::widgets::scroll::{Bar, ScrollGeom};
+        let Some(drag) = self.bar_drag.clone() else { return };
+        let bounds = drag.handle.bounds();
+        let geom = ScrollGeom::of_handle(&drag.handle);
+        let along = match drag.bar {
+            Bar::Vertical => f32::from(e.position.y - bounds.top()),
+            Bar::Horizontal => f32::from(e.position.x - bounds.left()),
+        } - drag.grab;
+        let to = match drag.bar {
+            Bar::Vertical => geom.scroll_for_v_thumb(along),
+            Bar::Horizontal => geom.scroll_for_h_thumb(along),
+        };
+        set_scroll(&drag.handle, drag.bar, to);
+        cx.notify();
+    }
+
+    pub fn on_bar_drag_end(&mut self, cx: &mut Context<Self>) {
+        if self.bar_drag.take().is_some() {
+            cx.notify();
+        }
+    }
+}
+
+/// gpui keeps scroll offsets as negative pixels away from the start.
+fn set_scroll(handle: &ScrollHandle, bar: crate::ui::widgets::scroll::Bar, to: f32) {
+    use crate::ui::widgets::scroll::{Bar, ScrollGeom};
+    let geom = ScrollGeom::of_handle(handle);
+    let mut offset = handle.offset();
+    match bar {
+        Bar::Vertical => offset.y = gpui::px(-to.clamp(0.0, geom.max_scroll_y())),
+        Bar::Horizontal => offset.x = gpui::px(-to.clamp(0.0, geom.max_scroll_x())),
+    }
+    handle.set_offset(offset);
 }

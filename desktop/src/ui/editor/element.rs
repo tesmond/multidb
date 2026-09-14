@@ -6,6 +6,7 @@ use super::buffer::Buffer;
 use super::SqlEditor;
 use crate::ui::sql::{Tok, Token};
 use crate::ui::theme::{hsla, one_dark};
+use crate::ui::widgets::scroll;
 use gpui::{
     fill, point, px, relative, size, App, Bounds, ContentMask, Element, ElementId, Entity, Font, FontStyle, FontWeight,
     GlobalElementId, Hsla, IntoElement, LayoutId, PathBuilder, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
@@ -26,6 +27,8 @@ pub struct EditorLayout {
     pub char_width: Pixels,
     pub text_box_height: f32,
     pub max_line_width: Pixels,
+    /// Lines in the document, for the scrollbar's content height.
+    pub line_count: usize,
     /// (line index, shaped line) for lines painted this frame.
     pub lines: Vec<(usize, ShapedLine)>,
     pub completion_bounds: Option<Bounds<Pixels>>,
@@ -225,7 +228,11 @@ impl Element for EditorElement {
 
         let mut lines = Vec::new();
         let mut numbers = Vec::new();
-        let mut max_line_width = editor.layout.as_ref().map(|l| l.max_line_width).unwrap_or(px(0.));
+        // How wide the document is. Only the lines on screen are shaped, so the
+        // rest are measured from the monospaced advance — carrying last frame's
+        // figure forward instead would make the horizontal scrollbar a
+        // high-water mark that never shrinks when long lines are deleted.
+        let mut max_line_width = char_width * buffer.longest_line_chars() as f32;
         for line in first..last {
             let text = buffer.line_text(line).to_string();
             let runs = line_runs(buffer, &editor.tokens, line, &font);
@@ -263,6 +270,7 @@ impl Element for EditorElement {
             char_width,
             text_box_height,
             max_line_width,
+            line_count,
             lines: lines.clone(),
             completion_bounds: editor.layout.as_ref().and_then(|l| l.completion_bounds),
             completion_rows: editor.layout.as_ref().map(|l| l.completion_rows.clone()).unwrap_or_default(),
@@ -547,6 +555,21 @@ impl Element for EditorElement {
                 }
             }
         });
+
+        // Scrollbars, over everything else (widgets::scroll draws the same
+        // bars as the results grid). Measured from this frame's layout rather
+        // than the one stored on the editor, which is still last frame's.
+        let content_h = 24.0 + pp.layout.line_count as f32 * lh;
+        let content_w = f32::from(gutter_w) + f32::from(pp.layout.max_line_width) + 8.0;
+        let geom = scroll::ScrollGeom::new(bounds.size.width.into(), bounds.size.height.into(), content_w, content_h);
+        let editor = self.editor.read(cx);
+        scroll::paint_bars(
+            window,
+            bounds.origin,
+            geom,
+            (f32::from(scroll.x), f32::from(scroll.y)),
+            editor.scroll_drag.map(|d| d.bar).or(editor.hovered_bar),
+        );
 
         let layout = pp.layout.clone();
         self.editor.update(cx, |editor, _| {

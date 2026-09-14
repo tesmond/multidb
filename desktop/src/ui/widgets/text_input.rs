@@ -158,6 +158,8 @@ pub struct TextInput {
     pub readonly: bool,
     /// `type="number"`: Up/Down step the value.
     pub number: Option<(f64, f64, f64)>,
+    /// Position in the Tab order, for dialogs. `None` keeps it out of it.
+    pub tab_index: Option<isize>,
     undo: Vec<(String, Range<usize>)>,
     redo: Vec<(String, Range<usize>)>,
     cursor_visible: bool,
@@ -189,11 +191,30 @@ impl TextInput {
             masked: false,
             readonly: false,
             number: None,
+            tab_index: None,
             undo: Vec::new(),
             redo: Vec::new(),
             cursor_visible: true,
             blink_task: None,
             was_focused: false,
+        }
+    }
+
+    /// Make this input a tab stop at `index`, so Tab walks a dialog's fields
+    /// in order. Inputs without one are skipped by Tab entirely.
+    pub fn with_tab_index(mut self, index: isize) -> Self {
+        self.tab_index = Some(index);
+        self
+    }
+
+    /// The focus handle carrying this input's place in the tab order. gpui
+    /// takes `tab_stop` from the handle, not from the element, and ignores an
+    /// element's `tab_index` entirely when it tracks a handle of its own.
+    fn tab_focus_handle(&self, cx: &App) -> FocusHandle {
+        let handle = self.focus_handle(cx);
+        match self.tab_index {
+            Some(i) => handle.tab_stop(true).tab_index(i),
+            None => handle,
         }
     }
 
@@ -791,12 +812,32 @@ impl Element for TextElement {
                     underline: Some(UnderlineStyle { color: Some(run.color), thickness: px(1.0), wavy: false }),
                     ..run.clone()
                 },
-                TextRun { len: text.len() - marked.end, ..run },
+                TextRun { len: text.len() - marked.end, ..run.clone() },
             ]
             .into_iter()
             .filter(|r| r.len > 0)
             .collect(),
-            _ => vec![run],
+            _ => vec![run.clone()],
+        };
+        // WebKit repaints selected text in the system's highlight-text colour,
+        // which is what keeps it readable against the pale selection; without
+        // that the light input text all but disappears.
+        let selected_display = {
+            let r = input.selected_range.clone();
+            (input.display_offset(r.start), input.display_offset(r.end))
+        };
+        let runs = if !input.content.is_empty() && selected_display.0 < selected_display.1 && text.len() >= selected_display.1 {
+            let (a, b) = selected_display;
+            vec![
+                TextRun { len: a, ..run.clone() },
+                TextRun { len: b - a, color: hsla(crate::ui::metrics::SELECTION_TEXT), ..run.clone() },
+                TextRun { len: text.len() - b, ..run },
+            ]
+            .into_iter()
+            .filter(|r| r.len > 0)
+            .collect()
+        } else {
+            runs
         };
         let line = window.text_system().shape_line(text.into(), px(look.font_size), &runs, None);
 
@@ -904,7 +945,7 @@ impl Render for TextInput {
             .border_color(if focused { look.focus_border } else { look.border })
             .overflow_hidden()
             .key_context(CONTEXT)
-            .track_focus(&self.focus_handle(cx))
+            .track_focus(&self.tab_focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))

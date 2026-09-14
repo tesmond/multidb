@@ -89,7 +89,10 @@ impl ServerGroupDialog {
                 ws.save_server_group(cx);
             }
         });
-        input.update(cx, |i, _| i.focus(window));
+        input.update(cx, |i, _| {
+            i.tab_index = Some(0);
+            i.focus(window);
+        });
         ServerGroupDialog { input, error: String::new(), _sub: sub }
     }
 }
@@ -128,6 +131,7 @@ impl TitleDialog {
             _ => {}
         });
         input.update(cx, |i, _| i.focus(window));
+        input.update(cx, |i, _| i.tab_index = Some(0));
         TitleDialog { kind, input, _sub: sub }
     }
 }
@@ -150,6 +154,7 @@ impl ImportDialog {
             t.readonly = true;
             t
         });
+        path.update(cx, |i, _| i.tab_index = Some(0));
         ImportDialog { conn_id, import_type: "zipped-sql".into(), path, error: String::new(), importing: false, select_open: false }
     }
 }
@@ -255,6 +260,10 @@ impl ConnectionDialog {
             open_select: None,
             _subs: Vec::new(),
         };
+        // Tab walks the fields in the order they appear.
+        for (i, input) in d.inputs().into_iter().enumerate() {
+            input.update(cx, |t, _| t.tab_index = Some(i as isize));
+        }
         d.update_database_placeholder(cx);
         for i in d.inputs() {
             d._subs.push(cx.subscribe_in(&i, window, |_ws, _i, ev: &InputEvent, _w, cx| {
@@ -474,6 +483,10 @@ impl Workspace {
             d.auth_mode = "password".into();
             d.password.update(cx, |i, cx| i.set_text("", cx));
             d.has_saved_password = false;
+        }
+        // Tab walks the fields in the order they appear.
+        for (i, input) in d.inputs().into_iter().enumerate() {
+            input.update(cx, |t, _| t.tab_index = Some(i as isize));
         }
         d.update_database_placeholder(cx);
         cx.notify();
@@ -788,8 +801,25 @@ pub fn modal_header(s: Scale, title: &str, on_close: impl Fn(&ClickEvent, &mut W
         .into_any_element()
 }
 
+gpui::actions!(dialog, [FocusNext, FocusPrev]);
+
+/// Key context of every modal, so Tab is handled here rather than by whatever
+/// has focus inside it.
+pub const DIALOG_CONTEXT: &str = "Dialog";
+
+pub fn bind_keys(cx: &mut gpui::App) {
+    let c = Some(DIALOG_CONTEXT);
+    cx.bind_keys([
+        gpui::KeyBinding::new("tab", FocusNext, c),
+        gpui::KeyBinding::new("shift-tab", FocusPrev, c),
+    ]);
+}
+
 pub fn modal_box(width: f32) -> gpui::Div {
     div()
+        .key_context(DIALOG_CONTEXT)
+        .on_action(|_: &FocusNext, window, _cx| window.focus_next())
+        .on_action(|_: &FocusPrev, window, _cx| window.focus_prev())
         .w(px(width))
         .bg(theme::BG_SURFACE)
         .border_1()

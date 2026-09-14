@@ -5,6 +5,8 @@ use crate::ui::js;
 use crate::ui::model::{pending_get, PendingEdits, QueryResult, SortDirection};
 use crate::ui::textfmt::{escape_tsv_cell, format_value_for_clipboard};
 use crate::ui::theme::{self, hsla, Rgba};
+pub use crate::ui::widgets::scroll::{Bar, ScrollDrag, ScrollGeom, SCROLLBAR};
+use crate::ui::widgets::scroll;
 use gpui::{
     fill, point, px, quad, size, App, Bounds, BorderStyle, ContentMask, Corners, Edges, Element, ElementId, Entity,
     Font, FontStyle, FontWeight, GlobalElementId, IntoElement, LayoutId, PathBuilder, Pixels, Point, SharedString,
@@ -22,123 +24,6 @@ const EXPLAIN_DEFAULT_TEXT_LEN: usize = 120;
 pub const EXPAND_CHARS: usize = 256;
 /// Side of the eye button drawn in cells whose value is longer than that.
 pub const EYE_SIZE: f32 = 13.0;
-pub const SCROLLBAR: f32 = 12.0;
-/// `::-webkit-scrollbar-thumb` sits inside a 3px border of the track colour.
-pub const SCROLLBAR_INSET: f32 = 3.0;
-/// Shortest the thumb is allowed to get, so that there is always something
-/// big enough to see and grab however many rows the query returned.
-const MIN_THUMB: f32 = 28.0;
-
-/// Radius of a pill of this size. gpui does *not* clamp corner radii to the
-/// quad — a radius larger than the box makes the arcs miss it and the quad
-/// disappears — so `border-radius: 999px` has to be worked out for real.
-pub fn pill_radius(w: f32, h: f32) -> f32 {
-    0.5 * w.min(h).max(0.0)
-}
-
-/// Which scrollbar a press or a drag is on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Bar {
-    Vertical,
-    Horizontal,
-}
-
-/// A scrollbar drag: which bar, and where inside the thumb it was grabbed.
-#[derive(Clone, Copy, Debug)]
-pub struct ScrollDrag {
-    pub bar: Bar,
-    pub grab: f32,
-}
-
-/// The body/scrollbar layout for one paint of the grid: how big the content is,
-/// which scrollbars that needs, and therefore how much room the rows get. Paint
-/// and hit-testing both go through this so a click lands on the thumb that was
-/// drawn.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ScrollGeom {
-    /// Body size, i.e. the outer size minus whichever scrollbars are shown.
-    pub view_w: f32,
-    pub view_h: f32,
-    pub content_w: f32,
-    pub content_h: f32,
-    pub has_v: bool,
-    pub has_h: bool,
-}
-
-impl ScrollGeom {
-    pub fn new(outer_w: f32, outer_h: f32, content_w: f32, content_h: f32) -> Self {
-        // Each scrollbar eats into the space the other one measures against.
-        let mut has_v = content_h > outer_h;
-        let mut has_h = content_w > outer_w - if has_v { SCROLLBAR } else { 0.0 };
-        if has_h && !has_v {
-            has_v = content_h > outer_h - SCROLLBAR;
-        }
-        if has_v && !has_h {
-            has_h = content_w > outer_w - SCROLLBAR;
-        }
-        ScrollGeom {
-            view_w: outer_w - if has_v { SCROLLBAR } else { 0.0 },
-            view_h: outer_h - if has_h { SCROLLBAR } else { 0.0 },
-            content_w,
-            content_h,
-            has_v,
-            has_h,
-        }
-    }
-
-    pub fn max_scroll_y(&self) -> f32 {
-        (self.content_h - self.view_h).max(0.0)
-    }
-
-    pub fn max_scroll_x(&self) -> f32 {
-        (self.content_w - self.view_w).max(0.0)
-    }
-
-    /// `(offset, length)` of the vertical thumb along the track.
-    pub fn v_thumb(&self, scroll_y: f32) -> (f32, f32) {
-        thumb(self.view_h, self.content_h, scroll_y)
-    }
-
-    pub fn h_thumb(&self, scroll_x: f32) -> (f32, f32) {
-        thumb(self.view_w, self.content_w, scroll_x)
-    }
-
-    /// The scroll offset that puts the thumb's near edge at `pos` along the
-    /// track — the inverse of [`ScrollGeom::v_thumb`].
-    pub fn scroll_for_v_thumb(&self, pos: f32) -> f32 {
-        let (_, th) = self.v_thumb(0.0);
-        scroll_for(pos, self.view_h, th, self.max_scroll_y())
-    }
-
-    pub fn scroll_for_h_thumb(&self, pos: f32) -> f32 {
-        let (_, tw) = self.h_thumb(0.0);
-        scroll_for(pos, self.view_w, tw, self.max_scroll_x())
-    }
-
-    /// Which scrollbar, if any, is under a point in body-local coordinates.
-    pub fn bar_at(&self, local: Point<Pixels>) -> Option<Bar> {
-        let (x, y): (f32, f32) = (local.x.into(), local.y.into());
-        if x < 0.0 || y < 0.0 {
-            return None;
-        }
-        if self.has_v && x >= self.view_w && y < self.view_h {
-            return Some(Bar::Vertical);
-        }
-        if self.has_h && y >= self.view_h && x < self.view_w {
-            return Some(Bar::Horizontal);
-        }
-        None
-    }
-
-    /// Distance along the track of a point on `bar`.
-    pub fn pos_on(&self, bar: Bar, local: Point<Pixels>) -> f32 {
-        match bar {
-            Bar::Vertical => local.y.into(),
-            Bar::Horizontal => local.x.into(),
-        }
-    }
-}
-
 /// The eye button: a lens outline with a pupil, drawn as paths because gpui
 /// can only shape text it has a glyph for and this has to scale with the grid.
 fn paint_eye(window: &mut Window, center: Point<Pixels>, size: f32, color: Rgba) {
@@ -183,23 +68,6 @@ fn paint_eye(window: &mut Window, center: Point<Pixels>, size: f32, color: Rgba)
     if let Ok(path) = pb.build() {
         window.paint_path(path, hsla(color));
     }
-}
-
-fn thumb(view: f32, content: f32, scroll: f32) -> (f32, f32) {
-    if content <= view || view <= 0.0 {
-        return (0.0, view.max(0.0));
-    }
-    let len = (view * (view / content)).max(MIN_THUMB).min(view);
-    let pos = (scroll / (content - view)).clamp(0.0, 1.0) * (view - len);
-    (pos, len)
-}
-
-fn scroll_for(thumb_pos: f32, view: f32, thumb_len: f32, max_scroll: f32) -> f32 {
-    let travel = view - thumb_len;
-    if travel <= 0.0 {
-        return 0.0;
-    }
-    (thumb_pos / travel).clamp(0.0, 1.0) * max_scroll
 }
 
 /// Where a cmd/ctrl-arrow, Home or End jump lands.
@@ -732,7 +600,6 @@ impl Element for GridBody {
         let oh: f32 = outer.size.height.into();
         // Scrollbars take 12px when content overflows (custom WebKit scrollbar styling).
         let geom = ScrollGeom::new(ow, oh, content_w, content_h);
-        let (has_v, has_h) = (geom.has_v, geom.has_h);
         let (w, h) = (geom.view_w, geom.view_h);
         let origin = outer.origin;
         let bounds = Bounds::new(origin, size(px(w), px(h)));
@@ -937,39 +804,8 @@ impl Element for GridBody {
             }
         });
 
-        // Custom scrollbars: track rgba(255,255,255,.2), thumb rgba(236,240,248,.35)
-        // inset by a 3px border, fully rounded.
-        let track = theme::rgba8(255, 255, 255, 0.2);
-        let thumb_color = |bar: Bar| {
-            if self.active_bar == Some(bar) {
-                // `::-webkit-scrollbar-thumb:hover`
-                theme::rgba8(246, 249, 255, 0.68)
-            } else {
-                theme::rgba8(236, 240, 248, 0.35)
-            }
-        };
-        let inset = SCROLLBAR_INSET;
-        let thickness = SCROLLBAR - 2.0 * inset;
-        if has_v {
-            let tr = Bounds::new(point(origin.x + px(w), origin.y), size(px(SCROLLBAR), px(h)));
-            window.paint_quad(fill(tr, hsla(track)));
-            let (ty, th) = geom.v_thumb(st);
-            let len = (th - 2.0 * inset).max(1.0);
-            let tb = Bounds::new(point(origin.x + px(w + inset), origin.y + px(ty + inset)), size(px(thickness), px(len)));
-            window.paint_quad(fill(tb, hsla(thumb_color(Bar::Vertical))).corner_radii(px(pill_radius(thickness, len))));
-        }
-        if has_h {
-            let tr = Bounds::new(point(origin.x, origin.y + px(h)), size(px(w), px(SCROLLBAR)));
-            window.paint_quad(fill(tr, hsla(track)));
-            let (tx, tw) = geom.h_thumb(sl);
-            let len = (tw - 2.0 * inset).max(1.0);
-            let tb = Bounds::new(point(origin.x + px(tx + inset), origin.y + px(h + inset)), size(px(len), px(thickness)));
-            window.paint_quad(fill(tb, hsla(thumb_color(Bar::Horizontal))).corner_radii(px(pill_radius(len, thickness))));
-        }
-        if has_v && has_h {
-            let corner = Bounds::new(point(origin.x + px(w), origin.y + px(h)), size(px(SCROLLBAR), px(SCROLLBAR)));
-            window.paint_quad(fill(corner, hsla(theme::WHITE)));
-        }
+        // Custom scrollbars (see widgets::scroll for the geometry and look).
+        scroll::paint_bars(window, origin, geom, (sl, st), self.active_bar);
     }
 }
 
@@ -1017,49 +853,9 @@ mod tests {
         assert_eq!(f32::from(moved.top()), f32::from(eye.top()) + 2.0 * BASE_ROW_HEIGHT - 15.0);
     }
 
-    #[test]
-    fn a_scrollbar_only_appears_when_the_content_overflows() {
-        let fits = ScrollGeom::new(400.0, 300.0, 400.0, 300.0);
-        assert!(!fits.has_v && !fits.has_h);
-        assert_eq!((fits.view_w, fits.view_h), (400.0, 300.0));
 
-        // Tall content: the vertical bar narrows the body, which is enough to
-        // push the (only just fitting) width into overflowing too.
-        let tall = ScrollGeom::new(400.0, 300.0, 395.0, 900.0);
-        assert!(tall.has_v && tall.has_h);
-        assert_eq!((tall.view_w, tall.view_h), (388.0, 288.0));
-    }
 
-    #[test]
-    fn the_thumb_spans_the_visible_fraction_and_tracks_the_scroll() {
-        let g = ScrollGeom::new(400.0, 300.0, 300.0, 900.0);
-        // No horizontal bar, so the body keeps its full height.
-        let (top, len) = g.v_thumb(0.0);
-        assert_eq!((top, len), (0.0, 100.0));
-        // Scrolled to the end the thumb sits at the end of its travel.
-        let (top, len) = g.v_thumb(g.max_scroll_y());
-        assert_eq!((top, len), (200.0, 100.0));
-        // Halfway down.
-        assert_eq!(g.v_thumb(300.0).0, 100.0);
-    }
 
-    #[test]
-    fn dragging_the_thumb_maps_back_to_the_scroll_offset() {
-        let g = ScrollGeom::new(400.0, 300.0, 300.0, 900.0);
-        assert_eq!(g.scroll_for_v_thumb(0.0), 0.0);
-        assert_eq!(g.scroll_for_v_thumb(100.0), 300.0);
-        assert_eq!(g.scroll_for_v_thumb(200.0), g.max_scroll_y());
-        // Past the end of the track the scroll saturates.
-        assert_eq!(g.scroll_for_v_thumb(9999.0), g.max_scroll_y());
-    }
-
-    #[test]
-    fn tiny_thumbs_keep_a_usable_length() {
-        let g = ScrollGeom::new(400.0, 300.0, 300.0, 300_000.0);
-        assert_eq!(g.v_thumb(0.0).1, MIN_THUMB);
-        // And the ends of the track still map to the ends of the content.
-        assert_eq!(g.scroll_for_v_thumb(300.0 - MIN_THUMB), g.max_scroll_y());
-    }
 
     /// A grid with `rows` rows of three 100px columns, showing ten rows.
     fn grid(rows: usize) -> (GridState, (f32, f32)) {
@@ -1112,22 +908,5 @@ mod tests {
         assert_eq!(g.scroll_x, 0.0);
     }
 
-    #[test]
-    fn a_pill_radius_never_exceeds_the_box() {
-        // gpui draws nothing when the radius overshoots the quad, so the
-        // 6px-wide thumb has to ask for 3px, not `border-radius: 999px`.
-        assert_eq!(pill_radius(6.0, 28.0), 3.0);
-        assert_eq!(pill_radius(28.0, 6.0), 3.0);
-        assert_eq!(pill_radius(6.0, 1.0), 0.5);
-    }
 
-    #[test]
-    fn points_hit_the_bar_they_are_over() {
-        let g = ScrollGeom::new(400.0, 300.0, 900.0, 900.0);
-        assert_eq!(g.bar_at(point(px(200.), px(150.))), None);
-        assert_eq!(g.bar_at(point(px(394.), px(150.))), Some(Bar::Vertical));
-        assert_eq!(g.bar_at(point(px(200.), px(294.))), Some(Bar::Horizontal));
-        // The corner square belongs to neither.
-        assert_eq!(g.bar_at(point(px(394.), px(294.))), None);
-    }
 }

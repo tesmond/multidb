@@ -1,5 +1,6 @@
 //! Shared building blocks that reproduce the old CSS components.
 
+pub mod scroll;
 pub mod spaced_text;
 pub mod spinner;
 pub mod text_input;

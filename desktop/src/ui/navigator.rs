@@ -2,10 +2,12 @@
 //! server groups, connection tree, drag and drop, context menus.
 
 use crate::models::Table;
+use crate::ui::nav_index::{Matches, NONE};
 use crate::ui::dialogs::{self, Btn};
 use crate::ui::model::{display_structure, format_bytes, ActiveConnection};
 use crate::ui::sql_text;
 use crate::ui::theme::{self, Rgba};
+use crate::ui::widgets::scroll;
 use crate::ui::widgets::spaced_text::spaced_text;
 use crate::ui::widgets::{overlay, separator, shadow, Scale, TextExt};
 use crate::ui::workspace::{DragKind, NavDrag, NavMenu, Workspace};
@@ -17,44 +19,49 @@ use gpui::{
 const CHEVRON_OPEN: &str = "▾";
 const CHEVRON_CLOSED: &str = "▸";
 
-fn table_matches(t: &Table, f: &str) -> bool {
-    f.is_empty() || t.name.to_lowercase().contains(f) || t.columns.iter().any(|c| c.name.to_lowercase().contains(f))
+/// Tables of one schema that survive the filter. With no filter that is all of
+/// them; otherwise it is a lookup into the set `nav_index` produced off the UI
+/// thread, rather than a walk over every name.
+fn filter_tables<'a>(
+    tables: &'a [Table],
+    matches: Option<&Matches>,
+    conn_id: &str,
+    db: u32,
+    schema: u32,
+) -> Vec<&'a Table> {
+    let Some(m) = matches else { return tables.iter().collect() };
+    tables
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| m.table_matches(conn_id, (db, schema, *i as u32)))
+        .map(|(_, t)| t)
+        .collect()
 }
 
-fn filter_tables<'a>(tables: &'a [Table], f: &str) -> Vec<&'a Table> {
-    tables.iter().filter(|t| table_matches(t, f)).collect()
-}
-
-fn schema_has_matches(conn: &ActiveConnection, f: &str) -> bool {
-    let Some(s) = &conn.schema else { return false };
-    if !s.databases.is_empty() {
-        return s.databases.iter().any(|d| d.schemas.iter().any(|sc| !filter_tables(&sc.tables, f).is_empty()));
+fn conn_matches(conn: &ActiveConnection, matches: Option<&Matches>) -> bool {
+    match matches {
+        None => true,
+        Some(m) => m.conn_matches(&conn.config.id),
     }
-    if !s.schemas.is_empty() {
-        return s.schemas.iter().any(|sc| !filter_tables(&sc.tables, f).is_empty());
-    }
-    !filter_tables(&s.tables, f).is_empty()
 }
 
-fn conn_matches(conn: &ActiveConnection, f: &str) -> bool {
-    f.is_empty() || schema_has_matches(conn, f)
-}
-
-/// `navigatorSchemaGroups`.
-fn schema_groups(conn: &ActiveConnection) -> Vec<(String, Vec<crate::models::Schema>)> {
+/// `navigatorSchemaGroups`, as positions into the connection's schema tree so
+/// that rendering borrows it rather than cloning every table on every frame.
+/// The `u32` is the database index, or [`NONE`] when the tree has none.
+fn schema_groups(conn: &ActiveConnection) -> Vec<(String, u32)> {
     let Some(s) = &conn.schema else { return Vec::new() };
     if conn.config.driver == "postgres" {
         if !s.databases.is_empty() {
-            return s.databases.iter().map(|d| (d.name.clone(), d.schemas.clone())).collect();
+            return s.databases.iter().enumerate().map(|(i, d)| (d.name.clone(), i as u32)).collect();
         }
         let db = conn.config.database.trim();
         if !db.is_empty() && !s.schemas.is_empty() {
-            return vec![(db.to_string(), s.schemas.clone())];
+            return vec![(db.to_string(), NONE)];
         }
         return Vec::new();
     }
     if !s.schemas.is_empty() {
-        vec![(String::new(), s.schemas.clone())]
+        vec![(String::new(), NONE)]
     } else {
         Vec::new()
     }
@@ -507,13 +514,16 @@ impl Workspace {
                 )
             });
 
-        // Tree
+        // Tree. `filtering` means the filter box has text; `matches` is what
+        // the background search last found for it.
+        let matches = self.nav_matches.clone();
+        let matches = matches.as_deref();
         let mut items: Vec<AnyElement> = Vec::new();
         let conns = self.connections.clone();
         let groups = self.settings.server_groups.clone();
         let structure = display_structure(&conns, &groups);
         for (g, gconns) in &structure.groups {
-            let matching: Vec<&&ActiveConnection> = gconns.iter().filter(|c| conn_matches(c, &filter)).collect();
+            let matching: Vec<&&ActiveConnection> = gconns.iter().filter(|c| conn_matches(c, matches)).collect();
             if !filtering || !matching.is_empty() {
                 items.push(self.render_group_label(g.id.clone(), g.title.clone(), matching.len(), filtering, s, cx));
             }
@@ -524,7 +534,7 @@ impl Workspace {
             }
         }
         for c in &structure.ungrouped {
-            if conn_matches(c, &filter) {
+            if conn_matches(c, matches) {
                 items.push(self.render_conn(c, None, &filter, s, window, cx));
             }
         }
@@ -556,14 +566,13 @@ impl Workspace {
             );
         }
 
-        let content = div()
-            .id("nav-content")
+        // A flex row holding one column, aligned to the start: see
+        // `scroll::scroll_body` for why both of those are load-bearing.
+        let content = scroll::scroll_body(div().id("nav-content"))
             .flex_1()
             .min_h(px(0.))
-            .overflow_y_scroll()
+            .overflow_scroll()
             .track_scroll(&self.nav_scroll)
-            .pt(px(4.))
-            .pb(px(40.))
             .on_mouse_move(cx.listener(|this, _e: &MouseMoveEvent, _, _cx| {
                 // Hovering empty space: dropping there moves to the end.
                 if let Some(d) = &mut this.nav_drag {
@@ -572,7 +581,22 @@ impl Workspace {
                     }
                 }
             }))
-            .children(items);
+            // One child holding the rows. Its padding lives here rather than on
+            // the scroll container so that it counts towards the content size.
+            // The right padding keeps the rows clear of the vertical scrollbar,
+            // which is drawn over the pane's edge rather than taking layout
+            // space.
+            .child(
+                scroll::scroll_content(div())
+                    .pt(px(4.))
+                    .pb(px(40.))
+                    .pr(px(if f32::from(self.nav_scroll.max_offset().height) > 0.5 { scroll::SCROLLBAR } else { 0.0 }))
+                    .children(items),
+            );
+
+        // The tree scrolls, so it gets a scrollbar over its right edge.
+        let nav_scroll = self.nav_scroll.clone();
+        let scrolling = self.scrollable("nav", &nav_scroll, content.into_any_element(), cx);
 
         div()
             .flex()
@@ -585,7 +609,7 @@ impl Workspace {
             .min_w(px(0.))
             .child(header)
             .child(filter_box)
-            .child(content)
+            .child(scrolling.flex_1().min_h(px(0.)))
             .into_any_element()
     }
 
@@ -718,11 +742,9 @@ impl Workspace {
                     .items_baseline()
                     .gap(px(6.))
                     .font_weight(FontWeight::MEDIUM)
-                    .flex_1()
-                    .min_w(px(0.))
-                    .overflow_hidden()
+                    .flex_shrink_0()
                     .whitespace_nowrap()
-                    .child(div().overflow_hidden().text_ellipsis().child(cfg.name.clone()))
+                    .child(div().flex_shrink_0().child(cfg.name.clone()))
                     .when(!size_label.is_empty(), |d| {
                         d.child(div().flex_shrink_0().t(s, 11.0).font_weight(FontWeight::NORMAL).text_color(theme::TEXT_MUTED).opacity(0.72).child(size_label.clone()))
                     }),
@@ -778,9 +800,14 @@ impl Workspace {
         let Some(schema) = conn.schema.clone() else {
             return children.child(nav_info(s, "Click to load schema", theme::TEXT_MUTED)).into_any_element();
         };
+        let matches = self.nav_matches.clone();
+        let matches = matches.as_deref();
         let groups = schema_groups(conn);
         if !groups.is_empty() {
-            for (dbname, schemas) in groups {
+            for (dbname, db_idx) in groups {
+                // Borrowed from the connection's Arc'd tree — no cloning.
+                let schemas: &[crate::models::Schema] =
+                    if db_idx == NONE { &schema.schemas } else { &schema.databases[db_idx as usize].schemas };
                 let db_key = format!("{id}-database-{dbname}");
                 let db_open = dbname.is_empty() || filtering || self.expanded_tables.contains(&db_key);
                 if !dbname.is_empty() {
@@ -799,10 +826,10 @@ impl Workspace {
                     if nested {
                         inner = inner.pl(px(16.));
                     }
-                    for sc in schemas {
+                    for (sc_idx, sc) in schemas.iter().enumerate() {
                         let schema_key = format!("{id}-schema-{}", sc.name);
                         let tables_key = format!("{id}-{}-tables", sc.name);
-                        let tables = filter_tables(&sc.tables, filter);
+                        let tables = filter_tables(&sc.tables, matches, &id, db_idx, sc_idx as u32);
                         if filtering && tables.is_empty() {
                             continue;
                         }
@@ -835,7 +862,7 @@ impl Workspace {
         }
         // Flat (MySQL without schemas / SQLite)
         let tables_key = format!("{id}-tables");
-        let tables = filter_tables(&schema.tables, filter);
+        let tables = filter_tables(&schema.tables, matches, &id, NONE, NONE);
         if !filtering || !tables.is_empty() {
             children = children.child(self.render_tables_section(&id, &tables_key, None, None, &tables, filtering, s, cx));
         }
@@ -943,9 +970,11 @@ impl Workspace {
                                 .py(px(2.))
                                 .t(s, 11.0)
                                 .text_color(theme::TEXT_MUTED)
-                                .child(div().flex_1().child(c.name.clone()))
+                                .min_w_full()
+                                .child(div().flex_shrink_0().whitespace_nowrap().child(c.name.clone()))
+                                .child(div().flex_1().min_w(px(12.)))
                                 .when(c.key == "PRI", |d| d.child(div().w(px(14.)).flex_shrink_0().child("🔑")))
-                                .child(div().opacity(0.6).italic().child(c.column_type.clone())),
+                                .child(div().flex_shrink_0().opacity(0.6).italic().child(c.column_type.clone())),
                         );
                     }
                     section = section.child(cols);

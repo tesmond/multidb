@@ -20,6 +20,9 @@ pub const PLACEHOLDER: Rgba = rgba8(117, 117, 117, 1.0);
 /// Native text selection colours (macOS light appearance, blue accent).
 pub const SELECTION_FOCUSED: Rgba = rgba8(179, 215, 255, 1.0);
 pub const SELECTION_UNFOCUSED: Rgba = rgba8(220, 220, 220, 1.0);
+/// `highlighttext`: selected text is repainted in this, so that the near-white
+/// input text does not vanish into the pale selection behind it.
+pub const SELECTION_TEXT: Rgba = rgba8(17, 17, 17, 1.0);
 
 fn store(a: &AtomicU32, v: f32) {
     a.store(v.to_bits(), Ordering::Relaxed);

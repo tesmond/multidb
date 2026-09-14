@@ -10,13 +10,14 @@ pub mod search;
 mod search_panel;
 
 use crate::ui::sql::complete::{rank, Engine, RankedOption, SourceResult};
+use crate::ui::widgets::scroll;
 use crate::ui::widgets::text_input::{InputEvent, TextInput};
 use crate::ui::sql::lint::{lint, Diagnostic};
 use crate::ui::sql::schema::DbSchema;
 use crate::ui::sql::{tokenize, Dialect, Tok, Token};
 use buffer::{Buffer, EditKind, Selection};
 use gpui::{
-    actions, div, prelude::*, px, App, Bounds, ClipboardItem, Context, EntityInputHandler, EventEmitter, FocusHandle,
+    actions, div, point, prelude::*, px, App, Bounds, ClipboardItem, Context, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent,
     SharedString, Task, UTF16Selection, Window,
 };
@@ -228,7 +229,9 @@ pub struct SqlEditor {
     hover_ready: bool,
     hover_task: Option<Task<()>>,
     was_focused: bool,
-    pub scrollbar_until: Option<std::time::Instant>,
+    /// Scrollbar thumb being dragged, and the bar under the pointer.
+    pub scroll_drag: Option<scroll::ScrollDrag>,
+    pub hovered_bar: Option<scroll::Bar>,
 }
 
 #[derive(Clone, Copy)]
@@ -274,7 +277,8 @@ impl SqlEditor {
             hover_ready: false,
             hover_task: None,
             was_focused: false,
-            scrollbar_until: None,
+            scroll_drag: None,
+            hovered_bar: None,
         };
         editor.retokenize();
         editor.schedule_lint(cx);
@@ -1513,6 +1517,13 @@ impl SqlEditor {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
+        if let Some(local) = self.bar_local(event.position) {
+            let geom = self.geom();
+            if let Some(bar) = geom.bar_at(local) {
+                self.on_scrollbar_press(bar, geom.pos_on(bar, local), cx);
+                return;
+            }
+        }
         let Some(layout) = &self.layout else { return };
         if let Some(idx) = layout.completion_hit(event.position) {
             self.accept_completion(idx, cx);
@@ -1547,6 +1558,25 @@ impl SqlEditor {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Dragging a scrollbar thumb, or just moving over one.
+        if let Some(drag) = self.scroll_drag {
+            if let Some(local) = self.bar_local(event.position) {
+                let geom = self.geom();
+                let along = geom.pos_on(drag.bar, local) - drag.grab;
+                match drag.bar {
+                    scroll::Bar::Vertical => self.scroll.y = px(geom.scroll_for_v_thumb(along)),
+                    scroll::Bar::Horizontal => self.scroll.x = px(geom.scroll_for_h_thumb(along)),
+                }
+                self.clamp_scroll();
+                cx.notify();
+            }
+            return;
+        }
+        let over_bar = self.bar_local(event.position).and_then(|l| self.geom().bar_at(l));
+        if over_bar != self.hovered_bar {
+            self.hovered_bar = over_bar;
+            cx.notify();
+        }
         let hover_changed = self.hover_pos != Some(event.position);
         self.hover_pos = Some(event.position);
         self.update_hover(event.position, cx);
@@ -1597,6 +1627,7 @@ impl SqlEditor {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.selecting = None;
+        self.scroll_drag = None;
         cx.notify();
     }
 
@@ -1615,20 +1646,48 @@ impl SqlEditor {
         self.scroll.x -= delta.x;
         self.scroll.y -= delta.y;
         self.clamp_scroll();
-        self.scrollbar_until = Some(std::time::Instant::now() + Duration::from_millis(1000));
         cx.notify();
     }
 
-    fn clamp_scroll(&mut self) {
-        let Some(layout) = &self.layout else { return };
+    /// How big the document is against the viewport — what the scrollbars are
+    /// drawn from, and what the scroll offset is clamped to.
+    pub fn geom(&self) -> scroll::ScrollGeom {
+        let Some(layout) = &self.layout else { return scroll::ScrollGeom::default() };
         let lh = self.line_height();
         let content_h = 24.0 + self.buffer.line_count() as f32 * lh;
-        let view_h: f32 = layout.bounds.size.height.into();
-        let max_y = (content_h - view_h).max(0.0);
-        let view_w: f32 = (layout.bounds.size.width - layout.gutter_width).into();
-        let max_x = (f32::from(layout.max_line_width) + 8.0 - view_w).max(0.0);
-        self.scroll.y = px(f32::from(self.scroll.y).clamp(0.0, max_y));
-        self.scroll.x = px(f32::from(self.scroll.x).clamp(0.0, max_x));
+        let content_w = f32::from(layout.gutter_width) + f32::from(layout.max_line_width) + 8.0;
+        scroll::ScrollGeom::new(layout.bounds.size.width.into(), layout.bounds.size.height.into(), content_w, content_h)
+    }
+
+    fn clamp_scroll(&mut self) {
+        if self.layout.is_none() {
+            return;
+        }
+        let geom = self.geom();
+        self.scroll.y = px(f32::from(self.scroll.y).clamp(0.0, geom.max_scroll_y()));
+        self.scroll.x = px(f32::from(self.scroll.x).clamp(0.0, geom.max_scroll_x()));
+    }
+
+    /// A press on one of the editor's scrollbars: grab the thumb or page.
+    fn on_scrollbar_press(&mut self, bar: scroll::Bar, along: f32, cx: &mut Context<Self>) {
+        let geom = self.geom();
+        let at = (f32::from(self.scroll.x), f32::from(self.scroll.y));
+        match scroll::press(geom, bar, along, at) {
+            scroll::Press::Grabbed(grab) => self.scroll_drag = Some(scroll::ScrollDrag { bar, grab }),
+            scroll::Press::Paged(to) => match bar {
+                scroll::Bar::Vertical => self.scroll.y = px(to),
+                scroll::Bar::Horizontal => self.scroll.x = px(to),
+            },
+        }
+        self.clamp_scroll();
+        self.hovered_bar = Some(bar);
+        cx.notify();
+    }
+
+    /// Body-local position of a window point, for scrollbar hit-testing.
+    fn bar_local(&self, position: Point<Pixels>) -> Option<Point<Pixels>> {
+        let layout = self.layout.as_ref()?;
+        Some(point(position.x - layout.bounds.left(), position.y - layout.bounds.top()))
     }
 
     // UTF-16 helpers for the platform input handler.

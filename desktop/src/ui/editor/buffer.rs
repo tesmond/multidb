@@ -45,6 +45,11 @@ pub struct Buffer {
     redo: Vec<(String, Selection)>,
     /// Preferred x (in chars) for vertical movement.
     pub goal_column: Option<usize>,
+    /// Characters in the longest line, kept up to date by [`Buffer::reindex`].
+    /// The editor's font is monospaced, so this times the character advance is
+    /// how wide the document is — which is what the horizontal scrollbar needs
+    /// and what only measuring the lines on screen cannot tell it.
+    longest_line_chars: usize,
 }
 
 impl Buffer {
@@ -56,6 +61,7 @@ impl Buffer {
             undo: Vec::new(),
             redo: Vec::new(),
             goal_column: None,
+            longest_line_chars: 0,
         };
         b.reindex();
         b
@@ -64,11 +70,23 @@ impl Buffer {
     fn reindex(&mut self) {
         self.line_starts.clear();
         self.line_starts.push(0);
+        let (mut chars, mut longest) = (0usize, 0usize);
         for (i, b) in self.text.bytes().enumerate() {
             if b == b'\n' {
                 self.line_starts.push(i + 1);
+                longest = longest.max(chars);
+                chars = 0;
+            } else if b & 0xC0 != 0x80 {
+                // Not a UTF-8 continuation byte, so the start of a character.
+                chars += 1;
             }
         }
+        self.longest_line_chars = longest.max(chars);
+    }
+
+    /// Characters in the longest line of the document.
+    pub fn longest_line_chars(&self) -> usize {
+        self.longest_line_chars
     }
 
     pub fn text(&self) -> &str {
@@ -291,5 +309,24 @@ impl Buffer {
 
     pub fn indentation_of_line(&self, line: usize) -> usize {
         self.line_text(line).chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_longest_line_is_measured_in_characters_and_shrinks_again() {
+        let mut b = Buffer::new("ab\nlonger line\nc");
+        assert_eq!(b.longest_line_chars(), 11);
+        // A multi-byte character still counts once.
+        b.set_text("héllo\nx");
+        assert_eq!(b.longest_line_chars(), 5);
+        // Deleting the long line brings the width back down — the editor's
+        // horizontal scrollbar is drawn from this.
+        b.set_text("x\ny");
+        assert_eq!(b.longest_line_chars(), 1);
+        assert_eq!(Buffer::new("").longest_line_chars(), 0);
     }
 }

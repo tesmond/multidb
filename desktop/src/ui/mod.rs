@@ -8,6 +8,7 @@ pub mod grid;
 pub mod js;
 pub mod metrics;
 pub mod model;
+pub mod nav_index;
 mod navigator;
 mod output;
 pub mod relationship;
@@ -61,6 +62,7 @@ pub fn run() -> anyhow::Result<()> {
         widgets::text_input::bind_keys(cx);
         editor::bind_keys(cx);
         render::bind_keys(cx);
+        dialogs::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus(vec![

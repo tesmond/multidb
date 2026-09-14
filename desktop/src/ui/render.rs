@@ -82,6 +82,7 @@ impl Workspace {
         self.on_nav_drag_move(e, window, cx);
         self.on_tab_drag_move(e, window, cx);
         self.on_grid_drag_move(e, window, cx);
+        self.on_bar_drag_move(e, cx);
     }
 
     fn on_root_mouse_up(&mut self, e: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -91,6 +92,7 @@ impl Workspace {
         self.on_nav_drag_end(e, window, cx);
         self.on_tab_drag_end(e, window, cx);
         self.on_grid_drag_end(e, window, cx);
+        self.on_bar_drag_end(cx);
     }
 
     fn close_overlay(&mut self, _: &CloseOverlay, _: &mut Window, cx: &mut Context<Self>) {
@@ -292,17 +294,21 @@ impl Workspace {
                 this.cell_popup = None;
                 cx.notify();
             })))
-            .child(
-                div()
+            .child({
+                let scroll = self.cell_popup_scroll.clone();
+                let body = div()
                     .id("cell-popup-text")
                     .overflow_y_scroll()
+                    .track_scroll(&scroll)
                     .max_h(px(420.))
                     .p(px(16.))
                     .t(s, 12.0)
                     .font_family(crate::ui::pick_mono_family(cx))
                     .text_color(theme::TEXT)
-                    .child(text),
-            )
+                    .child(text)
+                    .into_any_element();
+                self.scrollable("cell-popup", &scroll, body, cx)
+            })
             .child(
                 div()
                     .flex()
