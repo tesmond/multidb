@@ -1083,7 +1083,7 @@ impl Workspace {
                 NavMenu::Database { pos, conn_id } => {
                     let testing = self.testing_conn_id.as_deref() == Some(&conn_id);
                     let ids: Vec<String> = (0..8).map(|_| conn_id.clone()).collect();
-                    let [a, b, c, d, e, f, g, _h]: [String; 8] = ids.try_into().unwrap();
+                    let [a, b, c, d, e, f, g, h]: [String; 8] = ids.try_into().unwrap();
                     (
                         pos,
                         div()
@@ -1111,6 +1111,12 @@ impl Workspace {
                                     this.test_connection(&b, cx);
                                 }))
                             })
+                            .child(separator(3.0))
+                            .child(item("m-edit".into(), "Edit Connection...".into(), false).on_click(cx.listener(move |this, _, window, cx| {
+                                this.nav_menu = None;
+                                let cfg = this.connection(&h).map(|c| c.config.clone());
+                                this.open_connection_dialog(cfg, window, cx);
+                            })))
                             .child(separator(3.0))
                             .child(item("m-refresh".into(), "Refresh Schema".into(), false).on_click(cx.listener(move |this, _, _, cx| {
                                 this.nav_menu = None;

@@ -815,6 +815,11 @@ pub fn bind_keys(cx: &mut gpui::App) {
     ]);
 }
 
+/// Backdrop left showing above and below a modal that is as tall as it can be.
+/// Small on purpose: the connection dialog with port forwarding open has to fit
+/// a full-screen window without scrolling.
+pub const MODAL_GUTTER: f32 = 12.0;
+
 pub fn modal_box(width: f32) -> gpui::Div {
     div()
         .key_context(DIALOG_CONTEXT)
@@ -887,7 +892,7 @@ pub fn color_of(c: Rgba) -> gpui::Hsla {
 // ─── Connection dialog rendering ────────────────────────────────────────────
 
 impl Workspace {
-    pub fn render_conn_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub fn render_conn_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let d = self.conn_dialog.as_ref()?;
         let s = Scale(self.scale());
         let title = if d.editing.is_some() { "Edit Connection" } else { "New Connection" };
@@ -1126,6 +1131,20 @@ impl Workspace {
                 button("test-conn", s, "Test Connection", Btn::Secondary, false, cx.listener(|this, _, _, cx| this.conn_dialog_test(cx)))
             })
             .child(button("save-conn", s, if saving { "Saving…" } else { "Save" }, Btn::Primary, saving || testing, cx.listener(|this, _, _, cx| this.conn_dialog_save(cx))));
+        // The dialog with port forwarding open is nearly as tall as a laptop
+        // screen, so it gets all of the window bar a hairline of backdrop and
+        // only scrolls its fields when even that is not enough.
+        let scroll = self.conn_dialog_scroll.clone();
+        let fields = div()
+            .id("conn-modal-body")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .child(body)
+            .into_any_element();
+        let fields = self.scrollable("conn-modal-body", &scroll, fields, cx).flex_1().min_h(px(0.));
+        let max_h = (f32::from(window.viewport_size().height) - 2.0 * MODAL_GUTTER).max(240.0);
         Some(
             crate::ui::widgets::overlay(0.6)
                 .id("conn-overlay")
@@ -1133,9 +1152,13 @@ impl Workspace {
                 .child(
                     modal_box(640.0)
                         .id("conn-modal")
-                        .child(modal_header(s, title, cx.listener(|this, _, _, cx| this.conn_dialog_close(cx))))
-                        .child(body)
-                        .child(footer),
+                        .flex()
+                        .flex_col()
+                        .max_h(px(max_h))
+                        // Header and footer keep their size; only the fields give.
+                        .child(div().flex_none().child(modal_header(s, title, cx.listener(|this, _, _, cx| this.conn_dialog_close(cx)))))
+                        .child(fields)
+                        .child(footer.flex_none()),
                 )
                 .into_any_element(),
         )

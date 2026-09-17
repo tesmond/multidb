@@ -170,6 +170,9 @@ pub struct Workspace {
     pub cell_popup: Option<grid::CellPopup>,
     /// Scroll handle for the cell popup's text.
     pub cell_popup_scroll: ScrollHandle,
+    /// Scroll handle for the connection dialog's fields, which do not fit on a
+    /// short screen.
+    pub conn_dialog_scroll: ScrollHandle,
     /// Per-connection search index for the navigator filter, rebuilt when a
     /// schema loads.
     pub nav_indexes: std::collections::HashMap<String, Arc<crate::ui::nav_index::SchemaIndex>>,
@@ -181,9 +184,6 @@ pub struct Workspace {
     nav_generation: u64,
     /// The scrollbar thumb currently being dragged on a list.
     pub bar_drag: Option<crate::ui::widgets::scroll::HandleDrag>,
-    /// Lists that have been rendered once, so their scrollbars can be drawn
-    /// from measurements that only exist after the first frame.
-    bars_primed: std::collections::HashSet<&'static str>,
 
     // Results grid
     pub grid: GridState,
@@ -273,12 +273,12 @@ impl Workspace {
             terminate_confirm: None,
             cell_popup: None,
             cell_popup_scroll: ScrollHandle::new(),
+            conn_dialog_scroll: ScrollHandle::new(),
             nav_indexes: std::collections::HashMap::new(),
             nav_matches: None,
             nav_filter_task: None,
             nav_generation: 0,
             bar_drag: None,
-            bars_primed: std::collections::HashSet::new(),
             grid: GridState::default(),
             conn_select_open: None,
             hovered: None,
@@ -870,49 +870,60 @@ impl Workspace {
 
     /// Run the navigator filter: debounced, then off the UI thread, so typing
     /// stays responsive however large the schemas are.
+    ///
+    /// Long enough that an ordinary typing rhythm never triggers a search
+    /// mid-word, short enough to feel immediate once the hands stop.
+    pub const FILTER_DEBOUNCE_MS: u64 = 200;
+
     pub fn search_navigator(&mut self, cx: &mut Context<Self>) {
         let filter = self.filter_text(cx);
         if filter.is_empty() {
             self.nav_filter_task = None;
+            self.last_filter_load_key.clear();
             if self.nav_matches.take().is_some() {
                 cx.notify();
             }
             return;
         }
         let indexes: Vec<Arc<crate::ui::nav_index::SchemaIndex>> = self.nav_indexes.values().cloned().collect();
+        // Assigning the new task drops the old one, which cancels it: a run of
+        // keystrokes leaves exactly one timer, and the search happens once the
+        // typing stops.
         self.nav_filter_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(60)).await;
+            cx.background_executor().timer(Duration::from_millis(Self::FILTER_DEBOUNCE_MS)).await;
             let matches = cx.background_spawn(async move { crate::ui::nav_index::search(&indexes, &filter) }).await;
             this.update(cx, |this, cx| {
                 this.nav_matches = Some(Arc::new(matches));
+                this.load_schemas_for_filter(cx);
                 cx.notify();
             })
             .ok();
         }));
     }
 
-    fn on_filter_changed(&mut self, text: String, cx: &mut Context<Self>) {
-        self.search_navigator(cx);
-        let filtering = !text.trim().is_empty();
-        if filtering {
-            let mut missing: Vec<String> = self
-                .connections
-                .iter()
-                .filter(|c| c.schema.is_none() && !c.schema_loading)
-                .map(|c| c.config.id.clone())
-                .collect();
-            missing.sort();
-            let key = missing.join("|");
-            if !key.is_empty() && key != self.last_filter_load_key {
-                self.last_filter_load_key = key;
-                for id in missing {
-                    self.load_cached_schema(&id, cx).detach();
-                }
-            }
-        } else {
-            self.last_filter_load_key.clear();
+    /// Filtering searches columns too, so it needs the schemas of connections
+    /// that have not been expanded yet. Reading them is disk work, so it waits
+    /// until the debounce has fired rather than happening per keystroke.
+    fn load_schemas_for_filter(&mut self, cx: &mut Context<Self>) {
+        let mut missing: Vec<String> =
+            self.connections.iter().filter(|c| c.schema.is_none() && !c.schema_loading).map(|c| c.config.id.clone()).collect();
+        missing.sort();
+        let key = missing.join("|");
+        if key.is_empty() || key == self.last_filter_load_key {
+            return;
         }
-        cx.notify();
+        self.last_filter_load_key = key;
+        for id in missing {
+            self.load_cached_schema(&id, cx).detach();
+        }
+    }
+
+    /// A keystroke in the filter box. This runs on the UI thread between the
+    /// key going down and the character appearing, so it does nothing but
+    /// restart the debounce; the input redraws itself, and the matching and
+    /// schema loading wait for the pause in typing.
+    fn on_filter_changed(&mut self, _text: String, cx: &mut Context<Self>) {
+        self.search_navigator(cx);
     }
 
     pub fn filter_text(&self, cx: &App) -> String {
@@ -1453,13 +1464,27 @@ impl Workspace {
         use gpui::{div, prelude::*};
 
         let handle = handle.clone();
-        // A list's size and content height are only known once it has been
-        // laid out, so the first frame has nothing to draw a bar from: ask for
-        // one more frame, once per list.
-        if handle.bounds().size.height <= gpui::px(0.) && self.bars_primed.insert(id) {
-            let this = cx.entity();
-            cx.defer(move |cx| this.update(cx, |_, cx| cx.notify()));
-        }
+        // The bars can only be drawn from the size gpui measured last frame:
+        // this runs during render, and the list is not laid out until after.
+        // So whenever the content changes size — a dialog section collapsing,
+        // a list being filtered — this frame draws the *old* bars, and with
+        // nothing else to redraw them they would sit there, a scrollbar for
+        // content that no longer overflows, until the next unrelated event.
+        //
+        // Check again once the frame has been laid out, when the handle is up
+        // to date, and ask for one more frame if what was drawn no longer
+        // matches. The correction lands in the next frame, so the wrong bars
+        // are never on screen for longer than that, and a settled list asks
+        // for nothing. This covers the very first frame too, where the list
+        // has no size yet and the bars are missing rather than stale.
+        let drawn = scroll::ScrollGeom::of_handle(&handle);
+        let settled = handle.clone();
+        let this = cx.entity();
+        cx.defer(move |cx| {
+            if scroll::ScrollGeom::of_handle(&settled) != drawn {
+                this.update(cx, |_, cx| cx.notify());
+            }
+        });
         let active = self.bar_drag.as_ref().filter(|d| d.id.as_ref() == id).map(|d| d.bar);
         let for_press = handle.clone();
         let bars = scroll::overlay_bars(
@@ -1479,6 +1504,8 @@ impl Workspace {
                 }
                 cx.notify();
             }),
+            cx.listener(|this: &mut Self, e: &gpui::MouseMoveEvent, _window, cx| this.on_bar_drag_move(e, cx)),
+            cx.listener(|this: &mut Self, _e: &gpui::MouseUpEvent, _window, cx| this.on_bar_drag_end(cx)),
         );
         let mut wrap = div().relative().flex().flex_col().child(content);
         if let Some(bars) = bars {

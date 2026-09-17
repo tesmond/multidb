@@ -70,7 +70,7 @@ pub struct HandleDrag {
 /// How big the content is, which scrollbars that needs, and therefore how much
 /// room is left for the content itself. Painting and hit-testing both go
 /// through this so a click lands on the thumb that was drawn.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ScrollGeom {
     /// Viewport size, i.e. the outer size minus whichever scrollbars are shown.
     pub view_w: f32,
@@ -281,17 +281,26 @@ pub fn scroll_body<T: gpui::Styled>(el: T) -> T {
     el.flex().flex_row().items_start()
 }
 
-/// The single child of a [`scroll_body`]: a column of rows that takes its own
-/// natural height and the width of its widest row, but is never narrower than
-/// the pane.
+/// The single child of a [`scroll_body`]: the rows, taking their own total
+/// height and the width of the widest of them, but never narrower than the
+/// pane.
+///
+/// Deliberately a **block**, not a flex column. A flex column hands its
+/// children a share of its own height and lets them shrink to fit, so the rows
+/// compress to the pane instead of overflowing it and the vertical scrollbar
+/// disappears; block layout stacks them at their natural height and lets the
+/// total run past the bottom, which is what there is to scroll. `flex_none`
+/// then keeps this block shrink-wrapped around the widest row rather than
+/// stretched to the pane, and `min_w_full` keeps short rows full width so the
+/// hover highlight still spans the pane.
 pub fn scroll_content<T: gpui::Styled>(el: T) -> T {
-    el.flex().flex_col().flex_none().min_w_full()
+    el.flex_none().min_w_full()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{relative, AlignItems, FlexDirection, Refineable, Style, StyleRefinement};
+    use gpui::{relative, AlignItems, Display, FlexDirection, Refineable, Style, StyleRefinement};
 
     /// Both scrollbars in the navigator have gone missing before, each time
     /// because the rows were stretched to the pane on one axis and so could
@@ -309,7 +318,10 @@ mod tests {
 
         let mut content = Style::default();
         content.refine(&scroll_content(StyleRefinement::default()));
-        assert_eq!(content.flex_direction, FlexDirection::Column);
+        // Block, not flex: a flex column shares its height out among the rows
+        // and shrinks them to fit, which is exactly how the vertical scrollbar
+        // went missing. Block layout stacks them at their natural height.
+        assert_eq!(content.display, Display::Block);
         // Neither grown nor shrunk to fit the pane: the rows decide the width.
         assert_eq!(content.flex_grow, 0.0);
         assert_eq!(content.flex_shrink, 0.0);
@@ -391,16 +403,28 @@ mod tests {
 /// What a press on a list's scrollbar reports: which bar, and how far along it.
 pub type BarPress = (Bar, f32);
 type PressFn = std::rc::Rc<dyn Fn(&BarPress, &mut Window, &mut gpui::App)>;
+type MoveFn = std::rc::Rc<dyn Fn(&gpui::MouseMoveEvent, &mut Window, &mut gpui::App)>;
+type EndFn = std::rc::Rc<dyn Fn(&gpui::MouseUpEvent, &mut Window, &mut gpui::App)>;
 
 /// The overlay drawn on top of a `ScrollHandle` list: a track down the right
 /// edge (and along the bottom when it scrolls sideways) with a draggable thumb.
 /// `overflow_*_scroll` gives gpui lists wheel scrolling but no visible bar, so
 /// this supplies one. The offsets it reads are last frame's, which is exactly
 /// what the list is showing.
+///
+/// `on_move` and `on_end` continue and finish a thumb drag. They are wired to
+/// the track as well as to the window root, because the track is `occlude`d:
+/// gpui only delivers a move to an element whose hitbox is hovered, and an
+/// occluding hitbox takes every element behind it — the root included — out of
+/// the hover stack. A drag along a 12px track keeps the pointer *on* the track,
+/// so without these the root sees nothing and the thumb stalls; between the two
+/// the drag is followed whether the pointer is on the track or off it.
 pub fn overlay_bars(
     handle: &ScrollHandle,
     active: Option<Bar>,
     on_press: impl Fn(&BarPress, &mut Window, &mut gpui::App) + 'static,
+    on_move: impl Fn(&gpui::MouseMoveEvent, &mut Window, &mut gpui::App) + 'static,
+    on_end: impl Fn(&gpui::MouseUpEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> Option<gpui::AnyElement> {
     use gpui::{div, prelude::*, MouseButton, MouseDownEvent};
 
@@ -414,8 +438,10 @@ pub fn overlay_bars(
     let inset = SCROLLBAR_INSET;
     let thickness = SCROLLBAR - 2.0 * inset;
     let on_press = std::rc::Rc::new(on_press);
+    let on_move: MoveFn = std::rc::Rc::new(on_move);
+    let on_end: EndFn = std::rc::Rc::new(on_end);
 
-    let make = |bar: Bar, on_press: PressFn| {
+    let make = |bar: Bar, on_press: PressFn, on_move: MoveFn, on_end: EndFn| {
         let vertical = bar == Bar::Vertical;
         let (pos, len) = geom.thumb_on(bar, scroll);
         let len = (len - 2.0 * inset).max(1.0);
@@ -447,15 +473,17 @@ pub fn overlay_bars(
                 on_press(&(bar, along), window, cx);
                 cx.stop_propagation();
             })
+            .on_mouse_move(move |e, window, cx| on_move(e, window, cx))
+            .on_mouse_up(MouseButton::Left, move |e, window, cx| on_end(e, window, cx))
             .into_any_element()
     };
 
     let mut wrap = div().absolute().top_0().left_0().size_full();
     if geom.has_v {
-        wrap = wrap.child(make(Bar::Vertical, on_press.clone()));
+        wrap = wrap.child(make(Bar::Vertical, on_press.clone(), on_move.clone(), on_end.clone()));
     }
     if geom.has_h {
-        wrap = wrap.child(make(Bar::Horizontal, on_press.clone()));
+        wrap = wrap.child(make(Bar::Horizontal, on_press.clone(), on_move.clone(), on_end.clone()));
     }
     Some(wrap.into_any_element())
 }
