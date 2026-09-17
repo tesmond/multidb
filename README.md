@@ -124,22 +124,16 @@ different family:
 MULTIDB_MONO_FONT="SF Mono" make dev
 ```
 
-## Running the macOS download
+## Quick Mac OS install
 
-The macOS download is not currently notarized, so Gatekeeper may block it the first time it runs. Only override this warning if you downloaded MultiDB from a source you trust.
+The macOS download is not currently signed as I do not have an Apple developer account. So here are some quick instructions:
 
-1. Unzip the download and move `MultiDB.app` to the `Applications` folder.
-2. Try to open `MultiDB.app` once, then dismiss the warning.
-3. Open **System Settings**, select **Privacy & Security**, and scroll down to **Security**.
-4. Click **Open Anyway** beside the MultiDB warning.
-5. Authenticate when prompted, then click **Open**.
+1. Download the latest Mac OS release zip file.
+2. Unzip the download inside the `Downloads` folder.
+3. At the terminal run `sudo xattr -cr ~/Download/MultiDB.app` and enter your password.
+4. Now run `mv ~/Download/MultiDB.app /Applications/MultiDB.app`
 
-macOS saves MultiDB as an exception, so later launches work normally. The **Open Anyway** button is available for about an hour after the blocked launch. See [Apple's instructions for opening an app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac).
-
-If you get a "download is broken..." error instead run:
-`sudo xattr -cr path/to/MultiDB.app` 
-
-The application should then run as expected.
+MultiDB should be accessible.
 
 ## Testing And Checks
 
