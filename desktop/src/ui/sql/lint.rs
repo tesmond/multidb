@@ -14,10 +14,32 @@ pub struct Diagnostic {
     pub from: usize,
     pub to: usize,
     pub message: String,
+    /// While the caret is inside this range the diagnostic stays hidden.
+    ///
+    /// Half-written SQL is invalid SQL, and telling someone so while their
+    /// hands are still on the word helps nobody. The editor applies this
+    /// against the live caret when it paints, so the underline appears as soon
+    /// as they move on and disappears again the moment they come back to fix
+    /// it, without anything being re-parsed.
+    pub quiet_while_caret_in: Option<std::ops::Range<usize>>,
+}
+
+impl Diagnostic {
+    pub fn new(from: usize, to: usize, message: impl Into<String>) -> Self {
+        Diagnostic { from, to, message: message.into(), quiet_while_caret_in: None }
+    }
+
+    /// Whether this should be shown with the caret at `caret`.
+    pub fn visible_at(&self, caret: usize) -> bool {
+        match &self.quiet_while_caret_in {
+            Some(range) => caret < range.start || caret > range.end,
+            None => true,
+        }
+    }
 }
 
 fn diag(from: usize, to: usize, message: impl Into<String>) -> Diagnostic {
-    Diagnostic { from, to, message: message.into() }
+    Diagnostic::new(from, to, message)
 }
 
 /// Run every check in the same order the old linter did.
@@ -32,7 +54,19 @@ pub fn lint(doc: &str, dialect: Dialect, db: Option<&DbSchema>) -> Vec<Diagnosti
         if is_ignorable_parser_error(doc, from, to) {
             continue;
         }
-        out.push(diag(from, to, "SQL syntax error"));
+        let mut d = diag(from, to, "SQL syntax error");
+        // These are token-level slips — an unmatched bracket, a stray
+        // character — and they are just as annoying to be told about with the
+        // caret still on them.
+        d.quiet_while_caret_in = Some(from..to);
+        out.push(d);
+    }
+    // The parser has the last word, but never a second word about something
+    // already reported: one mistake should not collect two underlines.
+    for d in super::parse_check::parse_diagnostics(doc, dialect, &tokens) {
+        if !out.iter().any(|o| o.from < d.to && d.from < o.to) {
+            out.push(d);
+        }
     }
     out
 }

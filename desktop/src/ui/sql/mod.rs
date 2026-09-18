@@ -3,6 +3,7 @@
 
 pub mod complete;
 pub mod lint;
+pub mod parse_check;
 pub mod schema;
 pub mod tokenizer;
 

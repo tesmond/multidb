@@ -199,6 +199,12 @@ pub struct CompletionState {
 
 pub const MAX_RENDERED_OPTIONS: usize = 50;
 
+/// How long to wait after the last keystroke before re-checking the SQL.
+///
+/// Long enough that ordinary typing never triggers a check mid-word, short
+/// enough that an underline appears while the mistake is still in mind.
+const LINT_DEBOUNCE: Duration = Duration::from_millis(250);
+
 pub struct SqlEditor {
     focus_handle: FocusHandle,
     pub buffer: Buffer,
@@ -378,12 +384,18 @@ impl SqlEditor {
         }));
     }
 
+    /// Re-check the document after a pause in typing.
+    ///
+    /// Assigning the task drops the previous one, which cancels it, so a run of
+    /// keystrokes leaves one timer and one check. The check itself — tokenizing
+    /// and parsing every statement — runs on the background executor, never on
+    /// the thread that is drawing the editor.
     fn schedule_lint(&mut self, cx: &mut Context<Self>) {
         let text = self.buffer.text().to_string();
         let dialect = self.dialect;
         let db = self.db.clone();
         self.lint_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(100)).await;
+            cx.background_executor().timer(LINT_DEBOUNCE).await;
             let diagnostics = cx
                 .background_executor()
                 .spawn(async move { lint(&text, dialect, db.as_deref()) })
@@ -496,6 +508,15 @@ impl SqlEditor {
         }
     }
 
+    /// The diagnostics to show right now: everything the last check found,
+    /// minus the ones the caret is still sitting in. Filtering here rather than
+    /// when checking means moving the caret reveals or hides an underline
+    /// immediately, with no re-parse.
+    pub fn visible_diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
+        let caret = self.buffer.selection.head;
+        self.diagnostics.iter().filter(move |d| d.visible_at(caret))
+    }
+
     /// Diagnostics under `position`: `(index of the first diagnostic, on gutter)`.
     fn diagnostic_at(&self, position: Point<Pixels>) -> Option<(usize, bool)> {
         let layout = self.layout.as_ref()?;
@@ -517,16 +538,12 @@ impl SqlEditor {
         if position.x < layout.bounds.left() + layout.gutter_width {
             // Lint gutter marker: diagnostics starting on this line.
             return self
-                .diagnostics
-                .iter()
+                .visible_diagnostics()
                 .position(|d| self.buffer.line_of(d.from.min(self.buffer.len())) == line)
                 .map(|i| (i, true));
         }
         let offset = layout.offset_for_point(&self.buffer, position, self.scroll);
-        self.diagnostics
-            .iter()
-            .position(|d| offset >= d.from && offset <= d.to)
-            .map(|i| (i, false))
+        self.visible_diagnostics().position(|d| offset >= d.from && offset <= d.to).map(|i| (i, false))
     }
 
     fn update_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -556,12 +573,11 @@ impl SqlEditor {
         }
         let (index, gutter) = self.hover_target?;
         let layout = self.layout.as_ref()?;
-        let d = self.diagnostics.get(index)?;
+        let d = self.visible_diagnostics().nth(index)?;
         let line = self.buffer.line_of(d.from.min(self.buffer.len()));
         if gutter {
             let messages: Vec<String> = self
-                .diagnostics
-                .iter()
+                .visible_diagnostics()
                 .filter(|o| self.buffer.line_of(o.from.min(self.buffer.len())) == line)
                 .map(|o| o.message.clone())
                 .collect();
@@ -574,8 +590,7 @@ impl SqlEditor {
             return Some((messages, Bounds::new(gpui::point(x, top), gpui::size(px(em), px(em))), false));
         }
         let messages: Vec<String> = self
-            .diagnostics
-            .iter()
+            .visible_diagnostics()
             .filter(|o| o.from == d.from && o.to == d.to)
             .map(|o| o.message.clone())
             .collect();

@@ -35,6 +35,7 @@ rfd = "0.15"
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sqlparser = "0.63"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "any", "mysql", "postgres", "sqlite", "chrono", "json", "bigdecimal", "uuid"] }
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"

@@ -427,7 +427,7 @@ impl Element for EditorElement {
             }
 
             // Lint ranges: wavy underline or point marker.
-            for d in &editor.diagnostics {
+            for d in editor.visible_diagnostics() {
                 let (from, to) = (d.from.min(buffer.len()), d.to.min(buffer.len()));
                 let l0 = buffer.line_of(from);
                 let l1 = buffer.line_of(to);
@@ -515,7 +515,8 @@ impl Element for EditorElement {
         // Gutters (sticky; drawn over horizontally scrolled text).
         let gutter = Bounds::new(bounds.origin, size(gutter_w, bounds.size.height));
         window.paint_quad(fill(gutter, hsla(one_dark::BACKGROUND)));
-        let mut marked: Vec<usize> = editor.diagnostics.iter().map(|d| buffer.line_of(d.from.min(buffer.len()))).collect();
+        let mut marked: Vec<usize> =
+            editor.visible_diagnostics().map(|d| buffer.line_of(d.from.min(buffer.len()))).collect();
         let _ = editor;
         window.with_content_mask(Some(ContentMask { bounds: gutter }), |window| {
             window.paint_quad(fill(

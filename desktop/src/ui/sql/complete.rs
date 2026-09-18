@@ -481,6 +481,12 @@ const RESERVED: &[&str] = &[
     "CONSTRAINT", "DEFAULT", "CHECK", "REFERENCES",
 ];
 
+/// The keywords completion offers, which are also the words a mistyped one is
+/// measured against.
+pub fn reserved_words() -> &'static [&'static str] {
+    RESERVED
+}
+
 pub fn is_reserved(word: &str) -> bool {
     RESERVED.contains(&word.to_uppercase().as_str())
 }
