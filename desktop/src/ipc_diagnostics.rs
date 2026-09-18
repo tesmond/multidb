@@ -52,6 +52,9 @@ pub fn recommended_checks_for_stage(stage: &str) -> &'static str {
         "aws_sdk_load_config" => {
             "Run `aws sts get-caller-identity --profile <profile> --region <region>`; if using SSO run `aws sso login --profile <profile>`; try `AWS_EC2_METADATA_DISABLED=true` to avoid metadata-provider stalls."
         }
+        "aws_sso_login" => {
+            "The AWS SSO session had expired, so `aws sso login` was run and is waiting for the browser sign-in to be approved; approve it, or check the profile's sso_start_url in ~/.aws/config."
+        }
         "aws_generate_iam_token" => {
             "Confirm the DB username is IAM-enabled and matches exactly; verify AWS credentials permit token generation and region/endpoint are correct."
         }

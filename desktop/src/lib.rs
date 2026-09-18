@@ -1,3 +1,4 @@
+mod aws_auth;
 mod backup;
 mod commands;
 mod connections;

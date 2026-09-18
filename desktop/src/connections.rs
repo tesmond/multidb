@@ -1,7 +1,5 @@
 use crate::{ipc_diagnostics, models::ConnectionConfig};
 use anyhow::{anyhow, Context, Result};
-use aws_config::{BehaviorVersion, Region};
-use aws_sdk_rds::auth_token::{AuthTokenGenerator, Config as AuthTokenConfig};
 use sqlx::{
     any::AnyPoolOptions,
     mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
@@ -104,9 +102,10 @@ impl PortForwardProcess {
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 const IAM_MAX_CONNECTIONS: u32 = 1;
-const AWS_IAM_REFRESH_AGE: Duration = Duration::from_secs(14 * 60);
-const AWS_SDK_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
-const AWS_IAM_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Reconnect (and so re-sign the IAM token) a minute before the current one
+/// runs out, so a query never meets an expired token.
+const AWS_IAM_REFRESH_AGE: Duration =
+    Duration::from_secs(crate::aws_auth::TOKEN_LIFETIME_SECS - 60);
 const MYSQL_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const MYSQL_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 const CONNECTION_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -470,7 +469,7 @@ async fn prepare_runtime_connection_config(
 
     if effective.uses_aws_iam_auth() {
         ipc_diagnostics::set_test_connection_stage("aws_generate_iam_token");
-        effective.password = generate_mysql_aws_iam_token(&effective).await?;
+        effective.password = crate::aws_auth::auth_token(&effective).await?;
         effective.has_saved_password = false;
         effective.dsn.clear();
     }
@@ -507,53 +506,6 @@ fn validate_connection_config(cfg: &ConnectionConfig) -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn generate_mysql_aws_iam_token(cfg: &ConnectionConfig) -> Result<String> {
-    ipc_diagnostics::set_test_connection_stage("aws_sdk_load_config");
-    let mut loader = aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new(cfg.aws_region.trim().to_string()));
-
-    if !cfg.aws_profile.trim().is_empty() {
-        loader = loader.profile_name(cfg.aws_profile.trim().to_string());
-    }
-
-    let sdk_config = timeout_step(
-        AWS_SDK_LOAD_TIMEOUT,
-        format!(
-            "load AWS SDK config for region {}{}",
-            cfg.aws_region.trim(),
-            if cfg.aws_profile.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" with profile {}", cfg.aws_profile.trim())
-            }
-        ),
-        loader.load(),
-    )
-    .await?;
-    let token_config = AuthTokenConfig::builder()
-        .hostname(cfg.host.trim())
-        .port(cfg.port as u64)
-        .username(cfg.username.trim())
-        .expires_in(900)
-        .build()
-        .map_err(|err| anyhow!("build AWS RDS auth token config: {err}"))?;
-
-    let token = timeout_step(
-        AWS_IAM_TOKEN_TIMEOUT,
-        format!(
-            "generate AWS RDS IAM auth token for {}@{}:{}",
-            cfg.username.trim(),
-            cfg.host.trim(),
-            cfg.port
-        ),
-        AuthTokenGenerator::new(token_config).auth_token(&sdk_config),
-    )
-    .await?
-    .map_err(|err| anyhow!("generate AWS RDS auth token: {err}"))?;
-
-    Ok(token.to_string())
 }
 
 async fn connect_mysql_pool(
@@ -652,7 +604,7 @@ fn format_duration_seconds(duration: Duration) -> String {
     format!("{:.3}s", duration.as_secs_f64())
 }
 
-async fn timeout_step<T, F>(duration: Duration, label: String, future: F) -> Result<T>
+pub(crate) async fn timeout_step<T, F>(duration: Duration, label: String, future: F) -> Result<T>
 where
     F: Future<Output = T>,
 {
@@ -831,9 +783,23 @@ fn kubectl_child_path_from(
     cfg: &ConnectionConfig,
     current_path: Option<&OsStr>,
 ) -> Result<OsString> {
-    let mut paths = Vec::new();
     let program = kubectl_program(cfg)?;
-    if program.is_absolute() {
+    Ok(tool_path_from(Some(&program), current_path))
+}
+
+/// PATH for an external command-line tool the app shells out to.
+///
+/// An app launched from Finder inherits a bare PATH that has none of the places
+/// people actually install `kubectl` and `aws`, so the usual install locations
+/// are appended. `program`'s own directory goes first when it is an absolute
+/// path the user configured.
+pub(crate) fn external_tool_path(program: Option<&Path>) -> OsString {
+    tool_path_from(program, std::env::var_os("PATH").as_deref())
+}
+
+fn tool_path_from(program: Option<&Path>, current_path: Option<&OsStr>) -> OsString {
+    let mut paths = Vec::new();
+    if let Some(program) = program.filter(|p| p.is_absolute()) {
         if let Some(parent) = program.parent() {
             paths.push(parent.to_path_buf());
         }
@@ -850,7 +816,13 @@ fn kubectl_child_path_from(
         paths.push(home.join(".local/bin"));
     }
     paths.dedup();
-    std::env::join_paths(paths).context("build kubectl child PATH")
+    // Every element came from a path that was already valid, so the only way
+    // joining fails is a directory containing the separator; drop those rather
+    // than fail a connection over it.
+    std::env::join_paths(&paths).unwrap_or_else(|_| {
+        std::env::join_paths(paths.iter().filter(|p| !p.to_string_lossy().contains(':')))
+            .unwrap_or_default()
+    })
 }
 
 async fn wait_for_local_port(
