@@ -21,6 +21,7 @@ default = ["runtime-shaders"]
 runtime-shaders = ["gpui/runtime_shaders"]
 
 [dependencies]
+aes-gcm = "0.11"
 anyhow = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-rds = "1"
