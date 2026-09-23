@@ -424,7 +424,18 @@ pub fn build_dsn(cfg: &ConnectionConfig) -> Result<String> {
                 url.set_password(Some(&cfg.password))
                     .map_err(|_| anyhow!("invalid postgres password"))?;
             }
-            url.query_pairs_mut().append_pair("sslmode", "prefer");
+            if cfg.uses_aws_iam_auth() {
+                // RDS only accepts an IAM token over TLS, and the token is a
+                // bearer credential, so the server's identity is verified
+                // exactly as it is for MySQL IAM connections.
+                let mut query = url.query_pairs_mut();
+                query.append_pair("sslmode", "verify-full");
+                if let Some(path) = resolve_ssl_ca_path(cfg.ssl_ca_path.trim())? {
+                    query.append_pair("sslrootcert", &path);
+                }
+            } else {
+                url.query_pairs_mut().append_pair("sslmode", "prefer");
+            }
             Ok(url.to_string())
         }
         "sqlite" => {
@@ -479,25 +490,29 @@ async fn prepare_runtime_connection_config(
 
 fn validate_connection_config(cfg: &ConnectionConfig) -> Result<()> {
     if cfg.uses_aws_iam_auth() {
+        let (engine, driver) = match cfg.driver.as_str() {
+            "postgres" => ("PostgreSQL", "postgres"),
+            _ => ("MySQL", "mysql"),
+        };
         if !cfg.dsn.trim().is_empty() {
             return Err(anyhow!(
-                "AWS IAM MySQL connections require host, port, username, and AWS region fields instead of a DSN"
+                "AWS IAM {engine} connections require host, port, username, and AWS region fields instead of a DSN"
             ));
         }
         if cfg.use_kube_port_forward {
             return Err(anyhow!(
-                "AWS IAM MySQL authentication is not supported with Kubernetes port forwarding"
+                "AWS IAM {engine} authentication is not supported with Kubernetes port forwarding"
             ));
         }
         if cfg.host.trim().is_empty() {
-            return Err(anyhow!("mysql host is required for AWS IAM authentication"));
+            return Err(anyhow!("{driver} host is required for AWS IAM authentication"));
         }
         if cfg.port <= 0 {
-            return Err(anyhow!("mysql port is required for AWS IAM authentication"));
+            return Err(anyhow!("{driver} port is required for AWS IAM authentication"));
         }
         if cfg.username.trim().is_empty() {
             return Err(anyhow!(
-                "mysql username is required for AWS IAM authentication"
+                "{driver} username is required for AWS IAM authentication"
             ));
         }
         if cfg.aws_region.trim().is_empty() {
@@ -679,7 +694,10 @@ fn expand_home_dir(path: &str) -> Result<PathBuf> {
 }
 
 fn max_connections_for(cfg: &ConnectionConfig) -> u32 {
-    if cfg.uses_aws_iam_auth() {
+    // PostgreSQL IAM pools keep the default size: a token is only checked when
+    // a connection is opened, and the whole connection is re-signed (see
+    // `should_refresh_iam_connection`) before the token runs out.
+    if cfg.uses_aws_iam_auth() && cfg.driver == "mysql" {
         IAM_MAX_CONNECTIONS
     } else {
         DEFAULT_MAX_CONNECTIONS
@@ -888,10 +906,11 @@ mod tests {
         build_dsn, build_mysql_connect_options, build_sqlite_file_dsn,
         ensure_local_port_available_with, format_duration_seconds,
         is_retryable_mysql_connect_error, kubectl_child_path_from, kubectl_program,
-        mysql_connection_error_details, mysql_retry_delay, timeout_step,
+        max_connections_for, mysql_connection_error_details, mysql_retry_delay, timeout_step,
         validate_connection_access, validate_connection_config, wait_for_local_port,
-        PortForwardProcess, MYSQL_CONNECT_RETRY_DELAY, MYSQL_CONNECT_TIMEOUT,
+        PortForwardProcess, DEFAULT_MAX_CONNECTIONS, MYSQL_CONNECT_RETRY_DELAY, MYSQL_CONNECT_TIMEOUT,
     };
+    use url::Url;
     use crate::models::ConnectionConfig;
     use anyhow::anyhow;
     use sqlx::any::AnyPoolOptions;
@@ -1170,6 +1189,91 @@ mod tests {
         assert!(build_dsn(&cfg)
             .expect("dsn should build")
             .contains("ssl-mode=VERIFY_IDENTITY"));
+    }
+
+    fn postgres_iam_config() -> ConnectionConfig {
+        ConnectionConfig {
+            driver: "postgres".to_string(),
+            host: "db.example.eu-west-1.rds.amazonaws.com".to_string(),
+            port: 5432,
+            username: "app_user".to_string(),
+            database: "app".to_string(),
+            auth_mode: "awsIam".to_string(),
+            aws_region: "eu-west-1".to_string(),
+            ..ConnectionConfig::default()
+        }
+    }
+
+    #[test]
+    fn postgres_supports_iam_auth() {
+        assert!(postgres_iam_config().uses_aws_iam_auth());
+        let sqlite = ConnectionConfig { driver: "sqlite".to_string(), ..postgres_iam_config() };
+        assert!(!sqlite.uses_aws_iam_auth());
+    }
+
+    #[test]
+    fn postgres_iam_requires_region_and_rejects_port_forwarding() {
+        let cfg = ConnectionConfig { aws_region: String::new(), ..postgres_iam_config() };
+        let err = validate_connection_config(&cfg).expect_err("region should be required");
+        assert!(err.to_string().contains("AWS region is required"));
+
+        let cfg = ConnectionConfig { use_kube_port_forward: true, ..postgres_iam_config() };
+        let err = validate_connection_config(&cfg).expect_err("port forwarding should be rejected");
+        assert!(err.to_string().contains("AWS IAM PostgreSQL authentication is not supported"));
+
+        let cfg = ConnectionConfig { username: " ".to_string(), ..postgres_iam_config() };
+        let err = validate_connection_config(&cfg).expect_err("username should be required");
+        assert!(err.to_string().contains("postgres username is required"));
+
+        validate_connection_config(&ConnectionConfig { database: String::new(), ..postgres_iam_config() })
+            .expect("database should be optional for IAM auth");
+    }
+
+    #[test]
+    fn postgres_iam_enforces_strict_tls_and_encodes_the_token() {
+        let cfg = ConnectionConfig {
+            // RDS tokens are URL query strings, full of characters that must
+            // not leak into the DSN's structure.
+            password: "db.example:5432/?Action=connect&X-Amz-Signature=ab/c+d=".to_string(),
+            ..postgres_iam_config()
+        };
+        let dsn = build_dsn(&cfg).expect("dsn should build");
+        assert!(dsn.contains("sslmode=verify-full"), "{dsn}");
+        assert!(!dsn.contains("sslmode=prefer"), "{dsn}");
+        let parsed = Url::parse(&dsn).expect("dsn should parse");
+        assert_eq!(parsed.host_str(), Some("db.example.eu-west-1.rds.amazonaws.com"));
+        assert_eq!(parsed.username(), "app_user");
+        assert!(parsed.password().is_some_and(|p| !p.contains('/') && !p.contains('?')));
+        let keys: Vec<String> = parsed.query_pairs().map(|(k, _)| k.into_owned()).collect();
+        assert_eq!(keys, vec!["sslmode".to_string()]);
+        let options: sqlx::postgres::PgConnectOptions = dsn.parse().expect("sqlx should accept the dsn");
+        assert_eq!(options.get_host(), "db.example.eu-west-1.rds.amazonaws.com");
+        assert_eq!(options.get_port(), 5432);
+        assert_eq!(options.get_username(), "app_user");
+        assert_eq!(options.get_database(), Some("app"));
+    }
+
+    #[test]
+    fn postgres_iam_passes_the_ca_bundle_through() {
+        let dir = std::env::temp_dir().join(format!("multidb-ca-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let ca = dir.join("rds.pem");
+        std::fs::write(&ca, "-----BEGIN CERTIFICATE-----\n").expect("write ca");
+        let cfg = ConnectionConfig { ssl_ca_path: ca.to_string_lossy().to_string(), ..postgres_iam_config() };
+        let dsn = build_dsn(&cfg).expect("dsn should build");
+        let parsed = Url::parse(&dsn).expect("dsn should parse");
+        let root = parsed.query_pairs().find(|(k, _)| k == "sslrootcert").map(|(_, v)| v.into_owned());
+        assert_eq!(root.as_deref(), Some(ca.to_string_lossy().as_ref()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn postgres_password_auth_is_unchanged() {
+        let cfg = ConnectionConfig { auth_mode: "password".to_string(), password: "secret".to_string(), ..postgres_iam_config() };
+        let dsn = build_dsn(&cfg).expect("dsn should build");
+        assert!(dsn.contains("sslmode=prefer"), "{dsn}");
+        assert_eq!(max_connections_for(&cfg), DEFAULT_MAX_CONNECTIONS);
+        assert_eq!(max_connections_for(&postgres_iam_config()), DEFAULT_MAX_CONNECTIONS);
     }
 
     #[tokio::test]

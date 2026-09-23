@@ -10,7 +10,7 @@ use crate::ui::runtime;
 use crate::ui::sql::schema::{db_schema_for, DbSchema};
 use crate::ui::sql_text;
 use crate::ui::widgets::text_input::{InputEvent, TextInput};
-use crate::ui::{diagram::DiagramState, dialogs, sessions::SessionsState};
+use crate::ui::{diagram::DiagramState, dialogs, sessions::SessionsState, storage::{StorageScope, StorageState}};
 use gpui::{
     prelude::*, App, AsyncApp, ClipboardItem, Context, Entity, FocusHandle, Focusable, Pixels, Point,
     ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window,
@@ -35,6 +35,7 @@ pub enum TabKind {
     Sql(SqlTab),
     Diagram(DiagramState),
     Sessions(SessionsState),
+    Storage(StorageState),
 }
 
 pub struct Tab {
@@ -79,6 +80,8 @@ pub struct TabDrag {
 pub enum NavMenu {
     Table { pos: Point<Pixels>, conn_id: String, table: String, schema: Option<String>, database: Option<String> },
     Database { pos: Point<Pixels>, conn_id: String },
+    /// A database or schema node inside a connection's tree.
+    DatabaseNode { pos: Point<Pixels>, conn_id: String, scope: StorageScope },
     DropConfirm { pos: Point<Pixels>, conn_id: String, table: String, schema: Option<String> },
 }
 

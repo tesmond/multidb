@@ -23,6 +23,7 @@ impl Workspace {
             TabKind::Sql(_) => self.render_sql_panel(window, cx),
             TabKind::Diagram(_) => self.render_diagram(window, cx),
             TabKind::Sessions(_) => self.render_sessions(window, cx),
+            TabKind::Storage(_) => self.render_storage(window, cx),
         }
     }
 

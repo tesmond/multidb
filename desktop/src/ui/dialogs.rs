@@ -307,7 +307,7 @@ impl ConnectionDialog {
     }
 
     pub fn aws_iam_selected(&self) -> bool {
-        self.driver == "mysql" && is_aws_iam(&self.auth_mode)
+        crate::models::driver_supports_aws_iam(&self.driver) && is_aws_iam(&self.auth_mode)
     }
 
     pub fn form(&self, cx: &App) -> ConnectionConfig {
@@ -479,7 +479,7 @@ impl Workspace {
         d.driver = driver.to_string();
         let port = driver_default_port(driver).to_string();
         d.port.update(cx, |i, cx| i.set_text(port, cx));
-        if driver != "mysql" {
+        if !crate::models::driver_supports_aws_iam(driver) {
             d.auth_mode = "password".into();
             d.password.update(cx, |i, cx| i.set_text("", cx));
             d.has_saved_password = false;
@@ -1001,7 +1001,7 @@ impl Workspace {
                 this.conn_dialog_driver_changed(&v, cx);
             }),
         );
-        let auth = if driver == "mysql" {
+        let auth = if crate::models::driver_supports_aws_iam(&driver) {
             div().flex().flex_col().gap(px(4.)).flex_1().min_w(px(0.)).child(field_label(s, "Authentication")).child(crate::ui::navigator::native_select(
                 "auth-select",
                 s,

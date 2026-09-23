@@ -17,6 +17,7 @@ pub mod runtime;
 pub mod sessions;
 pub mod sql;
 pub mod sql_text;
+pub mod storage;
 mod tabbar;
 pub mod textfmt;
 pub mod theme;

@@ -75,7 +75,8 @@ fn clamp_menu(pos: Point<Pixels>, kind: &str, window: &Window) -> Point<Pixels> 
     let pad = 8.0;
     let w = 220.0;
     let h = match kind {
-        "database" => 285.0,
+        "database" => 318.0,
+        "databaseNode" => 50.0,
         "dropConfirm" => 120.0,
         _ => 165.0,
     };
@@ -812,9 +813,17 @@ impl Workspace {
                 let db_open = dbname.is_empty() || filtering || self.expanded_tables.contains(&db_key);
                 if !dbname.is_empty() {
                     let k = db_key.clone();
+                    // A database the tree holds several of narrows to that
+                    // database; the connection's only database is all of it.
+                    let scope = crate::ui::storage::StorageScope {
+                        database: (db_idx != NONE).then(|| dbname.clone()),
+                        schema: None,
+                        label: dbname.clone(),
+                    };
                     children = children.child(
                         div().mt(px(2.)).ml(px(16.)).child(
                             self.section_label(format!("db-{db_key}"), s, filtering || self.expanded_tables.contains(&db_key), true, cx.listener(move |this, _, _, cx| this.toggle_key(&k, cx)))
+                                .on_mouse_down(MouseButton::Right, self.storage_menu_listener(&id, scope, cx))
                                 .child(div().flex_shrink_0().child("🗄"))
                                 .child(div().flex_shrink_0().child(dbname.clone())),
                         ),
@@ -838,6 +847,18 @@ impl Workspace {
                         let size = format_bytes(sc.size_bytes);
                         let mut section = div().mt(px(2.)).when(nested, |d| d.ml(px(16.))).when(!nested, |d| d.ml(px(16.))).child(
                             self.section_label(format!("s-{schema_key}"), s, sopen, true, cx.listener(move |this, _, _, cx| this.toggle_key(&sk, cx)))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    self.storage_menu_listener(
+                                        &id,
+                                        crate::ui::storage::StorageScope {
+                                            database: (db_idx != NONE).then(|| dbname.clone()),
+                                            schema: Some(sc.name.clone()),
+                                            label: if dbname.is_empty() { sc.name.clone() } else { format!("{dbname}.{}", sc.name) },
+                                        },
+                                        cx,
+                                    ),
+                                )
                                 .child(div().flex_shrink_0().child("🗂"))
                                 .child(div().flex_shrink_0().child(sc.name.clone()))
                                 .when(!size.is_empty(), |d| d.child(size_label(s, &size))),
@@ -873,6 +894,26 @@ impl Workspace {
             children = children.child(self.render_leaf_section(&format!("{id}-indexes"), "Indexes", "⚡", schema.indexes.clone(), s, cx));
         }
         children.into_any_element()
+    }
+
+    /// Right-click on a database or schema node: the storage menu for it.
+    fn storage_menu_listener(
+        &self,
+        conn_id: &str,
+        scope: crate::ui::storage::StorageScope,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static + use<> {
+        let conn_id = conn_id.to_string();
+        let view = cx.entity().downgrade();
+        move |e: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+            cx.stop_propagation();
+            let pos = clamp_menu(e.position, "databaseNode", window);
+            view.update(cx, |this, cx| {
+                this.nav_menu = Some(NavMenu::DatabaseNode { pos, conn_id: conn_id.clone(), scope: scope.clone() });
+                cx.notify();
+            })
+            .ok();
+        }
     }
 
     fn section_label(&self, id: String, s: Scale, open: bool, schema_node: bool, on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> Stateful<Div> {
@@ -1082,8 +1123,8 @@ impl Workspace {
                 }
                 NavMenu::Database { pos, conn_id } => {
                     let testing = self.testing_conn_id.as_deref() == Some(&conn_id);
-                    let ids: Vec<String> = (0..8).map(|_| conn_id.clone()).collect();
-                    let [a, b, c, d, e, f, g, h]: [String; 8] = ids.try_into().unwrap();
+                    let ids: Vec<String> = (0..9).map(|_| conn_id.clone()).collect();
+                    let [a, b, c, d, e, f, g, h, i]: [String; 9] = ids.try_into().unwrap();
                     (
                         pos,
                         div()
@@ -1140,6 +1181,10 @@ impl Workspace {
                                 this.nav_menu = None;
                                 this.show_db_connections(&e, window, cx);
                             })))
+                            .child(item("m-storage".into(), "Visualise Storage".into(), false).on_click(cx.listener(move |this, _, _, cx| {
+                                this.nav_menu = None;
+                                this.show_storage(&i, crate::ui::storage::StorageScope::default(), cx);
+                            })))
                             .child(item("m-import".into(), "Import...".into(), false).on_click(cx.listener(move |this, _, window, cx| {
                                 this.nav_menu = None;
                                 this.open_import(&f, window, cx);
@@ -1151,6 +1196,13 @@ impl Workspace {
                             }))),
                     )
                 }
+                NavMenu::DatabaseNode { pos, conn_id, scope } => (
+                    pos,
+                    div().child(item("m-node-storage".into(), "Visualise Storage".into(), false).on_click(cx.listener(move |this, _, _, cx| {
+                        this.nav_menu = None;
+                        this.show_storage(&conn_id, scope.clone(), cx);
+                    }))),
+                ),
                 NavMenu::DropConfirm { pos, conn_id, table, schema } => {
                     let label = match &schema {
                         Some(sc) if !sc.is_empty() => format!("Drop {sc}.{table}?"),

@@ -69,9 +69,15 @@ impl Default for ConnectionConfig {
     }
 }
 
+/// Drivers that can sign in to Amazon RDS with an IAM auth token instead of a
+/// password.
+pub fn driver_supports_aws_iam(driver: &str) -> bool {
+    matches!(driver, "mysql" | "postgres")
+}
+
 impl ConnectionConfig {
     pub fn uses_aws_iam_auth(&self) -> bool {
-        self.driver == "mysql" && self.auth_mode == "awsIam"
+        driver_supports_aws_iam(&self.driver) && self.auth_mode == "awsIam"
     }
 }
 

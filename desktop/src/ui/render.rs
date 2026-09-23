@@ -113,6 +113,9 @@ impl Workspace {
         let s = Scale(self.scale());
         let nav_w = self.nav_width;
         let ratio = self.editor_ratio;
+        // The results/messages/history panel belongs to query tabs; every
+        // other tab (relationships, connections, storage) takes the whole area.
+        let show_output = self.active_tab().is_none_or(|t| t.sql().is_some());
         let dragging = self.pane_drag.clone();
         let mut root = div()
             .id("root")
@@ -202,10 +205,10 @@ impl Workspace {
                                     .flex_shrink_0()
                                     .min_h(px(80.))
                                     .overflow_hidden()
-                                    .map(|d| d.flex_grow_ratio(ratio))
+                                    .map(|d| d.flex_grow_ratio(if show_output { ratio } else { 1.0 }))
                                     .child(self.render_active_panel(window, cx)),
                             )
-                            .child(
+                            .when(show_output, |d| d.child(
                                 div()
                                     .id("drag-handle-h")
                                     .h(px(4.))
@@ -231,7 +234,7 @@ impl Workspace {
                                     .overflow_hidden()
                                     .map(|d| d.flex_grow_ratio(1.0 - ratio))
                                     .child(self.render_output_panel(window, cx)),
-                            )
+                            ))
                             .on_children_prepainted({
                                 let this = cx.entity().downgrade();
                                 move |bounds, _w, cx| {

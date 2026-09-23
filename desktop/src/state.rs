@@ -93,6 +93,7 @@ impl AppState {
     }
 
     pub async fn get_pg_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::PgPool> {
+        self.refresh_aws_iam_connection_if_needed(conn_id).await?;
         match self.connections.get_pg_pool(conn_id).await {
             Ok(pool) => Ok(pool),
             Err(original) => {
