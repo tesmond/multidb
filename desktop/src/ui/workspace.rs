@@ -185,6 +185,10 @@ pub struct Workspace {
     nav_filter_task: Option<Task<()>>,
     /// Bumped whenever a schema is replaced, so stale searches are dropped.
     nav_generation: u64,
+    /// Connections whose index is being rebuilt off the UI thread, with the
+    /// generation that rebuild will carry; a result for an older generation is
+    /// thrown away.
+    nav_index_pending: std::collections::HashMap<String, u64>,
     /// The scrollbar thumb currently being dragged on a list.
     pub bar_drag: Option<crate::ui::widgets::scroll::HandleDrag>,
 
@@ -281,6 +285,7 @@ impl Workspace {
             nav_matches: None,
             nav_filter_task: None,
             nav_generation: 0,
+            nav_index_pending: std::collections::HashMap::new(),
             bar_drag: None,
             grid: GridState::default(),
             conn_select_open: None,
@@ -595,7 +600,12 @@ impl Workspace {
                 if entry.schema_json.is_empty() {
                     return;
                 }
-                if let Ok(tree) = serde_json::from_str::<SchemaTree>(&entry.schema_json) {
+                // A cached schema can be megabytes of JSON; decoding it on the
+                // UI thread froze the window once per connection when the
+                // filter pulled in every schema at once.
+                let json = entry.schema_json;
+                let parsed = cx.background_spawn(async move { serde_json::from_str::<SchemaTree>(&json).ok() }).await;
+                if let Some(tree) = parsed {
                     this.update(cx, |this, cx| {
                         if let Some(c) = this.connection_mut(&conn_id) {
                             c.schema = Some(Arc::new(tree));
@@ -851,24 +861,38 @@ impl Workspace {
 
     // ─── Navigator filter ───────────────────────────────────────────────────
 
-    /// Re-index one connection after its schema changed.
+    /// Re-index one connection after its schema changed. Lower-casing and
+    /// mapping every table and column name is done off the UI thread; the
+    /// index is swapped in when it is ready.
     pub fn reindex_schema(&mut self, conn_id: &str, cx: &mut Context<Self>) {
         self.nav_generation += 1;
         let generation = self.nav_generation;
-        let index = self
-            .connection(conn_id)
-            .and_then(|c| c.schema.clone())
-            .map(|schema| Arc::new(crate::ui::nav_index::SchemaIndex::build(conn_id, generation, &schema)));
-        match index {
-            Some(index) => {
-                self.nav_indexes.insert(conn_id.to_string(), index);
-            }
-            None => {
-                self.nav_indexes.remove(conn_id);
-            }
-        }
-        // Whatever was on screen was filtered against the old schema.
-        self.search_navigator(cx);
+        let Some(schema) = self.connection(conn_id).and_then(|c| c.schema.clone()) else {
+            self.nav_index_pending.remove(conn_id);
+            self.nav_indexes.remove(conn_id);
+            self.search_navigator_after(Self::REINDEX_COALESCE_MS, cx);
+            return;
+        };
+        self.nav_index_pending.insert(conn_id.to_string(), generation);
+        let conn_id = conn_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let id = conn_id.clone();
+            let index = cx
+                .background_spawn(async move { crate::ui::nav_index::SchemaIndex::build(&id, generation, &schema) })
+                .await;
+            this.update(cx, |this, cx| {
+                // A newer schema arrived while this one was being indexed.
+                if this.nav_index_pending.get(&conn_id) != Some(&generation) {
+                    return;
+                }
+                this.nav_index_pending.remove(&conn_id);
+                this.nav_indexes.insert(conn_id, Arc::new(index));
+                // Whatever was on screen was filtered against the old schema.
+                this.search_navigator_after(Self::REINDEX_COALESCE_MS, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Run the navigator filter: debounced, then off the UI thread, so typing
@@ -878,7 +902,16 @@ impl Workspace {
     /// mid-word, short enough to feel immediate once the hands stop.
     pub const FILTER_DEBOUNCE_MS: u64 = 200;
 
+    /// When schemas finish loading they arrive in a burst (one per
+    /// connection). Re-searching after each would restart the typing debounce
+    /// over and over; a short window gathers the burst into one search.
+    const REINDEX_COALESCE_MS: u64 = 40;
+
     pub fn search_navigator(&mut self, cx: &mut Context<Self>) {
+        self.search_navigator_after(Self::FILTER_DEBOUNCE_MS, cx);
+    }
+
+    fn search_navigator_after(&mut self, delay_ms: u64, cx: &mut Context<Self>) {
         let filter = self.filter_text(cx);
         if filter.is_empty() {
             self.nav_filter_task = None;
@@ -893,7 +926,7 @@ impl Workspace {
         // keystrokes leaves exactly one timer, and the search happens once the
         // typing stops.
         self.nav_filter_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(Self::FILTER_DEBOUNCE_MS)).await;
+            cx.background_executor().timer(Duration::from_millis(delay_ms)).await;
             let matches = cx.background_spawn(async move { crate::ui::nav_index::search(&indexes, &filter) }).await;
             this.update(cx, |this, cx| {
                 this.nav_matches = Some(Arc::new(matches));
@@ -902,6 +935,25 @@ impl Workspace {
             })
             .ok();
         }));
+    }
+
+    /// The filter's Clear button. It empties the box the way deleting the
+    /// text does — as an edit that emits `Changed` — so it goes through the
+    /// same `on_filter_changed` path as the keyboard; the search is also
+    /// reset right here so the tree is restored in this same frame.
+    pub fn clear_nav_filter(&mut self, cx: &mut Context<Self>) {
+        self.nav_filter.update(cx, |i, cx| i.clear_as_edit(cx));
+        self.search_navigator(cx);
+        cx.notify();
+    }
+
+    /// The results the tree should be filtered by: none when the box is
+    /// empty, whatever happens to be stored.
+    pub fn effective_nav_matches(&self, cx: &App) -> Option<Arc<crate::ui::nav_index::Matches>> {
+        if self.filter_text(cx).is_empty() {
+            return None;
+        }
+        self.nav_matches.clone()
     }
 
     /// Filtering searches columns too, so it needs the schemas of connections

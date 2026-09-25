@@ -1,10 +1,10 @@
 //! Connection navigator (`Navigator.svelte`): header menus, table filter,
 //! server groups, connection tree, drag and drop, context menus.
 
-use crate::models::Table;
-use crate::ui::nav_index::{Matches, NONE};
 use crate::ui::dialogs::{self, Btn};
-use crate::ui::model::{display_structure, format_bytes, ActiveConnection};
+use crate::ui::model::format_bytes;
+use crate::ui::nav_index::NONE;
+use crate::ui::nav_rows::{self, Info, Leaf, Row, RowKind};
 use crate::ui::sql_text;
 use crate::ui::theme::{self, Rgba};
 use crate::ui::widgets::scroll;
@@ -19,51 +19,22 @@ use gpui::{
 const CHEVRON_OPEN: &str = "▾";
 const CHEVRON_CLOSED: &str = "▸";
 
-/// Tables of one schema that survive the filter. With no filter that is all of
-/// them; otherwise it is a lookup into the set `nav_index` produced off the UI
-/// thread, rather than a walk over every name.
-fn filter_tables<'a>(
-    tables: &'a [Table],
-    matches: Option<&Matches>,
-    conn_id: &str,
-    db: u32,
-    schema: u32,
-) -> Vec<&'a Table> {
-    let Some(m) = matches else { return tables.iter().collect() };
-    tables
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| m.table_matches(conn_id, (db, schema, *i as u32)))
-        .map(|(_, t)| t)
-        .collect()
+/// Padding above the first row of the tree.
+const NAV_PAD_TOP: f32 = 4.0;
+/// Room left below the last row.
+const NAV_PAD_BOTTOM: f32 = 40.0;
+/// Rows drawn beyond each edge of the viewport, so a small scroll has its
+/// rows already laid out.
+const NAV_OVERDRAW: f32 = 200.0;
+
+fn nav_metrics(s: Scale) -> nav_rows::Metrics {
+    nav_rows::Metrics { lh13: s.lh_f(13.0), lh12: s.lh_f(12.0), lh11: s.lh_f(11.0) }
 }
 
-fn conn_matches(conn: &ActiveConnection, matches: Option<&Matches>) -> bool {
-    match matches {
-        None => true,
-        Some(m) => m.conn_matches(&conn.config.id),
-    }
-}
-
-/// `navigatorSchemaGroups`, as positions into the connection's schema tree so
-/// that rendering borrows it rather than cloning every table on every frame.
-/// The `u32` is the database index, or [`NONE`] when the tree has none.
-fn schema_groups(conn: &ActiveConnection) -> Vec<(String, u32)> {
-    let Some(s) = &conn.schema else { return Vec::new() };
-    if conn.config.driver == "postgres" {
-        if !s.databases.is_empty() {
-            return s.databases.iter().enumerate().map(|(i, d)| (d.name.clone(), i as u32)).collect();
-        }
-        let db = conn.config.database.trim();
-        if !db.is_empty() && !s.schemas.is_empty() {
-            return vec![(db.to_string(), NONE)];
-        }
-        return Vec::new();
-    }
-    if !s.schemas.is_empty() {
-        vec![(String::new(), NONE)]
-    } else {
-        Vec::new()
+fn leaf_icon(leaf: Leaf) -> &'static str {
+    match leaf {
+        Leaf::Views => "👁",
+        Leaf::Indexes => "⚡",
     }
 }
 
@@ -253,7 +224,36 @@ impl Workspace {
             d.active = true;
             self.suppress_nav_click = true;
         }
+        self.autoscroll_nav_drag(e.position.y);
         cx.notify();
+    }
+
+    /// Dragging near the top or bottom edge of the tree scrolls it, so a
+    /// connection can be dropped on a row that is currently scrolled out of
+    /// view (and therefore, now that off-screen rows are not drawn, has no
+    /// element to hover yet).
+    fn autoscroll_nav_drag(&mut self, y: Pixels) {
+        const EDGE: f32 = 28.0;
+        const STEP: f32 = 12.0;
+        let b = self.nav_scroll.bounds();
+        let (top, bottom) = (f32::from(b.top()), f32::from(b.bottom()));
+        if bottom - top <= 2.0 * EDGE {
+            return;
+        }
+        let y = f32::from(y);
+        let delta = if y < top + EDGE && y >= top - EDGE {
+            -STEP
+        } else if y > bottom - EDGE && y <= bottom + EDGE {
+            STEP
+        } else {
+            return;
+        };
+        let max = f32::from(self.nav_scroll.max_offset().height).max(0.0);
+        let mut offset = self.nav_scroll.offset();
+        // gpui offsets run negative as the content scrolls up.
+        let next = (-f32::from(offset.y) + delta).clamp(0.0, max);
+        offset.y = px(-next);
+        self.nav_scroll.set_offset(offset);
     }
 
     pub fn on_nav_drag_end(&mut self, _e: &MouseUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
@@ -332,8 +332,11 @@ impl Workspace {
 
     pub fn render_navigator(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let s = Scale(self.scale());
-        let filter = self.filter_text(cx);
-        let filtering = !filter.is_empty();
+        // The tree follows the search *results*, not the live text: between a
+        // keystroke and the debounced search there are no results for the new
+        // text yet, and treating that gap as "filtering with nothing excluded"
+        // force-expanded every connection, schema and table at once.
+        let nav_matches = self.effective_nav_matches(cx);
         let has_filter_text = !self.nav_filter.read(cx).text().is_empty();
 
         // Header
@@ -506,39 +509,53 @@ impl Workspace {
                         .text_color(theme::TEXT_MUTED)
                         .cursor_pointer()
                         .hover(|st| st.text_color(theme::TEXT))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.nav_filter.update(cx, |i, cx| i.set_text("", cx));
-                            this.last_filter_load_key.clear();
-                            cx.notify();
-                        }))
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_nav_filter(cx)))
                         .child("Clear"),
                 )
             });
 
-        // Tree. `filtering` means the filter box has text; `matches` is what
-        // the background search last found for it.
-        let matches = self.nav_matches.clone();
-        let matches = matches.as_deref();
-        let mut items: Vec<AnyElement> = Vec::new();
-        let conns = self.connections.clone();
-        let groups = self.settings.server_groups.clone();
-        let structure = display_structure(&conns, &groups);
-        for (g, gconns) in &structure.groups {
-            let matching: Vec<&&ActiveConnection> = gconns.iter().filter(|c| conn_matches(c, matches)).collect();
-            if !filtering || !matching.is_empty() {
-                items.push(self.render_group_label(g.id.clone(), g.title.clone(), matching.len(), filtering, s, cx));
-            }
-            if self.expanded_groups.contains(&g.id) || filtering {
-                for c in matching {
-                    items.push(self.render_conn(c, Some(g.id.clone()), &filter, s, window, cx));
-                }
-            }
+        // Tree. Flattened into rows (see `nav_rows`), and only the rows that
+        // fall inside the scrolled viewport become elements; a spacer above
+        // and below them keeps the content exactly as tall as the whole tree,
+        // so the scrollbar and wheel scrolling behave as if it were all there.
+        let rows = nav_rows::build(
+            &nav_rows::TreeState {
+                connections: &self.connections,
+                groups: &self.settings.server_groups,
+                expanded: &self.expanded,
+                expanded_tables: &self.expanded_tables,
+                expanded_groups: &self.expanded_groups,
+                matches: nav_matches.as_deref(),
+            },
+            nav_metrics(s),
+        );
+        let min_width = rows.iter().map(|r| self.estimate_row_width(r, s)).fold(0.0_f32, f32::max);
+        // Last frame's viewport. Scrolling notifies the view, so the next
+        // render sees the new offset; before the first layout there is no
+        // viewport yet, so assume the window's height.
+        let view_h = {
+            let h = f32::from(self.nav_scroll.bounds().size.height);
+            if h > 0.5 { h } else { f32::from(window.viewport_size().height) }
+        };
+        // The offset is last frame's too: when the tree has just got shorter
+        // (a collapse, a narrower filter) gpui will clamp it during layout, so
+        // clamp it here the same way or this frame would draw rows below the
+        // new end and leave the viewport empty.
+        let content_h = NAV_PAD_TOP + nav_rows::total_height(&rows) + NAV_PAD_BOTTOM;
+        let max_scroll = (content_h - view_h).max(0.0);
+        let scroll_top = ((-f32::from(self.nav_scroll.offset().y)).min(max_scroll) - NAV_PAD_TOP).max(0.0);
+        let (range, before, after) = nav_rows::visible_range(&rows, scroll_top, view_h, NAV_OVERDRAW);
+        let mut list = div().flex().flex_col().min_w(px(min_width));
+        if before > 0.0 {
+            list = list.child(div().flex_shrink_0().h(px(before)));
         }
-        for c in &structure.ungrouped {
-            if conn_matches(c, matches) {
-                items.push(self.render_conn(c, None, &filter, s, window, cx));
-            }
+        for row in &rows[range] {
+            list = list.child(self.render_nav_row(row, s, cx));
         }
+        if after > 0.0 {
+            list = list.child(div().flex_shrink_0().h(px(after)));
+        }
+        let mut items: Vec<AnyElement> = vec![list.into_any_element()];
         if self.connections.is_empty() {
             items.push(
                 div()
@@ -574,14 +591,6 @@ impl Workspace {
             .min_h(px(0.))
             .overflow_scroll()
             .track_scroll(&self.nav_scroll)
-            .on_mouse_move(cx.listener(|this, _e: &MouseMoveEvent, _, _cx| {
-                // Hovering empty space: dropping there moves to the end.
-                if let Some(d) = &mut this.nav_drag {
-                    if d.active {
-                        let _ = d;
-                    }
-                }
-            }))
             // One child holding the rows. Its padding lives here rather than on
             // the scroll container so that it counts towards the content size.
             // The right padding keeps the rows clear of the vertical scrollbar,
@@ -589,8 +598,8 @@ impl Workspace {
             // space.
             .child(
                 scroll::scroll_content(div())
-                    .pt(px(4.))
-                    .pb(px(40.))
+                    .pt(px(NAV_PAD_TOP))
+                    .pb(px(NAV_PAD_BOTTOM))
                     .pr(px(if f32::from(self.nav_scroll.max_offset().height) > 0.5 { scroll::SCROLLBAR } else { 0.0 }))
                     .children(items),
             );
@@ -614,8 +623,132 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_group_label(&mut self, id: String, title: String, count: usize, filtering: bool, s: Scale, cx: &mut Context<Self>) -> AnyElement {
-        let open = filtering || self.expanded_groups.contains(&id);
+    /// One row of the flattened tree, positioned as the nested layout had it:
+    /// indented by `ml`, separated by `mt`, and exactly `height` tall so the
+    /// spacers standing in for the rows that are not drawn add up.
+    fn render_nav_row(&mut self, row: &Row, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        let h = row.height;
+        let body = match row.kind {
+            RowKind::Group { group, count, open } => self.render_group_row(group, count, open, h, s, cx),
+            RowKind::Conn { conn, group, open } => self.render_conn_row(conn, group, open, h, s, cx),
+            RowKind::Info { conn, info } => {
+                let c = &self.connections[conn];
+                let (text, color) = match info {
+                    Info::Loading => ("Loading schema…".to_string(), theme::TEXT_MUTED),
+                    Info::Error => (c.schema_error.clone().unwrap_or_default(), theme::ERROR),
+                    Info::NotLoaded => ("Click to load schema".to_string(), theme::TEXT_MUTED),
+                };
+                nav_info(s, &text, color).h(px(h)).whitespace_nowrap().into_any_element()
+            }
+            RowKind::Database { conn, db, open } => self.render_database_row(conn, db, open, h, s, cx),
+            RowKind::Schema { conn, db, schema, open } => self.render_schema_row(conn, db, schema, open, h, s, cx),
+            RowKind::Tables { conn, db, schema, count, open } => {
+                let (conn_id, sc_name) = self.row_names(conn, db, schema);
+                let key = nav_rows::tables_key(&conn_id, sc_name.as_deref());
+                self.section_header(key, "Tables", count, open, h, s, cx)
+            }
+            RowKind::Table { conn, db, schema, table, open } => self.render_table_row(conn, db, schema, table, open, h, s, cx),
+            RowKind::Column { conn, db, schema, table, column } => {
+                let tree = self.connections[conn].schema.clone();
+                match tree.as_deref().and_then(|t| nav_rows::tables_of(t, db, schema).get(table as usize)).and_then(|t| t.columns.get(column as usize)) {
+                    None => div().into_any_element(),
+                    Some(c) => div()
+                    .h(px(h))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .py(px(2.))
+                    .t(s, 11.0)
+                    .text_color(theme::TEXT_MUTED)
+                    .min_w_full()
+                    .child(div().flex_shrink_0().whitespace_nowrap().child(c.name.clone()))
+                    .child(div().flex_1().min_w(px(12.)))
+                    .when(c.key == "PRI", |d| d.child(div().w(px(14.)).flex_shrink_0().child("🔑")))
+                    .child(div().flex_shrink_0().opacity(0.6).italic().child(c.column_type.clone()))
+                    .into_any_element(),
+                }
+            }
+            RowKind::LeafSection { conn, db, schema, leaf, count, open } => {
+                let (conn_id, sc_name) = self.row_names(conn, db, schema);
+                let key = nav_rows::leaf_key(&conn_id, sc_name.as_deref(), leaf);
+                let label = match leaf {
+                    Leaf::Views => "Views",
+                    Leaf::Indexes => "Indexes",
+                };
+                self.section_header(key, label, count, open, h, s, cx)
+            }
+            RowKind::LeafItem { conn, db, schema, leaf, item } => {
+                let name = self.connections[conn]
+                    .schema
+                    .as_ref()
+                    .map(|t| nav_rows::leaf_name(t, db, schema, leaf, item).to_string())
+                    .unwrap_or_default();
+                div()
+                    .h(px(h))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .pl(px(24.))
+                    .pr(px(8.))
+                    .py(px(3.))
+                    .t(s, 12.0)
+                    .text_color(theme::TEXT)
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|st| st.bg(theme::BG_HOVER))
+                    .child(div().flex_shrink_0().child(leaf_icon(leaf)))
+                    .child(name)
+                    .into_any_element()
+            }
+            RowKind::Gap => div().into_any_element(),
+        };
+        div()
+            .flex_shrink_0()
+            .mt(px(row.gap))
+            .ml(px(row.indent))
+            .h(px(h))
+            .flex()
+            .flex_col()
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The connection id and, below a schema level, the schema's name: the
+    /// two things the expansion keys are made of.
+    fn row_names(&self, conn: usize, db: u32, schema: u32) -> (String, Option<String>) {
+        let c = &self.connections[conn];
+        let sc = c.schema.as_ref().and_then(|t| nav_rows::schema_of(t, db, schema)).map(|s| s.name.clone());
+        (c.config.id.clone(), sc)
+    }
+
+    /// A rough width for a row, so that the horizontal extent of the tree
+    /// does not depend on which rows happen to be drawn. Deliberately on the
+    /// low side: a row that is on screen is measured for real anyway, and an
+    /// estimate that ran long would conjure a scrollbar out of nothing.
+    fn estimate_row_width(&self, row: &Row, s: Scale) -> f32 {
+        let chars = |text: &str, size: f32| text.chars().count() as f32 * size * s.0 * 0.5;
+        let text = match row.kind {
+            RowKind::Table { conn, db, schema, table, .. } => self.connections[conn]
+                .schema
+                .as_ref()
+                .and_then(|t| nav_rows::tables_of(t, db, schema).get(table as usize))
+                .map(|t| chars(&t.name, 12.0) + 40.0),
+            RowKind::Column { conn, db, schema, table, column } => self.connections[conn]
+                .schema
+                .as_ref()
+                .and_then(|t| nav_rows::tables_of(t, db, schema).get(table as usize))
+                .and_then(|t| t.columns.get(column as usize))
+                .map(|c| chars(&c.name, 11.0) + chars(&c.column_type, 11.0) + 40.0),
+            RowKind::Conn { conn, .. } => Some(chars(&self.connections[conn].config.name, 13.0) + 80.0),
+            _ => None,
+        };
+        text.map_or(0.0, |w| row.indent + w)
+    }
+
+    fn render_group_row(&mut self, gi: usize, count: usize, open: bool, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        let Some(g) = self.settings.server_groups.get(gi) else { return div().into_any_element() };
+        let (id, title) = (g.id.clone(), g.title.clone());
         let active = self.active_server_group_id == id;
         let drag = self.nav_drag.clone();
         let is_target = drag.as_ref().is_some_and(|d| d.active && d.target_group.as_deref() == Some(&id));
@@ -626,6 +759,7 @@ impl Workspace {
         let row = div()
             .id(SharedString::from(format!("group-{id}")))
             .relative()
+            .h(px(h))
             .flex()
             .items_center()
             .gap(px(4.))
@@ -633,6 +767,7 @@ impl Workspace {
             .py(px(5.))
             .t(s, 13.0)
             .text_color(theme::TEXT)
+            .whitespace_nowrap()
             .cursor(CursorStyle::OpenHand)
             .when(active, |d| d.bg(theme::BG_HOVER))
             .hover(|st| st.bg(theme::BG_HOVER))
@@ -661,10 +796,10 @@ impl Workspace {
         record_row(row.into_any_element(), format!("group:{id}"), cx)
     }
 
-    fn render_conn(&mut self, conn: &ActiveConnection, group: Option<String>, filter: &str, s: Scale, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_conn_row(&mut self, ci: usize, group: Option<usize>, open: bool, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        let conn = self.connections[ci].clone();
+        let group = group.and_then(|g| self.settings.server_groups.get(g)).map(|g| g.id.clone());
         let id = conn.config.id.clone();
-        let filtering = !filter.is_empty();
-        let open = filtering || self.expanded.contains(&id);
         let selected = self.selected_conn_id == id;
         let drag = self.nav_drag.clone();
         let is_target = drag.as_ref().is_some_and(|d| d.active && d.target_conn.as_ref().is_some_and(|(c, _)| *c == id));
@@ -681,6 +816,7 @@ impl Workspace {
             .id(SharedString::from(format!("conn-{}-{}", id, group.clone().unwrap_or_else(|| "root".into()))))
             .group(group_name.clone())
             .relative()
+            .h(px(h))
             .flex()
             .items_center()
             .gap(px(4.))
@@ -778,124 +914,124 @@ impl Workspace {
             )
             .when(is_target, |d| d.child(drop_line(after)));
 
-        let label = record_row(label.into_any_element(), format!("conn:{id}"), cx);
-        let mut node = div().flex().flex_col().child(label);
-        if open {
-            node = node.child(self.render_conn_children(conn, filter, s, window, cx));
-        }
-        node.into_any_element()
+        record_row(label.into_any_element(), format!("conn:{id}"), cx)
     }
 
-    fn render_conn_children(&mut self, conn: &ActiveConnection, filter: &str, s: Scale, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let filtering = !filter.is_empty();
+    fn render_database_row(&mut self, ci: usize, db: u32, open: bool, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        let conn = &self.connections[ci];
         let id = conn.config.id.clone();
-        // Section margins collapsed in the old block layout: 2px between
-        // sections and 2px after the last one.
-        let mut children = div().flex().flex_col().pl(px(16.)).pb(px(2.));
-        if conn.schema_loading {
-            return children.child(nav_info(s, "Loading schema…", theme::TEXT_MUTED)).into_any_element();
-        }
-        if let Some(err) = &conn.schema_error {
-            return children.child(nav_info(s, err, theme::ERROR)).into_any_element();
-        }
-        let Some(schema) = conn.schema.clone() else {
-            return children.child(nav_info(s, "Click to load schema", theme::TEXT_MUTED)).into_any_element();
+        let dbname = nav_rows::database_name(conn, db);
+        let db_key = nav_rows::database_key(&id, &dbname);
+        let k = db_key.clone();
+        // A database the tree holds several of narrows to that database; the
+        // connection's only database is all of it.
+        let scope = crate::ui::storage::StorageScope {
+            database: (db != NONE).then(|| dbname.clone()),
+            schema: None,
+            label: dbname.clone(),
         };
-        let matches = self.nav_matches.clone();
-        let matches = matches.as_deref();
-        let groups = schema_groups(conn);
-        if !groups.is_empty() {
-            for (dbname, db_idx) in groups {
-                // Borrowed from the connection's Arc'd tree — no cloning.
-                let schemas: &[crate::models::Schema] =
-                    if db_idx == NONE { &schema.schemas } else { &schema.databases[db_idx as usize].schemas };
-                let db_key = format!("{id}-database-{dbname}");
-                let db_open = dbname.is_empty() || filtering || self.expanded_tables.contains(&db_key);
-                if !dbname.is_empty() {
-                    let k = db_key.clone();
-                    // A database the tree holds several of narrows to that
-                    // database; the connection's only database is all of it.
-                    let scope = crate::ui::storage::StorageScope {
-                        database: (db_idx != NONE).then(|| dbname.clone()),
-                        schema: None,
-                        label: dbname.clone(),
-                    };
-                    children = children.child(
-                        div().mt(px(2.)).ml(px(16.)).child(
-                            self.section_label(format!("db-{db_key}"), s, filtering || self.expanded_tables.contains(&db_key), true, cx.listener(move |this, _, _, cx| this.toggle_key(&k, cx)))
-                                .on_mouse_down(MouseButton::Right, self.storage_menu_listener(&id, scope, cx))
-                                .child(div().flex_shrink_0().child("🗄"))
-                                .child(div().flex_shrink_0().child(dbname.clone())),
-                        ),
-                    );
-                }
-                if db_open {
-                    let mut inner = div().flex().flex_col();
-                    let nested = !dbname.is_empty();
-                    if nested {
-                        inner = inner.pl(px(16.));
-                    }
-                    for (sc_idx, sc) in schemas.iter().enumerate() {
-                        let schema_key = format!("{id}-schema-{}", sc.name);
-                        let tables_key = format!("{id}-{}-tables", sc.name);
-                        let tables = filter_tables(&sc.tables, matches, &id, db_idx, sc_idx as u32);
-                        if filtering && tables.is_empty() {
-                            continue;
-                        }
-                        let sk = schema_key.clone();
-                        let sopen = filtering || self.expanded_tables.contains(&schema_key);
-                        let size = format_bytes(sc.size_bytes);
-                        let mut section = div().mt(px(2.)).when(nested, |d| d.ml(px(16.))).when(!nested, |d| d.ml(px(16.))).child(
-                            self.section_label(format!("s-{schema_key}"), s, sopen, true, cx.listener(move |this, _, _, cx| this.toggle_key(&sk, cx)))
-                                .on_mouse_down(
-                                    MouseButton::Right,
-                                    self.storage_menu_listener(
-                                        &id,
-                                        crate::ui::storage::StorageScope {
-                                            database: (db_idx != NONE).then(|| dbname.clone()),
-                                            schema: Some(sc.name.clone()),
-                                            label: if dbname.is_empty() { sc.name.clone() } else { format!("{dbname}.{}", sc.name) },
-                                        },
-                                        cx,
-                                    ),
-                                )
-                                .child(div().flex_shrink_0().child("🗂"))
-                                .child(div().flex_shrink_0().child(sc.name.clone()))
-                                .when(!size.is_empty(), |d| d.child(size_label(s, &size))),
-                        );
-                        if sopen {
-                            let mut sch = div().flex().flex_col().pl(px(16.));
-                            sch = sch.child(self.render_tables_section(&id, &tables_key, Some(sc.name.clone()), if dbname.is_empty() { None } else { Some(dbname.clone()) }, &tables, filtering, s, cx));
-                            if !filtering && !sc.views.is_empty() {
-                                sch = sch.child(self.render_leaf_section(&format!("{id}-{}-views", sc.name), "Views", "👁", sc.views.iter().map(|v| v.name.clone()).collect(), s, cx));
-                            }
-                            if !filtering && !sc.indexes.is_empty() {
-                                sch = sch.child(self.render_leaf_section(&format!("{id}-{}-indexes", sc.name), "Indexes", "⚡", sc.indexes.clone(), s, cx));
-                            }
-                            section = section.child(sch);
-                        }
-                        inner = inner.child(section);
-                    }
-                    children = children.child(inner);
-                }
-            }
-            return children.into_any_element();
-        }
-        // Flat (MySQL without schemas / SQLite)
-        let tables_key = format!("{id}-tables");
-        let tables = filter_tables(&schema.tables, matches, &id, NONE, NONE);
-        if !filtering || !tables.is_empty() {
-            children = children.child(self.render_tables_section(&id, &tables_key, None, None, &tables, filtering, s, cx));
-        }
-        if !filtering && !schema.views.is_empty() {
-            children = children.child(self.render_leaf_section(&format!("{id}-views"), "Views", "👁", schema.views.iter().map(|v| v.name.clone()).collect(), s, cx));
-        }
-        if !filtering && !schema.indexes.is_empty() {
-            children = children.child(self.render_leaf_section(&format!("{id}-indexes"), "Indexes", "⚡", schema.indexes.clone(), s, cx));
-        }
-        children.into_any_element()
+        self.section_label(format!("db-{db_key}"), s, open, true, cx.listener(move |this, _, _, cx| this.toggle_key(&k, cx)))
+            .h(px(h))
+            .whitespace_nowrap()
+            .on_mouse_down(MouseButton::Right, self.storage_menu_listener(&id, scope, cx))
+            .child(div().flex_shrink_0().child("🗄"))
+            .child(div().flex_shrink_0().child(dbname))
+            .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_schema_row(&mut self, ci: usize, db: u32, schema: u32, open: bool, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        let conn = &self.connections[ci];
+        let id = conn.config.id.clone();
+        let dbname = nav_rows::database_name(conn, db);
+        let Some(sc) = conn.schema.as_ref().and_then(|t| nav_rows::schema_of(t, db, schema)) else {
+            return div().into_any_element();
+        };
+        let name = sc.name.clone();
+        let size = format_bytes(sc.size_bytes);
+        let schema_key = nav_rows::schema_key(&id, &name);
+        let scope = crate::ui::storage::StorageScope {
+            database: (db != NONE).then(|| dbname.clone()),
+            schema: Some(name.clone()),
+            label: if dbname.is_empty() { name.clone() } else { format!("{dbname}.{name}") },
+        };
+        let sk = schema_key.clone();
+        self.section_label(format!("s-{schema_key}"), s, open, true, cx.listener(move |this, _, _, cx| this.toggle_key(&sk, cx)))
+            .h(px(h))
+            .whitespace_nowrap()
+            .on_mouse_down(MouseButton::Right, self.storage_menu_listener(&id, scope, cx))
+            .child(div().flex_shrink_0().child("🗂"))
+            .child(div().flex_shrink_0().child(name))
+            .when(!size.is_empty(), |d| d.child(size_label(s, &size)))
+            .into_any_element()
+    }
+
+    /// The "Tables", "Views" and "Indexes" headers.
+    #[allow(clippy::too_many_arguments)]
+    fn section_header(&mut self, key: String, label: &'static str, count: usize, open: bool, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        let k = key.clone();
+        div()
+            .id(SharedString::from(format!("sec-{key}")))
+            .h(px(h))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(8.))
+            .py(px(3.))
+            .t(s, 12.0)
+            .text_color(theme::TEXT_MUTED)
+            .font_weight(FontWeight::MEDIUM)
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .hover(|st| st.text_color(theme::TEXT))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_key(&k, cx)))
+            .child(chevron(s, open))
+            .child(label)
+            .child(div().font_weight(FontWeight::NORMAL).opacity(0.7).child(format!("({count})")))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_table_row(&mut self, ci: usize, db: u32, schema: u32, table: u32, open: bool, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        let conn = &self.connections[ci];
+        let conn_id = conn.config.id.clone();
+        let dbname = nav_rows::database_name(conn, db);
+        let Some(tree) = conn.schema.clone() else { return div().into_any_element() };
+        let sc_name = nav_rows::schema_of(&tree, db, schema).map(|s| s.name.clone());
+        let Some(t) = nav_rows::tables_of(&tree, db, schema).get(table as usize) else {
+            return div().into_any_element();
+        };
+        let tkey = nav_rows::table_key(&conn_id, sc_name.as_deref(), &t.name);
+        let size = format_bytes(t.size_bytes);
+        // Flat trees have no database level to name.
+        let database = if dbname.is_empty() || schema == NONE { None } else { Some(dbname) };
+        let (tk, cid, tname, sc2, db2) = (tkey.clone(), conn_id, t.name.clone(), sc_name, database);
+        div()
+            .id(SharedString::from(format!("tbl-{tkey}")))
+            .h(px(h))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(8.))
+            .py(px(3.))
+            .t(s, 12.0)
+            .text_color(theme::TEXT)
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .hover(|st| st.bg(theme::BG_HOVER))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_key(&tk, cx)))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let pos = clamp_menu(e.position, "table", window);
+                this.nav_menu = Some(NavMenu::Table { pos, conn_id: cid.clone(), table: tname.clone(), schema: sc2.clone(), database: db2.clone() });
+                cx.notify();
+            }))
+            .child(chevron(s, open))
+            .child(div().flex_shrink_0().child("📋"))
+            .child(div().flex_shrink_0().child(t.name.clone()))
+            .when(!size.is_empty(), |d| d.child(size_label(s, &size)))
+            .into_any_element()
+    }
     /// Right-click on a database or schema node: the storage menu for it.
     fn storage_menu_listener(
         &self,
@@ -931,142 +1067,6 @@ impl Workspace {
             .cursor_pointer()
             .on_click(on_click)
             .child(chevron(s, open))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_tables_section(
-        &mut self,
-        conn_id: &str,
-        key: &str,
-        schema: Option<String>,
-        database: Option<String>,
-        tables: &[&Table],
-        filtering: bool,
-        s: Scale,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let open = filtering || self.expanded_tables.contains(key);
-        let k = key.to_string();
-        let mut section = div().mt(px(2.)).ml(px(16.)).flex().flex_col().child(
-            div()
-                .id(SharedString::from(format!("sec-{key}")))
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .px(px(8.))
-                .py(px(3.))
-                .t(s, 12.0)
-                .text_color(theme::TEXT_MUTED)
-                .font_weight(FontWeight::MEDIUM)
-                .cursor_pointer()
-                .hover(|st| st.text_color(theme::TEXT))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_key(&k, cx)))
-                .child(chevron(s, open))
-                .child("Tables")
-                .child(div().font_weight(FontWeight::NORMAL).opacity(0.7).child(format!("({})", tables.len()))),
-        );
-        if open {
-            for t in tables {
-                let tkey = match &schema {
-                    Some(sc) => format!("{conn_id}-{sc}-t-{}", t.name),
-                    None => format!("{conn_id}-t-{}", t.name),
-                };
-                let topen = self.expanded_tables.contains(&tkey);
-                let size = format_bytes(t.size_bytes);
-                let (tk, cid, tname, sc2, db2) = (tkey.clone(), conn_id.to_string(), t.name.clone(), schema.clone(), database.clone());
-                section = section.child(
-                    div()
-                        .id(SharedString::from(format!("tbl-{tkey}")))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .ml(px(16.))
-                        .px(px(8.))
-                        .py(px(3.))
-                        .t(s, 12.0)
-                        .text_color(theme::TEXT)
-                        .cursor_pointer()
-                        .hover(|st| st.bg(theme::BG_HOVER))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_key(&tk, cx)))
-                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            let pos = clamp_menu(e.position, "table", window);
-                            this.nav_menu = Some(NavMenu::Table { pos, conn_id: cid.clone(), table: tname.clone(), schema: sc2.clone(), database: db2.clone() });
-                            cx.notify();
-                        }))
-                        .child(chevron(s, topen))
-                        .child(div().flex_shrink_0().child("📋"))
-                        .child(div().flex_shrink_0().child(t.name.clone()))
-                        .when(!size.is_empty(), |d| d.child(size_label(s, &size))),
-                );
-                if topen {
-                    let mut cols = div().ml(px(16.)).pl(px(24.)).flex().flex_col();
-                    for c in &t.columns {
-                        cols = cols.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .px(px(8.))
-                                .py(px(2.))
-                                .t(s, 11.0)
-                                .text_color(theme::TEXT_MUTED)
-                                .min_w_full()
-                                .child(div().flex_shrink_0().whitespace_nowrap().child(c.name.clone()))
-                                .child(div().flex_1().min_w(px(12.)))
-                                .when(c.key == "PRI", |d| d.child(div().w(px(14.)).flex_shrink_0().child("🔑")))
-                                .child(div().flex_shrink_0().opacity(0.6).italic().child(c.column_type.clone())),
-                        );
-                    }
-                    section = section.child(cols);
-                }
-            }
-        }
-        section.into_any_element()
-    }
-
-    fn render_leaf_section(&mut self, key: &str, label: &'static str, icon: &'static str, names: Vec<String>, s: Scale, cx: &mut Context<Self>) -> AnyElement {
-        let open = self.expanded_tables.contains(key);
-        let k = key.to_string();
-        let mut section = div().mt(px(2.)).ml(px(16.)).flex().flex_col().child(
-            div()
-                .id(SharedString::from(format!("sec-{key}")))
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .px(px(8.))
-                .py(px(3.))
-                .t(s, 12.0)
-                .text_color(theme::TEXT_MUTED)
-                .font_weight(FontWeight::MEDIUM)
-                .cursor_pointer()
-                .hover(|st| st.text_color(theme::TEXT))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_key(&k, cx)))
-                .child(chevron(s, open))
-                .child(label)
-                .child(div().font_weight(FontWeight::NORMAL).opacity(0.7).child(format!("({})", names.len()))),
-        );
-        if open {
-            for n in names {
-                section = section.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .ml(px(16.))
-                        .pl(px(24.))
-                        .pr(px(8.))
-                        .py(px(3.))
-                        .t(s, 12.0)
-                        .text_color(theme::TEXT)
-                        .cursor_pointer()
-                        .hover(|st| st.bg(theme::BG_HOVER))
-                        .child(div().flex_shrink_0().child(icon))
-                        .child(n),
-                );
-            }
-        }
-        section.into_any_element()
     }
 
     // ─── Overlays ───────────────────────────────────────────────────────────

@@ -245,6 +245,22 @@ impl TextInput {
         }
     }
 
+    /// Empty the field as if the user had deleted its contents: undoable, and
+    /// it emits [`InputEvent::Changed`] like any edit, so whatever reacts to
+    /// typing reacts to this too. (`set_text` is for loading a value and
+    /// deliberately emits nothing.)
+    pub fn clear_as_edit(&mut self, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            return;
+        }
+        self.push_undo();
+        self.content.clear();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.changed(cx);
+    }
+
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
