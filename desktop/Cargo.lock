@@ -4101,6 +4101,7 @@ dependencies = [
  "anyhow",
  "aws-config",
  "aws-sdk-rds",
+ "block2",
  "chrono",
  "dirs 6.0.0",
  "embed-resource",

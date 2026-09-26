@@ -7,13 +7,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-pub const HEADER_HEIGHT: f32 = 40.0;
+/// Height of a card's header (title, column count, "Open query"), including
+/// its bottom border. The card is drawn at exactly this size, so the layout,
+/// the drawn card and the edge anchors all agree; they used to disagree (40px
+/// here against ~56px drawn), which made tall tables run into the one below
+/// and put arrows on the wrong row.
+pub const HEADER_HEIGHT: f32 = 56.0;
+/// One column row, including its top border.
 pub const ROW_HEIGHT: f32 = 24.0;
+/// The card's own border, top and bottom.
+pub const CARD_BORDER: f32 = 1.0;
 const MIN_WIDTH: f32 = 220.0;
 const WIDTH_PER_CHAR: f32 = 7.0;
 const COLUMN_PADDING: f32 = 56.0;
+/// Average width of a character of the bold 15.36px card title.
+const TITLE_CHAR_WIDTH: f32 = 8.6;
+/// Header padding, the gap and the "Open query" button beside the title.
+const HEADER_CHROME: f32 = 124.0;
 const CLUSTER_GAP_X: f32 = 180.0;
 const LAYER_GAP_X: f32 = 280.0;
+/// Least horizontal room between the widest table of one layer and the next
+/// layer, so wide tables never overlap their neighbours.
+const MIN_LAYER_SPACING: f32 = 60.0;
 const NODE_GAP_Y: f32 = 48.0;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,9 +154,14 @@ fn make_table_node(schema: &str, table: &Table, fk: &HashSet<String>) -> Diagram
         table_name: table.name.clone(),
         title,
         width,
-        height: HEADER_HEIGHT + columns.len() as f32 * ROW_HEIGHT,
+        height: card_height(columns.len()),
         columns,
     }
+}
+
+/// Height of a card with `columns` rows.
+pub fn card_height(columns: usize) -> f32 {
+    2.0 * CARD_BORDER + HEADER_HEIGHT + columns as f32 * ROW_HEIGHT
 }
 
 fn utf16_len(s: &str) -> usize {
@@ -149,10 +169,11 @@ fn utf16_len(s: &str) -> usize {
 }
 
 fn estimate_width(header: &str, columns: &[DiagramColumn]) -> f32 {
-    let widest = columns.iter().fold(utf16_len(header), |max, c| {
-        max.max(utf16_len(&format!("{}: {}", c.name, c.column_type)))
-    });
-    MIN_WIDTH.max(widest as f32 * WIDTH_PER_CHAR + COLUMN_PADDING)
+    let widest = columns.iter().fold(0, |max, c| max.max(utf16_len(&format!("{}: {}", c.name, c.column_type))));
+    // The header holds the bold title *and* the "Open query" button, so it
+    // needs more than the title's length at the body's character width.
+    let header_width = utf16_len(header) as f32 * TITLE_CHAR_WIDTH + HEADER_CHROME;
+    MIN_WIDTH.max(widest as f32 * WIDTH_PER_CHAR + COLUMN_PADDING).max(header_width)
 }
 
 fn make_edge(rel: &Relationship) -> DiagramEdge {
@@ -239,7 +260,14 @@ pub fn default_layout(graph: &DiagramGraph) -> Layout {
         layer_ids.sort_unstable();
         layer_ids.dedup();
         let mut component_width = 0.0f32;
+        // Layers are LAYER_GAP_X apart unless the previous layer holds a table
+        // too wide for that, in which case the next one moves right to clear it.
+        let mut layer_x = 0.0f32;
+        let mut prev_widest: Option<f32> = None;
         for layer in layer_ids {
+            if let Some(w) = prev_widest {
+                layer_x += LAYER_GAP_X.max(w + MIN_LAYER_SPACING);
+            }
             let layer_tables = sorted(
                 component
                     .iter()
@@ -251,14 +279,12 @@ pub fn default_layout(graph: &DiagramGraph) -> Layout {
             let mut widest = 0.0f32;
             for id in layer_tables {
                 let Some(table) = by_id.get(id.as_str()) else { continue };
-                layout.insert(
-                    id.clone(),
-                    Point { x: cluster_x + layer as f32 * LAYER_GAP_X, y: current_y },
-                );
+                layout.insert(id.clone(), Point { x: cluster_x + layer_x, y: current_y });
                 widest = widest.max(table.width);
                 current_y += table.height + NODE_GAP_Y;
             }
-            component_width = component_width.max(layer as f32 * LAYER_GAP_X + widest);
+            component_width = component_width.max(layer_x + widest);
+            prev_widest = Some(widest);
         }
         cluster_x += component_width + CLUSTER_GAP_X;
     }
@@ -388,6 +414,67 @@ pub fn merge_layout(graph: &DiagramGraph, default: &Layout, persisted: Option<&L
         .collect()
 }
 
+/// Positions of tables and column rows by id, so geometry lookups are O(1)
+/// rather than a scan of every table for every edge on every frame.
+#[derive(Debug, Default)]
+pub struct GraphIndex {
+    tables: HashMap<String, usize>,
+    rows: HashMap<String, usize>,
+}
+
+impl GraphIndex {
+    pub fn new(graph: &DiagramGraph) -> Self {
+        let mut tables = HashMap::with_capacity(graph.tables.len());
+        let mut rows = HashMap::new();
+        for (i, t) in graph.tables.iter().enumerate() {
+            tables.insert(t.id.clone(), i);
+            for (r, c) in t.columns.iter().enumerate() {
+                rows.insert(c.id.clone(), r);
+            }
+        }
+        GraphIndex { tables, rows }
+    }
+
+    pub fn table<'g>(&self, graph: &'g DiagramGraph, id: &str) -> Option<&'g DiagramTable> {
+        self.tables.get(id).and_then(|&i| graph.tables.get(i))
+    }
+}
+
+/// Where an edge meets a card: the right edge of the source's column row, or
+/// the left edge of the target's.
+pub fn anchor(graph: &DiagramGraph, index: &GraphIndex, layout: &Layout, table_id: &str, column_id: Option<&String>, source: bool) -> Option<(f32, f32)> {
+    let t = index.table(graph, table_id)?;
+    let p = layout.get(table_id)?;
+    let row = column_id.and_then(|c| index.rows.get(c).copied()).unwrap_or(0);
+    let x = if source { p.x + t.width } else { p.x };
+    let y = p.y + CARD_BORDER + HEADER_HEIGHT + row as f32 * ROW_HEIGHT + ROW_HEIGHT / 2.0;
+    Some((x, y))
+}
+
+/// The polyline an edge is drawn (and hit-tested) along, in diagram space.
+pub fn edge_points(graph: &DiagramGraph, index: &GraphIndex, layout: &Layout, e: &DiagramEdge) -> Vec<(f32, f32)> {
+    let (Some(s), Some(t)) = (
+        anchor(graph, index, layout, &e.source_table_id, e.source_column_ids.first(), true),
+        anchor(graph, index, layout, &e.target_table_id, e.target_column_ids.first(), false),
+    ) else {
+        return Vec::new();
+    };
+    if e.is_self_referential {
+        let loop_x = s.0 + 90.0;
+        return (0..=16)
+            .map(|i| {
+                let t_ = i as f32 / 16.0;
+                let mt = 1.0 - t_;
+                let x = mt.powi(3) * s.0 + 3.0 * mt * mt * t_ * loop_x + 3.0 * mt * t_ * t_ * loop_x + t_.powi(3) * t.0;
+                let y = mt.powi(3) * s.1 + 3.0 * mt * mt * t_ * s.1 + 3.0 * mt * t_ * t_ * t.1 + t_.powi(3) * t.1;
+                (x, y)
+            })
+            .collect();
+    }
+    let mid = ((s.0 + t.0) / 2.0).round();
+    vec![s, (mid, s.1), (mid, t.1), t]
+}
+
 pub fn effective_selected_edge_id(edges: &[DiagramEdge], selected: &str) -> String {
     if edges.iter().any(|e| e.id == selected) {
         selected.to_string()
@@ -498,8 +585,51 @@ mod tests {
         assert_eq!(layout["audit"], Point { x: 0.0, y: 0.0 });
         assert_eq!(layout["customers"], Point { x: 400.0, y: 0.0 });
         assert_eq!(layout["orders"], Point { x: 680.0, y: 0.0 });
+        let index = GraphIndex::new(&graph);
+        // Arrows leave the source's FK row and land on the target's PK row.
+        let pts = edge_points(&graph, &index, &layout, &graph.edges[0]);
+        let row_mid = CARD_BORDER + HEADER_HEIGHT + ROW_HEIGHT / 2.0;
+        assert_eq!(pts.first(), Some(&(680.0 + graph.tables[2].width, row_mid + ROW_HEIGHT)));
+        assert_eq!(pts.last(), Some(&(400.0, row_mid)));
         let filtered = filter_graph(&graph, "cust");
         assert_eq!(filtered.tables.len(), 2);
         assert_eq!(query_sql("mysql", "", "orders"), "SELECT * FROM `orders` LIMIT 100;");
+    }
+
+    fn overlaps(a: (&Point, &DiagramTable), b: (&Point, &DiagramTable)) -> bool {
+        a.0.x < b.0.x + b.1.width && b.0.x < a.0.x + a.1.width && a.0.y < b.0.y + b.1.height && b.0.y < a.0.y + a.1.height
+    }
+
+    #[test]
+    fn default_layout_never_overlaps_cards() {
+        // Tall tables stacked in one layer, and a table far wider than the
+        // layer gap feeding the next layer.
+        let many: Vec<(String, String)> = (0..60).map(|i| (format!("c{i}"), String::new())).collect();
+        let many: Vec<(&str, &str)> = many.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let wide = "a_table_with_an_exceptionally_long_descriptive_name_indeed";
+        let tree = SchemaTree {
+            tables: vec![
+                table("parent", &[("id", "PRI")]),
+                table("tall_a", &many),
+                table("tall_b", &many),
+                table(wide, &[("id", "PRI"), ("parent_id", "")]),
+                table("child", &[("id", "PRI"), ("wide_id", "")]),
+            ],
+            relationships: vec![
+                rel("fk_a", "tall_a", "c1", "parent", "id"),
+                rel("fk_b", "tall_b", "c1", "parent", "id"),
+                rel("fk_w", wide, "parent_id", "parent", "id"),
+                rel("fk_c", "child", "wide_id", wide, "id"),
+            ],
+            ..Default::default()
+        };
+        let graph = build_graph(&tree);
+        assert!(graph.tables.iter().any(|t| t.width > LAYER_GAP_X), "the fixture needs a table wider than the layer gap");
+        let layout = default_layout(&graph);
+        for (i, a) in graph.tables.iter().enumerate() {
+            for b in &graph.tables[i + 1..] {
+                assert!(!overlaps((&layout[&a.id], a), (&layout[&b.id], b)), "{} overlaps {}", a.id, b.id);
+            }
+        }
     }
 }

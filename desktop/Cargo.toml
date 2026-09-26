@@ -50,7 +50,8 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Securit
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSColor", "NSColorPanel", "NSColorSpace", "NSPanel", "NSResponder", "NSWindow"] }
+block2 = "0.6"
+objc2-app-kit = { version = "0.3.2", features = ["NSColor", "NSColorPanel", "NSColorSpace", "NSEvent", "NSPanel", "NSResponder", "NSWindow", "block2", "objc2-core-foundation"] }
 
 [build-dependencies]
 embed-resource = "3.0.9"

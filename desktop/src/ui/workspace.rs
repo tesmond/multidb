@@ -299,6 +299,25 @@ impl Workspace {
         ws.tabs.push(first);
         ws.sync_font_scale_input(cx);
         ws.load_saved_connections(cx);
+        // Trackpad pinch, which gpui does not deliver itself (see `ui::pinch`).
+        // Steps that arrive together are combined into one zoom, so a fast
+        // pinch costs one frame rather than one per step.
+        if let Some(mut steps) = crate::ui::pinch::install() {
+            cx.spawn_in(window, async move |this, cx| {
+                use futures::StreamExt;
+                while let Some(first) = steps.next().await {
+                    let mut batch = vec![first];
+                    while let Ok(m) = steps.try_recv() {
+                        batch.push(m);
+                    }
+                    let factor = crate::ui::pinch::factor(batch);
+                    if this.update_in(cx, |this, window, cx| this.diagram_pinch(factor, window, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         ws
     }
 

@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod model;
 pub mod nav_index;
 pub mod nav_rows;
+pub mod pinch;
 mod navigator;
 mod output;
 pub mod relationship;
