@@ -1,5 +1,6 @@
 //! Native GPUI front end (replaces the Svelte/WebView UI).
 
+pub mod about;
 pub mod diagram;
 pub mod color_panel;
 pub mod dialogs;
@@ -35,7 +36,7 @@ use gpui::{
 };
 use workspace::Workspace;
 
-actions!(multidb, [Quit, MenuUndo, MenuRedo, MenuCut, MenuCopy, MenuPaste, MenuSelectAll]);
+actions!(multidb, [About, Quit, MenuUndo, MenuRedo, MenuCut, MenuCopy, MenuPaste, MenuSelectAll]);
 
 /// First installed family from the old editor stack
 /// (`'JetBrains Mono','Fira Code','Cascadia Code',monospace`), unless
@@ -72,9 +73,12 @@ pub fn run() -> anyhow::Result<()> {
         render::bind_keys(cx);
         dialogs::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("f1", About, None)]);
         cx.set_menus(vec![
-            Menu { name: "multidb".into(), items: vec![MenuItem::action("Quit multidb", Quit)] },
+            Menu {
+                name: "multidb".into(),
+                items: vec![MenuItem::action("About multidb", About), MenuItem::separator(), MenuItem::action("Quit multidb", Quit)],
+            },
             Menu {
                 name: "Edit".into(),
                 items: vec![
@@ -88,6 +92,7 @@ pub fn run() -> anyhow::Result<()> {
                     MenuItem::os_action("Select All", MenuSelectAll, OsAction::SelectAll),
                 ],
             },
+            Menu { name: "Help".into(), items: vec![MenuItem::action("About multidb", About)] },
         ]);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);

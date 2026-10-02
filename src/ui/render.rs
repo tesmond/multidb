@@ -90,7 +90,9 @@ impl Workspace {
     }
 
     fn close_overlay(&mut self, _: &CloseOverlay, _: &mut Window, cx: &mut Context<Self>) {
-        if self.cell_popup.is_some() {
+        if self.about_open {
+            self.about_open = false;
+        } else if self.cell_popup.is_some() {
             self.cell_popup = None;
         } else if self.import_dialog.is_some() {
             self.import_dialog = None;
@@ -116,6 +118,7 @@ impl Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::close_overlay))
+            .on_action(cx.listener(Self::show_about))
             .size_full()
             .flex()
             .flex_col()
@@ -281,6 +284,9 @@ impl Workspace {
             root = root.child(el);
         }
         if let Some(el) = self.render_cell_popup(window, cx) {
+            root = root.child(el);
+        }
+        if let Some(el) = self.render_about_dialog(window, cx) {
             root = root.child(el);
         }
         root.into_any_element()

@@ -55,14 +55,16 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
 
 ## Project Structure
 
-- `desktop`: the whole application - GPUI front end, Rust backend, and command handlers
-- `desktop/src/ui`: GPUI window, workspace layout, navigator, SQL editor, results grid, and dialogs
-- `desktop/src/commands.rs`: command handlers the UI calls into
-- `desktop/src/connections.rs`: connection manager, DSN logic, and Kubernetes port-forwarding
-- `desktop/src/queries.rs`: query execution, cancellation, result conversion, and non-query handling
-- `desktop/src/schema.rs`: schema and primary-key inspection
-- `desktop/src/history.rs`: local metadata persistence in `history.db`
-- `desktop/src/backup.rs`: table backup, import, pg_dump import, and drop workflows
+- `src`: the whole application - GPUI front end, Rust backend, and command handlers
+- `icons`: application icons (macOS iconset PNGs and Windows `icon.ico`)
+- `packaging`: release packaging (macOS `.app` bundle script)
+- `src/ui`: GPUI window, workspace layout, navigator, SQL editor, results grid, and dialogs
+- `src/commands.rs`: command handlers the UI calls into
+- `src/connections.rs`: connection manager, DSN logic, and Kubernetes port-forwarding
+- `src/queries.rs`: query execution, cancellation, result conversion, and non-query handling
+- `src/schema.rs`: schema and primary-key inspection
+- `src/history.rs`: local metadata persistence in `history.db`
+- `src/backup.rs`: table backup, import, pg_dump import, and drop workflows
 
 ## Prerequisites
 
@@ -92,12 +94,12 @@ make check     # cargo check
 make test      # unit tests
 ```
 
-`make build` produces `desktop/target/release/multidb`; on macOS it also writes
-`desktop/target/release/MultiDB.app` and a zip beside it. Plain cargo works
+`make build` produces `target/release/multidb`; on macOS it also writes
+`target/release/MultiDB.app` and a zip beside it. Plain cargo works
 just as well:
 
 ```bash
-cargo build --release --manifest-path desktop/Cargo.toml
+cargo build --release
 ```
 
 ### Metal shaders on macOS
@@ -160,13 +162,20 @@ profile, start the app with a different `HOME`:
 
 ```bash
 HOME=/tmp/multidb-demo CFFIXED_USER_HOME=/tmp/multidb-demo \
-    cargo run --manifest-path desktop/Cargo.toml
+    cargo run
 ```
 
 ## App Icons
 
-Desktop icon assets are committed for packaging:
+Application icon assets live in `icons/`:
 
-- macOS icon: `build/appicon.icns` (built from `build/icon.iconset/`)
-- Windows icon: `build/windows/icon.ico`, embedded by `desktop/app.rc`
-- PNG icon: `build/icon.png`
+- macOS: `packaging/macos/bundle.sh` packages the supplied `icon_*.png` sizes
+  into `multidb.icns` with `iconutil`, then includes it in the `.app` bundle.
+  Run `make build`, or `make bundle` after building the release binary.
+- Windows: `icons/icon.ico` is embedded by `app.rc` as resource ID `1`,
+  which GPUI uses for the window icon. Cargo rebuilds it when the ICO changes.
+- About dialog: `icons/icon_256x256@2x.png` is embedded in the binary and
+  displayed with GPUI's `img` element.
+
+GPUI Component's SVG `Icon` and `IconName` types handle icons within the UI;
+the application icon uses native macOS bundle and Windows resource packaging.

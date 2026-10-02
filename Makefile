@@ -4,14 +4,14 @@
 # compile the Metal shaders ahead of time (needs Xcode, not just the Command
 # Line Tools).
 CARGO_FLAGS ?=
-CARGO = cargo $(1) --manifest-path desktop/Cargo.toml $(CARGO_FLAGS)
+CARGO = cargo $(1) $(CARGO_FLAGS)
 
 build:
 	@$(call CARGO,build) --release
-	@if [ "$$(uname -s)" = "Darwin" ]; then sh build/darwin/bundle.sh; fi
+	@if [ "$$(uname -s)" = "Darwin" ]; then sh packaging/macos/bundle.sh; fi
 
 bundle:
-	@sh build/darwin/bundle.sh
+	@sh packaging/macos/bundle.sh
 
 dev:
 	@$(call CARGO,run)

@@ -1,5 +1,5 @@
 fn main() {
-    println!("cargo:rerun-if-changed=../build/windows/icon.ico");
+    println!("cargo:rerun-if-changed=icons/icon.ico");
     println!("cargo:rerun-if-changed=app.rc");
 
     #[cfg(windows)]
