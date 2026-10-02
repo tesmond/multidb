@@ -1,0 +1,171 @@
+use crate::{connections::ConnectionManager, history::HistoryStore, models::ConnectionConfig};
+use anyhow::{anyhow, Result};
+use std::{collections::HashMap, path::PathBuf};
+use tokio::sync::{Mutex, OnceCell};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Default)]
+pub struct ConnectionTestRegistry {
+    tokens: Mutex<HashMap<String, CancellationToken>>,
+}
+
+impl ConnectionTestRegistry {
+    pub async fn register(&self, test_id: &str) -> CancellationToken {
+        self.tokens
+            .lock()
+            .await
+            .entry(test_id.to_string())
+            .or_insert_with(CancellationToken::new)
+            .clone()
+    }
+
+    pub async fn cancel(&self, test_id: &str) {
+        let token = self
+            .tokens
+            .lock()
+            .await
+            .entry(test_id.to_string())
+            .or_insert_with(CancellationToken::new)
+            .clone();
+        token.cancel();
+    }
+
+    pub async fn finish(&self, test_id: &str) {
+        self.tokens.lock().await.remove(test_id);
+    }
+}
+
+#[derive(Default)]
+pub struct AppState {
+    pub connections: ConnectionManager,
+    pub store: OnceCell<HistoryStore>,
+    pub query_cancels: Mutex<HashMap<String, CancellationToken>>,
+    pub connection_tests: ConnectionTestRegistry,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConnectionTestRegistry;
+
+    #[tokio::test]
+    async fn connection_test_registry_remembers_early_cancellation() {
+        let registry = ConnectionTestRegistry::default();
+        registry.cancel("test-1").await;
+
+        let token = registry.register("test-1").await;
+
+        assert!(token.is_cancelled());
+        registry.finish("test-1").await;
+    }
+}
+
+impl AppState {
+    pub async fn store(&self) -> Result<HistoryStore> {
+        self.store
+            .get_or_try_init(|| async { HistoryStore::open(history_db_path()).await })
+            .await
+            .cloned()
+    }
+
+    pub async fn get_config_or_saved(&self, conn_id: &str) -> Result<ConnectionConfig> {
+        if let Some(cfg) = self.connections.get_config(conn_id).await {
+            return Ok(cfg);
+        }
+
+        let store = self.store().await?;
+        store.load_saved_connection(conn_id).await
+    }
+
+    pub async fn get_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::AnyPool> {
+        self.refresh_aws_iam_connection_if_needed(conn_id).await?;
+        match self.connections.get_pool(conn_id).await {
+            Ok(pool) => Ok(pool),
+            Err(original) => {
+                let store = self.store().await?;
+                let cfg = store.load_saved_connection(conn_id).await?;
+                self.connections.connect(cfg).await?;
+                self.connections
+                    .get_pool(conn_id)
+                    .await
+                    .map_err(|err| anyhow!("{original}; reconnect failed: {err}"))
+            }
+        }
+    }
+
+    pub async fn get_pg_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::PgPool> {
+        self.refresh_aws_iam_connection_if_needed(conn_id).await?;
+        match self.connections.get_pg_pool(conn_id).await {
+            Ok(pool) => Ok(pool),
+            Err(original) => {
+                let store = self.store().await?;
+                let cfg = store.load_saved_connection(conn_id).await?;
+                self.connections.connect(cfg).await?;
+                self.connections
+                    .get_pg_pool(conn_id)
+                    .await
+                    .map_err(|err| anyhow!("{original}; reconnect failed: {err}"))
+            }
+        }
+    }
+
+    pub async fn get_pg_pool_for_database_or_reconnect(
+        &self,
+        conn_id: &str,
+        database: &str,
+    ) -> Result<sqlx::PgPool> {
+        self.get_pg_pool_or_reconnect(conn_id).await?;
+        self.connections
+            .get_pg_pool_for_database(conn_id, database)
+            .await
+    }
+
+    pub async fn get_mysql_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::MySqlPool> {
+        self.refresh_aws_iam_connection_if_needed(conn_id).await?;
+        match self.connections.get_mysql_pool(conn_id).await {
+            Ok(pool) => Ok(pool),
+            Err(original) => {
+                let store = self.store().await?;
+                let cfg = store.load_saved_connection(conn_id).await?;
+                self.connections.connect(cfg).await?;
+                self.connections
+                    .get_mysql_pool(conn_id)
+                    .await
+                    .map_err(|err| anyhow!("{original}; reconnect failed: {err}"))
+            }
+        }
+    }
+
+    pub async fn get_sqlite_pool_or_reconnect(&self, conn_id: &str) -> Result<sqlx::SqlitePool> {
+        match self.connections.get_sqlite_pool(conn_id).await {
+            Ok(pool) => Ok(pool),
+            Err(original) => {
+                let store = self.store().await?;
+                let cfg = store.load_saved_connection(conn_id).await?;
+                self.connections.connect(cfg).await?;
+                self.connections
+                    .get_sqlite_pool(conn_id)
+                    .await
+                    .map_err(|err| anyhow!("{original}; reconnect failed: {err}"))
+            }
+        }
+    }
+
+    async fn refresh_aws_iam_connection_if_needed(&self, conn_id: &str) -> Result<()> {
+        if !self
+            .connections
+            .should_refresh_iam_connection(conn_id)
+            .await
+        {
+            return Ok(());
+        }
+
+        let store = self.store().await?;
+        let cfg = store.load_saved_connection(conn_id).await?;
+        self.connections.connect(cfg).await
+    }
+}
+
+fn history_db_path() -> PathBuf {
+    let base = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
+    base.join("multidb").join("history.db")
+}
