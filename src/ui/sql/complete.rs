@@ -575,9 +575,93 @@ const COMMON_SQL_FUNCTIONS: &[&str] = &[
 
 fn driver_functions(driver: &str) -> &'static [&'static str] {
     match driver {
-        "mysql" => &["DATE_FORMAT", "GROUP_CONCAT", "IFNULL", "JSON_EXTRACT", "NOW"],
-        "postgres" => &["ARRAY_AGG", "DATE_TRUNC", "JSONB_BUILD_OBJECT", "NOW", "STRING_AGG"],
-        "sqlite" => &["DATETIME", "GROUP_CONCAT", "IFNULL", "JULIANDAY", "STRFTIME"],
+        "mysql" => &[
+            "CONCAT", "CONCAT_WS", "CURDATE", "DATE_ADD", "DATE_FORMAT", "DATE_SUB", "DATEDIFF", "FROM_UNIXTIME", "GROUP_CONCAT",
+            "IFNULL", "JSON_EXTRACT", "NOW", "STR_TO_DATE", "UNIX_TIMESTAMP",
+        ],
+        "postgres" => &["ARRAY_AGG", "DATE_TRUNC", "JSONB_BUILD_OBJECT", "NOW", "STRING_AGG", "TO_CHAR", "TO_TIMESTAMP"],
+        "sqlite" => &["DATETIME", "GROUP_CONCAT", "IFNULL", "JULIANDAY", "STRFTIME", "UNIXEPOCH"],
+        _ => &[],
+    }
+}
+
+/// Fuller per-driver function lists. Offered once at least one character has
+/// been typed, so an empty prefix isn't buried under hundreds of names.
+const MYSQL_FUNCTIONS: &[&str] = &[
+    "ABS", "ACOS", "ADDDATE", "ADDTIME", "AES_DECRYPT", "AES_ENCRYPT", "ANY_VALUE", "ASCII", "ASIN", "ATAN", "ATAN2", "AVG",
+    "BENCHMARK", "BIN", "BIT_AND", "BIT_LENGTH", "BIT_OR", "BIT_XOR", "CEIL", "CEILING", "CHARACTER_LENGTH", "CHARSET",
+    "CHAR_LENGTH", "COALESCE", "COLLATION", "COMPRESS", "CONCAT", "CONCAT_WS", "CONNECTION_ID", "CONV", "CONVERT", "CONVERT_TZ",
+    "COS", "COT", "COUNT", "CRC32", "CUME_DIST", "CURDATE", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER",
+    "CURTIME", "DATABASE", "DATE", "DATEDIFF", "DATE_ADD", "DATE_FORMAT", "DATE_SUB", "DAY", "DAYNAME", "DAYOFMONTH",
+    "DAYOFWEEK", "DAYOFYEAR", "DEGREES", "DENSE_RANK", "ELT", "EXP", "EXPORT_SET", "EXTRACT", "FIELD", "FIND_IN_SET",
+    "FIRST_VALUE", "FLOOR", "FORMAT", "FOUND_ROWS", "FROM_BASE64", "FROM_DAYS", "FROM_UNIXTIME", "GET_FORMAT", "GREATEST",
+    "GROUP_CONCAT", "HEX", "HOUR", "IF", "IFNULL", "INET6_ATON", "INET6_NTOA", "INET_ATON", "INET_NTOA", "INSERT", "INSTR",
+    "ISNULL", "IS_UUID", "JSON_ARRAY", "JSON_ARRAYAGG", "JSON_ARRAY_APPEND", "JSON_ARRAY_INSERT", "JSON_CONTAINS",
+    "JSON_CONTAINS_PATH", "JSON_DEPTH", "JSON_EXTRACT", "JSON_INSERT", "JSON_KEYS", "JSON_LENGTH", "JSON_MERGE_PATCH",
+    "JSON_MERGE_PRESERVE", "JSON_OBJECT", "JSON_OBJECTAGG", "JSON_OVERLAPS", "JSON_PRETTY", "JSON_QUOTE", "JSON_REMOVE",
+    "JSON_REPLACE", "JSON_SEARCH", "JSON_SET", "JSON_TABLE", "JSON_TYPE", "JSON_UNQUOTE", "JSON_VALID", "JSON_VALUE", "LAG",
+    "LAST_DAY", "LAST_INSERT_ID", "LAST_VALUE", "LCASE", "LEAD", "LEAST", "LEFT", "LENGTH", "LN", "LOCALTIME", "LOCALTIMESTAMP",
+    "LOCATE", "LOG", "LOG10", "LOG2", "LOWER", "LPAD", "LTRIM", "MAKEDATE", "MAKETIME", "MAKE_SET", "MAX", "MD5", "MICROSECOND",
+    "MID", "MIN", "MINUTE", "MOD", "MONTH", "MONTHNAME", "NOW", "NTH_VALUE", "NTILE", "NULLIF", "OCT", "OCTET_LENGTH", "ORD",
+    "PERCENT_RANK", "PERIOD_ADD", "PERIOD_DIFF", "PI", "POSITION", "POW", "POWER", "QUARTER", "QUOTE", "RADIANS", "RAND",
+    "RANK", "REGEXP_INSTR", "REGEXP_LIKE", "REGEXP_REPLACE", "REGEXP_SUBSTR", "REPEAT", "REPLACE", "REVERSE", "RIGHT", "ROUND",
+    "ROW_COUNT", "ROW_NUMBER", "RPAD", "RTRIM", "SCHEMA", "SECOND", "SEC_TO_TIME", "SHA1", "SHA2", "SIGN", "SIN", "SLEEP",
+    "SOUNDEX", "SPACE", "SQRT", "STD", "STDDEV", "STDDEV_POP", "STDDEV_SAMP", "STRCMP", "STR_TO_DATE", "SUBDATE", "SUBSTR",
+    "SUBSTRING", "SUBSTRING_INDEX", "SUBTIME", "SUM", "SYSDATE", "TAN", "TIME", "TIMEDIFF", "TIMESTAMP", "TIMESTAMPADD",
+    "TIMESTAMPDIFF", "TIME_FORMAT", "TIME_TO_SEC", "TO_BASE64", "TO_DAYS", "TO_SECONDS", "TRIM", "TRUNCATE", "UCASE",
+    "UNCOMPRESS", "UNHEX", "UNIX_TIMESTAMP", "UPPER", "USER", "UTC_DATE", "UTC_TIME", "UTC_TIMESTAMP", "UUID", "UUID_SHORT",
+    "VARIANCE", "VAR_POP", "VAR_SAMP", "VERSION", "WEEK", "WEEKDAY", "WEEKOFYEAR", "WEIGHT_STRING", "YEAR", "YEARWEEK",
+];
+
+const POSTGRES_FUNCTIONS: &[&str] = &[
+    "ABS", "ACOS", "AGE", "ARRAY_AGG", "ARRAY_APPEND", "ARRAY_CAT", "ARRAY_DIMS", "ARRAY_FILL", "ARRAY_LENGTH", "ARRAY_LOWER",
+    "ARRAY_NDIMS", "ARRAY_POSITION", "ARRAY_POSITIONS", "ARRAY_PREPEND", "ARRAY_REMOVE", "ARRAY_REPLACE", "ARRAY_TO_STRING",
+    "ARRAY_UPPER", "ASCII", "ASIN", "ATAN", "ATAN2", "AVG", "BIT_AND", "BIT_LENGTH", "BIT_OR", "BOOL_AND", "BOOL_OR", "BTRIM",
+    "CARDINALITY", "CBRT", "CEIL", "CEILING", "CHAR_LENGTH", "CHR", "CLOCK_TIMESTAMP", "COALESCE", "CONCAT", "CONCAT_WS",
+    "CORR", "COS", "COUNT", "COVAR_POP", "COVAR_SAMP", "CUME_DIST", "CURRENT_DATABASE", "CURRENT_DATE", "CURRENT_SCHEMA",
+    "CURRENT_SETTING", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "CURRVAL", "DATE_PART", "DATE_TRUNC", "DECODE",
+    "DEGREES", "DENSE_RANK", "DIV", "ENCODE", "EVERY", "EXP", "EXTRACT", "FIRST_VALUE", "FLOOR", "FORMAT", "GCD",
+    "GENERATE_SERIES", "GENERATE_SUBSCRIPTS", "GEN_RANDOM_UUID", "GREATEST", "INITCAP", "ISFINITE", "JSONB_AGG",
+    "JSONB_ARRAY_ELEMENTS", "JSONB_ARRAY_ELEMENTS_TEXT", "JSONB_ARRAY_LENGTH", "JSONB_BUILD_ARRAY", "JSONB_BUILD_OBJECT",
+    "JSONB_EACH", "JSONB_EACH_TEXT", "JSONB_EXTRACT_PATH", "JSONB_EXTRACT_PATH_TEXT", "JSONB_INSERT", "JSONB_OBJECT_AGG",
+    "JSONB_OBJECT_KEYS", "JSONB_PATH_EXISTS", "JSONB_PATH_QUERY", "JSONB_POPULATE_RECORD", "JSONB_PRETTY", "JSONB_SET",
+    "JSONB_STRIP_NULLS", "JSONB_TYPEOF", "JSON_AGG", "JSON_ARRAY_ELEMENTS", "JSON_ARRAY_ELEMENTS_TEXT", "JSON_ARRAY_LENGTH",
+    "JSON_BUILD_ARRAY", "JSON_BUILD_OBJECT", "JSON_EACH", "JSON_EACH_TEXT", "JSON_EXTRACT_PATH", "JSON_EXTRACT_PATH_TEXT",
+    "JSON_OBJECT_AGG", "JSON_OBJECT_KEYS", "JSON_POPULATE_RECORD", "JSON_STRIP_NULLS", "JSON_TYPEOF", "JUSTIFY_DAYS",
+    "JUSTIFY_HOURS", "JUSTIFY_INTERVAL", "LAG", "LASTVAL", "LAST_VALUE", "LCM", "LEAD", "LEAST", "LEFT", "LENGTH", "LN",
+    "LOCALTIME", "LOCALTIMESTAMP", "LOG", "LOG10", "LOWER", "LPAD", "LTRIM", "MAKE_DATE", "MAKE_INTERVAL", "MAKE_TIME",
+    "MAKE_TIMESTAMP", "MAKE_TIMESTAMPTZ", "MAX", "MD5", "MIN", "MOD", "MODE", "NEXTVAL", "NOW", "NTH_VALUE", "NTILE", "NULLIF",
+    "OCTET_LENGTH", "OVERLAY", "PERCENTILE_CONT", "PERCENTILE_DISC", "PERCENT_RANK", "PG_BACKEND_PID", "PG_CANCEL_BACKEND",
+    "PG_DATABASE_SIZE", "PG_RELATION_SIZE", "PG_SIZE_PRETTY", "PG_SLEEP", "PG_TABLE_SIZE", "PG_TERMINATE_BACKEND",
+    "PG_TOTAL_RELATION_SIZE", "PG_TYPEOF", "PI", "PLAINTO_TSQUERY", "POSITION", "POWER", "QUOTE_IDENT", "QUOTE_LITERAL",
+    "QUOTE_NULLABLE", "RADIANS", "RANDOM", "RANK", "REGEXP_MATCH", "REGEXP_MATCHES", "REGEXP_REPLACE", "REGEXP_SPLIT_TO_ARRAY",
+    "REGEXP_SPLIT_TO_TABLE", "REPEAT", "REPLACE", "REVERSE", "RIGHT", "ROUND", "ROW_NUMBER", "ROW_TO_JSON", "RPAD", "RTRIM",
+    "SCALE", "SESSION_USER", "SETSEED", "SETVAL", "SET_CONFIG", "SHA256", "SIGN", "SIN", "SPLIT_PART", "SQRT", "STARTS_WITH",
+    "STATEMENT_TIMESTAMP", "STDDEV", "STDDEV_POP", "STDDEV_SAMP", "STRING_AGG", "STRING_TO_ARRAY", "STRPOS", "SUBSTR",
+    "SUBSTRING", "SUM", "TAN", "TIMEOFDAY", "TO_CHAR", "TO_DATE", "TO_HEX", "TO_JSON", "TO_JSONB", "TO_NUMBER", "TO_REGCLASS",
+    "TO_TIMESTAMP", "TO_TSQUERY", "TO_TSVECTOR", "TRANSACTION_TIMESTAMP", "TRANSLATE", "TRIM", "TRUNC", "TS_HEADLINE",
+    "TS_RANK", "UNNEST", "UPPER", "VARIANCE", "VAR_POP", "VAR_SAMP", "VERSION", "WEBSEARCH_TO_TSQUERY", "WIDTH_BUCKET",
+];
+
+const SQLITE_FUNCTIONS: &[&str] = &[
+    "ABS", "ACOS", "ASIN", "ATAN", "ATAN2", "AVG", "CEIL", "CEILING", "CHANGES", "CHAR", "COALESCE", "COS", "COUNT",
+    "CUME_DIST", "DATE", "DATETIME", "DEGREES", "DENSE_RANK", "EXP", "FIRST_VALUE", "FLOOR", "FORMAT", "GLOB", "GROUP_CONCAT",
+    "HEX", "IFNULL", "IIF", "INSTR", "JSON", "JSONB", "JSON_ARRAY", "JSON_ARRAY_LENGTH", "JSON_EACH", "JSON_EXTRACT",
+    "JSON_GROUP_ARRAY", "JSON_GROUP_OBJECT", "JSON_INSERT", "JSON_OBJECT", "JSON_PATCH", "JSON_QUOTE", "JSON_REMOVE",
+    "JSON_REPLACE", "JSON_SET", "JSON_TREE", "JSON_TYPE", "JSON_VALID", "JULIANDAY", "LAG", "LAST_INSERT_ROWID", "LAST_VALUE",
+    "LEAD", "LENGTH", "LIKE", "LIKELIHOOD", "LIKELY", "LN", "LOAD_EXTENSION", "LOG", "LOG10", "LOG2", "LOWER", "LTRIM", "MAX",
+    "MIN", "MOD", "NTH_VALUE", "NTILE", "NULLIF", "OCTET_LENGTH", "PERCENT_RANK", "PI", "POW", "POWER", "PRINTF", "QUOTE",
+    "RADIANS", "RANDOM", "RANDOMBLOB", "RANK", "REPLACE", "ROUND", "ROW_NUMBER", "RTRIM", "SIGN", "SIN", "SOUNDEX",
+    "SQLITE_COMPILEOPTION_GET", "SQLITE_COMPILEOPTION_USED", "SQLITE_OFFSET", "SQLITE_SOURCE_ID", "SQLITE_VERSION", "SQRT",
+    "STRFTIME", "STRING_AGG", "SUBSTR", "SUBSTRING", "SUM", "TAN", "TIME", "TIMEDIFF", "TOTAL", "TOTAL_CHANGES", "TRIM",
+    "TRUNC", "TYPEOF", "UNHEX", "UNICODE", "UNIXEPOCH", "UNLIKELY", "UPPER", "ZEROBLOB",
+];
+
+fn extended_functions(driver: &str) -> &'static [&'static str] {
+    match driver {
+        "mysql" => MYSQL_FUNCTIONS,
+        "postgres" => POSTGRES_FUNCTIONS,
+        "sqlite" => SQLITE_FUNCTIONS,
         _ => &[],
     }
 }
@@ -840,7 +924,8 @@ fn smart_source(db: &DbSchema, ctx: &Context) -> Option<SourceResult> {
     };
 
     if mode == Mode::Expression {
-        for name in COMMON_SQL_FUNCTIONS.iter().chain(driver_functions(&db.driver)) {
+        let extended: &[&str] = if partial.is_empty() { &[] } else { extended_functions(&db.driver) };
+        for name in COMMON_SQL_FUNCTIONS.iter().chain(driver_functions(&db.driver)).chain(extended) {
             if name.to_lowercase().starts_with(&partial) {
                 add(
                     Completion { label: (*name).into(), kind: "function", detail: Some("SQL function".into()), boost: Some(78), apply: None },
@@ -1164,6 +1249,19 @@ mod tests {
         // differs; the smart ones sort first (boost 12 for the primary key).
         let l = labels("SELECT * FROM users u WHERE u.", false);
         assert_eq!(l, vec!["id", "name", "id", "name"]);
+    }
+
+    #[test]
+    fn mysql_offers_from_unixtime_in_expressions_only() {
+        let mut d = db();
+        d.driver = "mysql".into();
+        let engine = Engine::new(Dialect::MySql, Some(d));
+        let labels_for = |doc: &str| {
+            let results = engine.query(doc, doc.len(), false);
+            rank(doc, doc.len(), &results).into_iter().map(|o| o.completion.label).collect::<Vec<_>>()
+        };
+        assert!(labels_for("SELECT FROM_UN").contains(&"FROM_UNIXTIME".to_string()));
+        assert!(!labels_for("SELECT * FROM FROM_UN").contains(&"FROM_UNIXTIME".to_string()));
     }
 
     #[test]

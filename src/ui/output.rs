@@ -1211,6 +1211,9 @@ impl OutputPanel {
                 // the button came up.
                 *w = (start_w + delta).max(min);
             }
+            if let Some(u) = self.grid.user_sized.get_mut(idx) {
+                *u = true;
+            }
             cx.notify();
             return;
         }

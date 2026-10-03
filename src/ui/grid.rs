@@ -117,6 +117,10 @@ pub struct GridState {
     pub max_len: Vec<usize>,
     pub max_base_width: Vec<f32>,
     pub measured_rows: usize,
+    /// Columns the user has dragged to a width; a content fit never overrides these.
+    pub user_sized: Vec<bool>,
+    /// The content-based widths have been applied for the current result.
+    pub widths_fitted: bool,
     /// Rows are still arriving (set each frame by the results view).
     pub loading: bool,
     pub font_scale: f32,
@@ -260,8 +264,14 @@ impl GridState {
             self.max_len = columns.iter().map(|c| initial_text_len(c)).collect();
             self.max_base_width = vec![0.0; columns.len()];
             self.col_widths = Vec::new();
+            self.user_sized = vec![false; columns.len()];
+        } else if changed {
+            // Same columns, new rows: re-measure from scratch.
+            self.max_len = columns.iter().map(|c| initial_text_len(c)).collect();
+            self.max_base_width = vec![0.0; columns.len()];
         }
         self.measured_rows = 0;
+        self.widths_fitted = false;
     }
 
     pub fn on_rows_appended(&mut self, tab_id: &str, generation: u64) {
@@ -289,7 +299,9 @@ impl GridState {
             self.max_len = columns.iter().map(|c| initial_text_len(c)).collect();
             self.max_base_width = vec![0.0; columns.len()];
             self.col_widths.clear();
+            self.user_sized = vec![false; columns.len()];
             self.measured_rows = 0;
+            self.widths_fitted = false;
         }
         if self.col_widths.is_empty() && !columns.is_empty() {
             self.col_widths = (0..columns.len()).map(|i| self.column_width(i, &columns, cx)).collect();
@@ -297,7 +309,23 @@ impl GridState {
         if loading {
             return result.rows.len() > self.measured_rows;
         }
-        self.scan_rows(result, Some(SCAN_BUDGET), cx)
+        let more = self.scan_rows(result, Some(SCAN_BUDGET), cx);
+        if !more && !self.widths_fitted {
+            self.apply_fitted_widths(&columns, cx);
+        }
+        more
+    }
+
+    /// Once every row has been scanned, widen (or narrow) each column that the
+    /// user hasn't resized by hand to fit its content.
+    fn apply_fitted_widths(&mut self, columns: &[String], cx: &App) {
+        for i in 0..self.col_widths.len().min(columns.len()) {
+            if self.user_sized.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            self.col_widths[i] = self.column_width(i, columns, cx);
+        }
+        self.widths_fitted = true;
     }
 
     /// Scan everything not yet scanned (before an auto-fit, which needs it all).
