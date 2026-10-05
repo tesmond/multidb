@@ -10,6 +10,7 @@ mod queries;
 mod schema;
 mod state;
 pub mod ui;
+mod updater;
 
 pub fn run() {
     if let Err(e) = ui::run() {

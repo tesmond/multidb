@@ -27,6 +27,7 @@ pub mod storage;
 pub mod tabbar;
 pub mod textfmt;
 pub mod theme;
+pub mod update_dialog;
 pub mod widgets;
 pub mod workspace;
 
@@ -36,7 +37,7 @@ use gpui::{
 };
 use workspace::Workspace;
 
-actions!(multidb, [About, Quit, MenuUndo, MenuRedo, MenuCut, MenuCopy, MenuPaste, MenuSelectAll]);
+actions!(multidb, [About, CheckForUpdates, Quit, MenuUndo, MenuRedo, MenuCut, MenuCopy, MenuPaste, MenuSelectAll]);
 
 /// First installed family from the old editor stack
 /// (`'JetBrains Mono','Fira Code','Cascadia Code',monospace`), unless
@@ -77,7 +78,12 @@ pub fn run() -> anyhow::Result<()> {
         cx.set_menus(vec![
             Menu {
                 name: "multidb".into(),
-                items: vec![MenuItem::action("About multidb", About), MenuItem::separator(), MenuItem::action("Quit multidb", Quit)],
+                items: vec![
+                    MenuItem::action("About multidb", About),
+                    MenuItem::action("Check for Updates…", CheckForUpdates),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit multidb", Quit),
+                ],
             },
             Menu {
                 name: "Edit".into(),
@@ -92,7 +98,7 @@ pub fn run() -> anyhow::Result<()> {
                     MenuItem::os_action("Select All", MenuSelectAll, OsAction::SelectAll),
                 ],
             },
-            Menu { name: "Help".into(), items: vec![MenuItem::action("About multidb", About)] },
+            Menu { name: "Help".into(), items: vec![MenuItem::action("Check for Updates…", CheckForUpdates), MenuItem::separator(), MenuItem::action("About multidb", About)] },
         ]);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);

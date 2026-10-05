@@ -137,6 +137,12 @@ The macOS download is not currently signed as I do not have an Apple developer a
 
 MultiDB should be accessible.
 
+## Updating
+
+On macOS, **Help > Check for Updates…** looks up the latest release on GitHub and, after you confirm, downloads it, verifies its SHA-256 against the release's `.sha256` file, swaps it in for the running `.app` and restarts. If the app lives in a folder you can't write to, macOS asks for your administrator password. Development builds (`cargo run`) and non-macOS builds don't self-update.
+
+Because the bundle is only ad-hoc signed, macOS may ask again for Keychain access after an update.
+
 ## Testing And Checks
 
 ```bash

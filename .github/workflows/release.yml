@@ -89,9 +89,14 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Checksums
+        # The in-app updater refuses to install a zip without its .sha256.
+        run: |
+          cd dist
+          for f in *.zip; do sha256sum "$f" > "$f.sha256"; done
       - name: Create release
         run: |
-          gh release create "v${VERSION}" dist/*.zip \
+          gh release create "v${VERSION}" dist/*.zip dist/*.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "multidb v${VERSION}" \

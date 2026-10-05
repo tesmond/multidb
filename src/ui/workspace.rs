@@ -158,6 +158,8 @@ pub struct Workspace {
     pub title_dialog: Option<dialogs::TitleDialog>,
     /// The Help > About dialog is showing.
     pub about_open: bool,
+    /// The Help > Check for Updates dialog (`None` = closed).
+    pub app_update: Option<crate::ui::update_dialog::UpdateState>,
     pub terminate_confirm: Option<(TabId, DatabaseConnection)>,
     /// A long cell value opened in full from its eye button.
     pub cell_popup: Option<crate::ui::grid::CellPopup>,
@@ -266,6 +268,7 @@ impl Workspace {
             import_dialog: None,
             title_dialog: None,
             about_open: false,
+            app_update: None,
             terminate_confirm: None,
             cell_popup: None,
             cell_popup_scroll: ScrollHandle::new(),
