@@ -1010,8 +1010,8 @@ impl Workspace {
             .min_w_full()
             .child(div().flex_shrink_0().whitespace_nowrap().child(c.name.clone()))
             .when_some(bolt, |d, bolt| d.child(bolt))
-            .child(div().flex_1().min_w(px(12.)))
             .when(c.key == "PRI", |d| d.child(div().w(px(14.)).flex_shrink_0().child("🔑")))
+            .child(div().flex_1().min_w(px(12.)))
             .child(div().flex_shrink_0().opacity(0.6).italic().child(c.column_type.clone()))
             .into_any_element()
     }
