@@ -23,11 +23,11 @@ use crate::ui::nav_index::{Matches, NONE};
 use std::collections::HashSet;
 use std::ops::Range;
 
-/// Views or indexes: the two plain lists under a schema.
+/// The plain lists under a schema. Views are the only one: an index is shown
+/// on the columns it covers rather than as a list of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Leaf {
     Views,
-    Indexes,
 }
 
 /// What stands in for a connection's schema when there is none to show.
@@ -93,7 +93,7 @@ impl Metrics {
     pub fn section(&self) -> f32 {
         self.lh13 + 6.0
     }
-    /// "Tables"/"Views"/"Indexes" headers, tables and leaf items: 12px, 3px.
+    /// "Tables"/"Views" headers, tables and leaf items: 12px, 3px.
     pub fn item(&self) -> f32 {
         self.lh12 + 6.0
     }
@@ -159,25 +159,15 @@ pub fn views_of(tree: &SchemaTree, db: u32, schema: u32) -> &[Table] {
     }
 }
 
-pub fn indexes_of(tree: &SchemaTree, db: u32, schema: u32) -> &[String] {
-    if schema == NONE {
-        &tree.indexes
-    } else {
-        schema_of(tree, db, schema).map(|s| s.indexes.as_slice()).unwrap_or(&[])
-    }
-}
-
 pub fn leaf_count(tree: &SchemaTree, db: u32, schema: u32, leaf: Leaf) -> usize {
     match leaf {
         Leaf::Views => views_of(tree, db, schema).len(),
-        Leaf::Indexes => indexes_of(tree, db, schema).len(),
     }
 }
 
 pub fn leaf_name(tree: &SchemaTree, db: u32, schema: u32, leaf: Leaf, item: u32) -> &str {
     match leaf {
         Leaf::Views => views_of(tree, db, schema).get(item as usize).map(|v| v.name.as_str()).unwrap_or(""),
-        Leaf::Indexes => indexes_of(tree, db, schema).get(item as usize).map(|s| s.as_str()).unwrap_or(""),
     }
 }
 
@@ -255,7 +245,6 @@ fn write_key(out: &mut String, conn_id: &str, dbname: &str, kind: KeyKind, schem
         KeyKind::Tables => "tables",
         KeyKind::Table => "table",
         KeyKind::Leaf(Leaf::Views) => "views",
-        KeyKind::Leaf(Leaf::Indexes) => "indexes",
     });
     out.push(SEP);
     if let Some(sc) = schema {
@@ -351,7 +340,6 @@ impl Builder<'_> {
             self.tables_section(ci, schema, NONE, NONE, base + STEP);
             if !filtering {
                 self.leaf_section(ci, schema, NONE, NONE, Leaf::Views, base + STEP);
-                self.leaf_section(ci, schema, NONE, NONE, Leaf::Indexes, base + STEP);
             }
             return;
         }
@@ -385,7 +373,6 @@ impl Builder<'_> {
                 self.tables_section(ci, schema, db, si, section_indent);
                 if !filtering {
                     self.leaf_section(ci, schema, db, si, Leaf::Views, section_indent);
-                    self.leaf_section(ci, schema, db, si, Leaf::Indexes, section_indent);
                 }
             }
         }
@@ -586,6 +573,7 @@ mod tests {
             table_type: "table".into(),
             size_bytes: None,
             columns: cols.iter().map(|c| Column { name: (*c).into(), ..Default::default() }).collect(),
+            indexes: Vec::new(),
         }
     }
 
@@ -734,7 +722,6 @@ mod tests {
             tables_key("a", "x", Some("y")),
             tables_key("a", "x", None),
             leaf_key("a", "x", Some("y"), Leaf::Views),
-            leaf_key("a", "x", Some("y"), Leaf::Indexes),
             table_key("a", "x", Some("y"), "t"),
             table_key("a", "x", None, "t"),
             table_key("a", "x-schema", Some("y"), "t"),

@@ -755,7 +755,7 @@ mod tests {
     use crate::models::{Database, Schema, Table};
 
     fn table(name: &str, bytes: Option<i64>) -> Table {
-        Table { name: name.into(), table_type: "BASE TABLE".into(), size_bytes: bytes, columns: Vec::new() }
+        Table { name: name.into(), table_type: "BASE TABLE".into(), size_bytes: bytes, columns: Vec::new(), indexes: Vec::new() }
     }
 
     fn sizes(n: usize) -> Vec<TableSize> {

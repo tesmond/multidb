@@ -133,6 +133,24 @@ pub struct Relationship {
     pub on_delete: String,
 }
 
+/// One index on a table, as the navigator shows it when the pointer rests on a
+/// column that belongs to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableIndex {
+    pub name: String,
+    #[serde(default)]
+    pub unique: bool,
+    #[serde(default)]
+    pub primary: bool,
+    /// The access method (`BTREE`, `HASH`, …) where the database reports one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub method: String,
+    /// The indexed columns (or expressions), in index order.
+    #[serde(default)]
+    pub columns: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Table {
@@ -143,6 +161,8 @@ pub struct Table {
     pub size_bytes: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<Column>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexes: Vec<TableIndex>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -153,7 +173,6 @@ pub struct Schema {
     pub size_bytes: Option<i64>,
     pub tables: Vec<Table>,
     pub views: Vec<Table>,
-    pub indexes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -174,7 +193,6 @@ pub struct SchemaTree {
     pub size_bytes: Option<i64>,
     pub tables: Vec<Table>,
     pub views: Vec<Table>,
-    pub indexes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relationships: Vec<Relationship>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

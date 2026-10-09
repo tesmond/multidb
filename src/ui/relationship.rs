@@ -553,6 +553,7 @@ mod tests {
                 .iter()
                 .map(|(n, k)| Column { name: (*n).into(), column_type: "int".into(), nullable: false, default: String::new(), key: (*k).into() })
                 .collect(),
+            indexes: Vec::new(),
         }
     }
 

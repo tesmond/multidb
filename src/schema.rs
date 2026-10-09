@@ -1,6 +1,6 @@
 use crate::models::{
     Column as DbColumn, Database, Relationship, RelationshipColumnPair, RelationshipTableRef,
-    Schema, SchemaTree, Table,
+    Schema, SchemaTree, Table, TableIndex,
 };
 use anyhow::{anyhow, Context, Result};
 use sqlx::{
@@ -234,18 +234,6 @@ async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
             }
         }
 
-        schema.indexes = string_column(
-            pool,
-            r#"
-            SELECT DISTINCT INDEX_NAME
-            FROM information_schema.STATISTICS
-            WHERE TABLE_SCHEMA = ?
-            ORDER BY INDEX_NAME
-            "#,
-            &[&db_name],
-        )
-        .await
-        .unwrap_or_default();
         let schema_size: i64 = schema
             .tables
             .iter()
@@ -294,6 +282,9 @@ pub async fn get_mysql_schema(pool: &MySqlPool) -> Result<SchemaTree> {
         .fetch_all(pool)
         .await?;
 
+        // Index details are a nicety: a server that will not list them still
+        // gets its tables and columns shown.
+        let mut indexes = mysql_indexes_typed(pool, &db_name).await.unwrap_or_default();
         for row in tables {
             let name = decode_mysql_text(&row, 0)?;
             let table_type = decode_mysql_text(&row, 1)?;
@@ -310,24 +301,13 @@ pub async fn get_mysql_schema(pool: &MySqlPool) -> Result<SchemaTree> {
             };
             if table.table_type == "TABLE" {
                 table.columns = mysql_columns_typed(pool, &db_name, &table.name).await?;
+                table.indexes = indexes.remove(&table.name).unwrap_or_default();
                 schema.tables.push(table);
             } else {
                 schema.views.push(table);
             }
         }
 
-        schema.indexes = string_column_mysql(
-            pool,
-            r#"
-            SELECT DISTINCT INDEX_NAME
-            FROM information_schema.STATISTICS
-            WHERE TABLE_SCHEMA = ?
-            ORDER BY INDEX_NAME
-            "#,
-            &[&db_name],
-        )
-        .await
-        .unwrap_or_default();
         let schema_size: i64 = schema
             .tables
             .iter()
@@ -340,6 +320,127 @@ pub async fn get_mysql_schema(pool: &MySqlPool) -> Result<SchemaTree> {
     tree.size_bytes = Some(total_size);
     tree.relationships = relationships;
     Ok(tree)
+}
+
+/// One column of one index, as the catalogs report them: a row per column,
+/// ordered by table, then index, then position within the index.
+struct IndexRow {
+    table: String,
+    name: String,
+    unique: bool,
+    primary: bool,
+    method: String,
+    column: String,
+}
+
+/// Fold the per-column rows of [`IndexRow`] into each table's indexes. The rows
+/// must arrive grouped by table and index, columns in index order.
+fn group_index_rows(rows: Vec<IndexRow>) -> HashMap<String, Vec<TableIndex>> {
+    let mut out: HashMap<String, Vec<TableIndex>> = HashMap::new();
+    for row in rows {
+        let indexes = out.entry(row.table).or_default();
+        let continues_last = indexes.last().is_some_and(|last| last.name == row.name);
+        if continues_last {
+            if let Some(last) = indexes.last_mut() {
+                if !row.column.is_empty() {
+                    last.columns.push(row.column);
+                }
+            }
+        } else {
+            indexes.push(TableIndex {
+                name: row.name,
+                unique: row.unique,
+                primary: row.primary,
+                method: row.method,
+                columns: if row.column.is_empty() { Vec::new() } else { vec![row.column] },
+            });
+        }
+    }
+    out
+}
+
+/// Every index of every table in one MySQL schema, by table name.
+async fn mysql_indexes_typed(pool: &MySqlPool, db_name: &str) -> Result<HashMap<String, Vec<TableIndex>>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT TABLE_NAME, INDEX_NAME, CAST(NON_UNIQUE AS SIGNED), INDEX_TYPE, IFNULL(COLUMN_NAME, '')
+        FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = ?
+        ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX
+        "#,
+    )
+    .bind(db_name)
+    .fetch_all(pool)
+    .await?;
+    let mut parsed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name = decode_mysql_text(&row, 1)?;
+        parsed.push(IndexRow {
+            table: decode_mysql_text(&row, 0)?,
+            primary: name == "PRIMARY",
+            unique: decode_mysql_i64(&row, 2)? == 0,
+            method: decode_mysql_text(&row, 3)?,
+            column: decode_mysql_text(&row, 4)?,
+            name,
+        });
+    }
+    Ok(group_index_rows(parsed))
+}
+
+/// Every index of every table in one Postgres schema, by table name. Expression
+/// indexes list the expression where a column would be.
+async fn postgres_indexes(pool: &AnyPool, schema_name: &str) -> Result<HashMap<String, Vec<TableIndex>>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT t.relname::text,
+               i.relname::text,
+               CASE WHEN ix.indisunique THEN 1 ELSE 0 END,
+               CASE WHEN ix.indisprimary THEN 1 ELSE 0 END,
+               am.amname::text,
+               pg_get_indexdef(ix.indexrelid, k.n, true)::text,
+               k.n::int
+        FROM pg_index ix
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_am am ON am.oid = i.relam
+        CROSS JOIN LATERAL generate_series(1, ix.indnkeyatts::int) AS k(n)
+        WHERE n.nspname = $1
+          AND t.relkind IN ('r', 'p')
+        ORDER BY t.relname, i.relname, k.n
+        "#,
+    )
+    .bind(schema_name)
+    .fetch_all(pool)
+    .await?;
+    let mut parsed = Vec::with_capacity(rows.len());
+    for row in rows {
+        parsed.push(IndexRow {
+            table: decode_any_text(&row, 0)?,
+            name: decode_any_text(&row, 1)?,
+            unique: decode_any_i64(&row, 2)? != 0,
+            primary: decode_any_i64(&row, 3)? != 0,
+            method: decode_any_text(&row, 4)?.to_uppercase(),
+            column: unquote_pg_identifier(&decode_any_text(&row, 5)?),
+        });
+    }
+    Ok(group_index_rows(parsed))
+}
+
+/// `pg_get_indexdef` quotes a column name that needs it (`"UserId"`); the
+/// navigator compares against the plain names, so take the quotes off a single
+/// quoted identifier and leave an expression alone.
+fn unquote_pg_identifier(text: &str) -> String {
+    let text = text.trim();
+    if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+        let inner = &text[1..text.len() - 1];
+        // `"a"."b"` or an embedded quote that is not an escaped pair means this
+        // is not one identifier.
+        if !inner.replace("\"\"", "").contains('"') {
+            return inner.replace("\"\"", "\"");
+        }
+    }
+    text.to_string()
 }
 
 async fn mysql_table_sizes(pool: &AnyPool) -> Result<HashMap<String, i64>> {
@@ -481,6 +582,7 @@ async fn postgres_schema(pool: &AnyPool) -> Result<SchemaTree> {
         .fetch_all(pool)
         .await?;
 
+        let mut indexes = postgres_indexes(pool, &schema_name).await.unwrap_or_default();
         for row in rows {
             let name: String = row.try_get(0)?;
             let table_type: String = row.try_get(1)?;
@@ -497,19 +599,13 @@ async fn postgres_schema(pool: &AnyPool) -> Result<SchemaTree> {
             };
             if table.table_type == "TABLE" {
                 table.columns = postgres_columns(pool, &schema_name, &table.name).await?;
+                table.indexes = indexes.remove(&table.name).unwrap_or_default();
                 schema.tables.push(table);
             } else {
                 schema.views.push(table);
             }
         }
 
-        schema.indexes = string_column(
-            pool,
-            "SELECT indexname::text FROM pg_indexes WHERE schemaname = $1 ORDER BY indexname",
-            &[&schema_name],
-        )
-        .await
-        .unwrap_or_default();
         let schema_size: i64 = schema
             .tables
             .iter()
@@ -601,6 +697,7 @@ async fn sqlite_schema(pool: &AnyPool) -> Result<SchemaTree> {
         };
         if table.table_type == "TABLE" {
             table.columns = sqlite_columns(pool, &table.name).await?;
+            table.indexes = sqlite_indexes(pool, &table.name).await.unwrap_or_default();
             tree.tables.push(table);
         } else {
             tree.views.push(table);
@@ -616,14 +713,6 @@ async fn sqlite_schema(pool: &AnyPool) -> Result<SchemaTree> {
             .collect::<Vec<_>>(),
     )
     .await?;
-
-    tree.indexes = string_column(
-        pool,
-        "SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name",
-        &[],
-    )
-    .await
-    .unwrap_or_default();
 
     Ok(tree)
 }
@@ -902,6 +991,36 @@ async fn sqlite_columns(pool: &AnyPool, table: &str) -> Result<Vec<DbColumn>> {
             })
         })
         .collect()
+}
+
+async fn sqlite_indexes(pool: &AnyPool, table: &str) -> Result<Vec<TableIndex>> {
+    let rows = sqlx::query(&format!(
+        "PRAGMA index_list({})",
+        quote_sqlite_pragma(table)
+    ))
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::new();
+    for row in rows {
+        let name = decode_any_text(&row, "name")?;
+        let unique = decode_any_text(&row, "unique")? == "1";
+        // `origin` ("c" created, "u" unique constraint, "pk" primary key) only
+        // exists from SQLite 3.8.9.
+        let origin = decode_any_text(&row, "origin").unwrap_or_default();
+        let parts = sqlx::query(&format!(
+            "PRAGMA index_info({})",
+            quote_sqlite_pragma(&name)
+        ))
+        .fetch_all(pool)
+        .await?;
+        let mut columns = Vec::new();
+        for part in parts {
+            let column = decode_any_text(&part, "name")?;
+            columns.push(if column.is_empty() { "(expression)".to_string() } else { column });
+        }
+        out.push(TableIndex { name, unique, primary: origin == "pk", method: String::new(), columns });
+    }
+    Ok(out)
 }
 
 async fn sqlite_table_sizes(pool: &AnyPool) -> Result<HashMap<String, i64>> {

@@ -3,16 +3,16 @@
 //! An RDS IAM auth token is signed with the caller's AWS credentials and is
 //! only good for fifteen minutes, so one is generated for every connect and
 //! reconnect. Signing needs live credentials, and on the SSO profiles most
-//! people use those come from a cached access token that expires — typically
-//! once a day, and always at the least convenient moment.
+//! people use those come from an SSO session that outlasts them: the role
+//! credentials and the SSO access token behind them lapse within the hour,
+//! while the sign-in itself lasts for hours or days and lets the SDK mint new
+//! ones without anybody being asked for anything.
 //!
-//! Left alone, that surfaces as a connection failure telling the user to go and
-//! run `aws sso login` themselves. This module does it for them: it checks the
-//! cached SSO session before signing, and signs in again if the session has
-//! expired or was never there. If a token still fails to sign for a
-//! credentials-shaped reason, it signs in once more and retries, because a
-//! session can lapse between the check and the call. A connection only fails
-//! when signing in fails.
+//! So the sign-in is the last thing tried, not the first. A token is always
+//! generated straight away, and the AWS SDK renews whatever it can from the
+//! session on its own. Only when it cannot, because the session itself has
+//! expired or was never there, is `aws sso login` run (it opens a browser), and
+//! the token generated again. A connection only fails when that fails too.
 
 use crate::ipc_diagnostics;
 use crate::models::ConnectionConfig;
@@ -24,35 +24,28 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SDK_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// `aws sso login` opens a browser and waits for the person to approve there,
 /// so this is a human timeout rather than a network one.
 const SSO_LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
-/// Treat a session that is about to lapse as already lapsed, so a token is
-/// never signed with credentials that die in the middle of connecting.
-const SSO_EXPIRY_MARGIN: chrono::TimeDelta = chrono::TimeDelta::minutes(2);
 /// How long an RDS auth token is valid for. `AWS_IAM_REFRESH_AGE` in
 /// `connections` reconnects before this runs out.
 pub const TOKEN_LIFETIME_SECS: u64 = 900;
 
-/// Generate an RDS IAM auth token for `cfg`, signing in to AWS first if that is
-/// what the credentials need.
+/// Generate an RDS IAM auth token for `cfg`, signing in to AWS SSO only if the
+/// credentials cannot be had without.
 pub async fn auth_token(cfg: &ConnectionConfig) -> Result<String> {
     let profile = AwsProfile::resolve(cfg);
 
-    // The common case for an SSO profile: yesterday's session has lapsed. Renew
-    // it before signing rather than after failing to. Best-effort, though — the
-    // SDK looks at environment variables and instance roles before it looks at
-    // the profile, so a stale SSO session is not proof that the connection is
-    // going to fail, and a failure to sign in must not become one.
-    let mut login_failure = None;
-    if profile.sso_session_lapsed() {
-        login_failure = ensure_signed_in(&profile).await.err();
-    }
-
+    // Try for a token before anything else. The SDK finds credentials by itself
+    // (environment, instance role, a cached role session) and renews an expired
+    // SSO access token from the SSO session's refresh token, so a profile whose
+    // sign-in is still good costs nothing here, however long ago its last token
+    // or access token ran out.
+    let attempt_started = Instant::now();
     let first = match generate_token(cfg, &profile).await {
         Ok(token) => return Ok(token),
         Err(err) => err,
@@ -63,15 +56,13 @@ pub async fn auth_token(cfg: &ConnectionConfig) -> Result<String> {
     if !profile.is_sso() || !looks_like_credentials_problem(&first) {
         return Err(first);
     }
-    if let Some(failure) = login_failure {
-        // Already tried before signing, so there is nothing new to attempt.
-        return Err(first.context(format!("signing in to AWS SSO also failed: {failure}")));
-    }
-    // The session was live at the check and is not now, or it was never the
-    // problem until the SDK said so. Either way, one sign-in and one retry.
-    ensure_signed_in(&profile)
+
+    // The SDK could not get credentials and said so in terms of the session:
+    // it has expired (or been revoked, or never started). One sign-in and one
+    // retry.
+    ensure_signed_in(&profile, attempt_started)
         .await
-        .with_context(|| format!("AWS credentials for profile {} were rejected: {first}", profile.name))?;
+        .with_context(|| format!("AWS credentials for profile {} could not be obtained ({first}), and signing in to AWS SSO failed", profile.name))?;
     generate_token(cfg, &profile).await
 }
 
@@ -127,10 +118,27 @@ fn login_lock(profile: &str) -> Arc<tokio::sync::Mutex<()>> {
     Arc::clone(locks.entry(profile.to_string()).or_default())
 }
 
-/// Make sure the profile has a usable SSO session, signing in if it does not.
-/// Idempotent: whoever gets the lock second usually finds the session already
-/// renewed and does nothing.
-async fn ensure_signed_in(profile: &AwsProfile) -> Result<()> {
+/// When each profile last finished an `aws sso login` from here.
+fn last_logins() -> &'static Mutex<HashMap<String, Instant>> {
+    static LOGINS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    LOGINS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn last_login(profile: &str) -> Option<Instant> {
+    last_logins().lock().ok()?.get(profile).copied()
+}
+
+fn record_login(profile: &str) {
+    if let Ok(mut logins) = last_logins().lock() {
+        logins.insert(profile.to_string(), Instant::now());
+    }
+}
+
+/// Sign the profile in to SSO. `attempt_started` is when the caller began the
+/// attempt that found the session wanting: if somebody else's sign-in finished
+/// after that, the session is fresh and there is nothing to do, which is what
+/// whoever gets the lock second finds when several connections fail together.
+async fn ensure_signed_in(profile: &AwsProfile, attempt_started: Instant) -> Result<()> {
     let Some(start_url) = profile.sso_start_url.as_deref() else {
         return Err(anyhow!(
             "AWS profile {} is not configured for SSO, so its credentials cannot be renewed automatically. \
@@ -140,7 +148,7 @@ async fn ensure_signed_in(profile: &AwsProfile) -> Result<()> {
     };
     let lock = login_lock(&profile.name);
     let _held = lock.lock().await;
-    if !profile.sso_session_lapsed() {
+    if last_login(&profile.name).is_some_and(|finished| finished >= attempt_started) {
         return Ok(());
     }
 
@@ -163,12 +171,17 @@ async fn ensure_signed_in(profile: &AwsProfile) -> Result<()> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // Abandoning the wait (a cancelled test, a timeout) must not leave
+            // a login waiting on a browser tab nobody is looking at.
+            .kill_on_drop(true)
             .output(),
     )
     .await?
     .with_context(|| format!("run {} sso login", program.display()))?;
 
-    if !output.status.success() {
+    if output.status.success() {
+        record_login(&profile.name);
+    } else {
         let detail = String::from_utf8_lossy(&output.stderr);
         let detail = detail.trim();
         return Err(anyhow!(
@@ -200,12 +213,11 @@ fn child_path(program: Option<&Path>) -> OsString {
     crate::connections::external_tool_path(program)
 }
 
-// ─── Reading the profile and the SSO cache ──────────────────────────────────
+// ─── Reading the profile ────────────────────────────────────────────────────
 
 /// What this needs to know about the AWS profile a connection uses: its name,
-/// and the SSO start URL when it signs in through SSO. The start URL is the key
-/// to the cached session, and its absence is what says "this profile cannot be
-/// renewed by signing in".
+/// and the SSO start URL when it signs in through SSO. The start URL's absence
+/// is what says "this profile cannot be renewed by signing in".
 #[derive(Debug, Clone, PartialEq)]
 pub struct AwsProfile {
     pub name: String,
@@ -221,18 +233,6 @@ impl AwsProfile {
 
     fn is_sso(&self) -> bool {
         self.sso_start_url.is_some()
-    }
-
-    /// True when this is an SSO profile whose cached session is missing, about
-    /// to expire, or already expired — i.e. when signing in is worth doing.
-    fn sso_session_lapsed(&self) -> bool {
-        let Some(start_url) = self.sso_start_url.as_deref() else {
-            return false;
-        };
-        let Some(dir) = sso_cache_dir() else {
-            return true;
-        };
-        !cached_session_is_live(&dir, start_url, chrono::Utc::now())
     }
 }
 
@@ -251,11 +251,6 @@ fn config_path() -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     dirs::home_dir().map(|home| home.join(".aws").join("config"))
-}
-
-fn sso_cache_dir() -> Option<PathBuf> {
-    let dir = dirs::home_dir()?.join(".aws").join("sso").join("cache");
-    dir.is_dir().then_some(dir)
 }
 
 /// The SSO start URL a profile signs in to, from the text of `~/.aws/config`.
@@ -300,53 +295,6 @@ fn ini_section(text: &str, wanted: &str) -> Option<HashMap<String, String>> {
         }
     }
     inside.then_some(entries)
-}
-
-/// Whether the SSO cache holds a session for `start_url` that is still good.
-///
-/// The cache is a directory of JSON blobs keyed by a hash the CLI computes, and
-/// it also holds client registrations that have no `startUrl` at all. Rather
-/// than reproduce the hashing, read them all and look for one that matches.
-fn cached_session_is_live(dir: &Path, start_url: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        if session_expiry(&text, start_url).is_some_and(|expires| expires > now + SSO_EXPIRY_MARGIN) {
-            return true;
-        }
-    }
-    false
-}
-
-/// When the cached session in `text` expires, if it is for `start_url` at all.
-fn session_expiry(text: &str, start_url: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    let cached = value.get("startUrl")?.as_str()?;
-    if cached.trim_end_matches('/') != start_url.trim_end_matches('/') {
-        return None;
-    }
-    value.get("accessToken")?.as_str()?;
-    let expires = value.get("expiresAt")?.as_str()?;
-    parse_expiry(expires)
-}
-
-/// `expiresAt` is RFC 3339, but the CLI has also written a trailing-`UTC` form
-/// (`2026-09-18T07:21:33UTC`) that the standard parsers reject.
-fn parse_expiry(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    let value = value.trim();
-    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(value) {
-        return Some(parsed.with_timezone(&chrono::Utc));
-    }
-    let naive = value.strip_suffix("UTC").unwrap_or(value).trim();
-    chrono::NaiveDateTime::parse_from_str(naive, "%Y-%m-%dT%H:%M:%S")
-        .ok()
-        .map(|naive| naive.and_utc())
 }
 
 /// Whether an error from the SDK is the kind that signing in again would fix.
@@ -423,55 +371,6 @@ sso_region = eu-west-1
     }
 
     #[test]
-    fn a_cached_session_counts_only_while_it_has_comfortably_long_to_run() {
-        let dir = tempdir();
-        let url = "https://acme.awsapps.com/start";
-        let now = chrono::Utc::now();
-        let write = |name: &str, body: String| std::fs::write(dir.join(name), body).expect("write cache file");
-        let entry = |expires: chrono::DateTime<chrono::Utc>| {
-            format!(
-                r#"{{"startUrl":"{url}","accessToken":"tok","expiresAt":"{}"}}"#,
-                expires.to_rfc3339()
-            )
-        };
-
-        // Nothing cached at all.
-        assert!(!cached_session_is_live(&dir, url, now));
-
-        // A registration blob, which has no session in it.
-        write("registration.json", r#"{"clientId":"c","clientSecret":"s"}"#.to_string());
-        assert!(!cached_session_is_live(&dir, url, now));
-
-        // Expired, and expiring inside the margin: both need signing in again.
-        write("old.json", entry(now - chrono::TimeDelta::hours(1)));
-        assert!(!cached_session_is_live(&dir, url, now));
-        write("nearly.json", entry(now + chrono::TimeDelta::seconds(30)));
-        assert!(!cached_session_is_live(&dir, url, now));
-
-        // Someone else's session does not count for this profile.
-        write("other.json", entry(now + chrono::TimeDelta::hours(8)).replace(url, "https://other.awsapps.com/start"));
-        assert!(!cached_session_is_live(&dir, url, now));
-
-        write("good.json", entry(now + chrono::TimeDelta::hours(8)));
-        assert!(cached_session_is_live(&dir, url, now));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_trailing_slash_does_not_make_it_a_different_start_url() {
-        let expires = (chrono::Utc::now() + chrono::TimeDelta::hours(1)).to_rfc3339();
-        let text = format!(r#"{{"startUrl":"https://acme.awsapps.com/start/","accessToken":"t","expiresAt":"{expires}"}}"#);
-        assert!(session_expiry(&text, "https://acme.awsapps.com/start").is_some());
-    }
-
-    #[test]
-    fn both_spellings_of_an_expiry_are_understood() {
-        assert!(parse_expiry("2026-09-18T07:21:33Z").is_some());
-        assert!(parse_expiry("2026-09-18T07:21:33UTC").is_some());
-        assert!(parse_expiry("whenever").is_none());
-    }
-
-    #[test]
     fn only_credentials_failures_are_worth_signing_in_for() {
         let sso = anyhow!(
             "generate AWS RDS auth token: the SSO session associated with this profile has expired or is \
@@ -487,14 +386,17 @@ sso_region = eu-west-1
     }
 
     #[test]
+    fn a_sign_in_that_finished_after_an_attempt_began_satisfies_it() {
+        let profile = format!("test-profile-{}", uuid::Uuid::new_v4());
+        assert!(last_login(&profile).is_none());
+        let began = Instant::now();
+        record_login(&profile);
+        assert!(last_login(&profile).is_some_and(|finished| finished >= began));
+    }
+
+    #[test]
     fn the_login_command_names_the_profile() {
         assert_eq!(sso_login_args("ops"), vec!["sso", "login", "--profile", "ops"]);
         assert_eq!(sso_login_args("default"), vec!["sso", "login", "--profile", "default"]);
-    }
-
-    fn tempdir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("multidb-sso-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir
     }
 }

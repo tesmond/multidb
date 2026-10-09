@@ -218,8 +218,15 @@ impl ConnectionManager {
         cancel: CancellationToken,
     ) -> Result<()> {
         ipc_diagnostics::set_test_connection_stage("prepare_runtime_connection_config");
-        let (effective, mut port_forward) =
-            prepare_runtime_connection_config(&cfg, Some(&cancel)).await?;
+        // Preparing the connection can take longest of all: it signs in to AWS,
+        // which waits on a browser. A test that has been cancelled (its dialog
+        // closed) must stop there too, and dropping the future takes the
+        // `aws sso login` or port-forward child process with it.
+        let prepared = tokio::select! {
+            _ = cancel.cancelled() => Err(anyhow!("connection test cancelled")),
+            prepared = prepare_runtime_connection_config(&cfg, Some(&cancel)) => prepared,
+        };
+        let (effective, mut port_forward) = prepared?;
         let connection_test = async {
             if effective.driver == "mysql" {
                 match connect_mysql_pool(&effective, IAM_MAX_CONNECTIONS, &cfg.name).await {

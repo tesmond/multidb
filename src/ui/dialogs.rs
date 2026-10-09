@@ -596,15 +596,19 @@ impl Workspace {
             let res = fut.await;
             this.update(cx, |this, cx| {
                 let Some(d) = &mut this.conn_dialog else { return };
+                // The dialog this test belonged to may have been closed, and
+                // another opened, while it ran. A result for a test the dialog
+                // on screen does not own must not land in it as an error.
+                if d.active_test_id != test_id {
+                    return;
+                }
                 match res {
                     Ok(()) => d.test_result = "Connection successful!".into(),
                     Err(e) => d.test_error = if d.stop_requested { "Connection test cancelled".into() } else { e },
                 }
-                if d.active_test_id == test_id {
-                    d.active_test_id.clear();
-                    d.testing = false;
-                    d.stopping = false;
-                }
+                d.active_test_id.clear();
+                d.testing = false;
+                d.stopping = false;
                 cx.notify();
             })
             .ok();

@@ -75,9 +75,23 @@ pub struct TabDrag {
     pub indicator_x: Pixels,
 }
 
+/// The hover card for a column that is part of one or more indexes.
+#[derive(Clone)]
+pub struct NavIndexTip {
+    /// Which column row raised it, so only that row can take it down again.
+    pub key: String,
+    /// Where the pointer was when it arrived on the bolt.
+    pub pos: Point<Pixels>,
+    pub column: String,
+    /// The indexes the column belongs to.
+    pub indexes: Vec<crate::models::TableIndex>,
+}
+
 #[derive(Clone)]
 pub enum NavMenu {
     Table { pos: Point<Pixels>, conn_id: String, table: String, schema: Option<String>, database: Option<String> },
+    /// A view in the tree: quick `SELECT *` and copy name.
+    View { pos: Point<Pixels>, conn_id: String, view: String, schema: Option<String>, database: Option<String> },
     Database { pos: Point<Pixels>, conn_id: String },
     /// A database or schema node inside a connection's tree.
     DatabaseNode { pos: Point<Pixels>, conn_id: String, scope: StorageScope },
@@ -143,6 +157,7 @@ pub struct Workspace {
     pub nav_filter: Entity<TextInput>,
     pub font_scale_input: Entity<TextInput>,
     pub nav_menu: Option<NavMenu>,
+    pub nav_index_tip: Option<NavIndexTip>,
     pub nav_drag: Option<NavDrag>,
     pub suppress_nav_click: bool,
     pub testing_conn_id: Option<String>,
@@ -256,6 +271,7 @@ impl Workspace {
             nav_filter,
             font_scale_input,
             nav_menu: None,
+            nav_index_tip: None,
             nav_drag: None,
             suppress_nav_click: false,
             testing_conn_id: None,
@@ -1354,9 +1370,13 @@ pub fn run_test_connection(cfg: ConnectionConfig, test_id: String) -> impl std::
             let state = state.clone();
             async move { commands::test_connection(state, cfg, id).await }
         }));
+        let abort = task.abort_handle();
         let out = tokio::select! {
             r = task => r.map_err(|e| format!("backend command task failed: {e}")).and_then(|r| r),
             _ = tokio::time::sleep(Duration::from_secs(65)) => {
+                // Stop the test along with the wait for it, rather than leaving
+                // it running (and an `aws sso login` open) behind the error.
+                abort.abort();
                 let stage = crate::ipc_diagnostics::get_test_connection_stage(&test_id).unwrap_or_else(|| "unknown".into());
                 let checks = crate::ipc_diagnostics::recommended_checks_for_stage(&stage);
                 Err(format!("test_connection timed out in backend watchdog after 65s (last stage: {stage}). Recommended next checks: {checks}"))

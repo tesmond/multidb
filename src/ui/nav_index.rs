@@ -171,6 +171,7 @@ mod tests {
                 .iter()
                 .map(|c| Column { name: (*c).into(), ..Default::default() })
                 .collect(),
+            indexes: Vec::new(),
         }
     }
 
@@ -185,7 +186,6 @@ mod tests {
                     table("order_items", &["order_id", "sku"]),
                 ],
                 views: Vec::new(),
-                indexes: Vec::new(),
             }],
             ..Default::default()
         }

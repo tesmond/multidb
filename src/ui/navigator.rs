@@ -1,6 +1,7 @@
 //! Connection navigator (`Navigator.svelte`): header menus, table filter,
 //! server groups, connection tree, drag and drop, context menus.
 
+use crate::models::TableIndex;
 use crate::ui::dialogs::{self, Btn};
 use crate::ui::model::format_bytes;
 use crate::ui::nav_index::NONE;
@@ -10,7 +11,7 @@ use crate::ui::theme::{self, Rgba};
 use crate::ui::widgets::scroll;
 use crate::ui::widgets::spaced_text::spaced_text;
 use crate::ui::widgets::{overlay, separator, shadow, Scale, TextExt};
-use crate::ui::workspace::{DragKind, NavDrag, NavMenu, Workspace};
+use crate::ui::workspace::{DragKind, NavDrag, NavIndexTip, NavMenu, Workspace};
 use gpui::{
     deferred, div, point, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, FontWeight, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
@@ -34,7 +35,6 @@ fn nav_metrics(s: Scale) -> nav_rows::Metrics {
 fn leaf_icon(leaf: Leaf) -> &'static str {
     match leaf {
         Leaf::Views => "👁",
-        Leaf::Indexes => "⚡",
     }
 }
 
@@ -48,6 +48,7 @@ fn clamp_menu(pos: Point<Pixels>, kind: &str, window: &Window) -> Point<Pixels> 
     let h = match kind {
         "database" => 318.0,
         "databaseNode" => 50.0,
+        "view" => 90.0,
         "dropConfirm" => 120.0,
         _ => 165.0,
     };
@@ -592,6 +593,14 @@ impl Workspace {
             .min_h(px(0.))
             .overflow_scroll()
             .track_scroll(&self.nav_scroll)
+            // Scrolling can carry the bolt a card belongs to out from under
+            // the pointer (or out of the drawn rows altogether), and neither
+            // reports the pointer leaving.
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                if this.nav_index_tip.take().is_some() {
+                    cx.notify();
+                }
+            }))
             // One child holding the rows. Its padding lives here rather than on
             // the scroll container so that it counts towards the content size.
             // The right padding keeps the rows clear of the vertical scrollbar,
@@ -680,59 +689,16 @@ impl Workspace {
                 self.section_header(key, "Tables", count, open, h, s, cx)
             }
             RowKind::Table { conn, db, schema, table, open } => self.render_table_row(conn, db, schema, table, open, h, s, cx),
-            RowKind::Column { conn, db, schema, table, column } => {
-                let tree = self.connections[conn].schema.clone();
-                match tree.as_deref().and_then(|t| nav_rows::tables_of(t, db, schema).get(table as usize)).and_then(|t| t.columns.get(column as usize)) {
-                    None => div().into_any_element(),
-                    Some(c) => div()
-                    .h(px(h))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(8.))
-                    .py(px(2.))
-                    .t(s, 11.0)
-                    .text_color(theme::TEXT_MUTED)
-                    .min_w_full()
-                    .child(div().flex_shrink_0().whitespace_nowrap().child(c.name.clone()))
-                    .child(div().flex_1().min_w(px(12.)))
-                    .when(c.key == "PRI", |d| d.child(div().w(px(14.)).flex_shrink_0().child("🔑")))
-                    .child(div().flex_shrink_0().opacity(0.6).italic().child(c.column_type.clone()))
-                    .into_any_element(),
-                }
-            }
+            RowKind::Column { conn, db, schema, table, column } => self.render_column_row(conn, db, schema, table, column, h, s, cx),
             RowKind::LeafSection { conn, db, schema, leaf, count, open } => {
                 let (conn_id, dbname, sc_name) = self.row_names(conn, db, schema);
                 let key = nav_rows::leaf_key(&conn_id, &dbname, sc_name.as_deref(), leaf);
                 let label = match leaf {
                     Leaf::Views => "Views",
-                    Leaf::Indexes => "Indexes",
                 };
                 self.section_header(key, label, count, open, h, s, cx)
             }
-            RowKind::LeafItem { conn, db, schema, leaf, item } => {
-                let name = self.connections[conn]
-                    .schema
-                    .as_ref()
-                    .map(|t| nav_rows::leaf_name(t, db, schema, leaf, item).to_string())
-                    .unwrap_or_default();
-                div()
-                    .h(px(h))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .pl(px(24.))
-                    .pr(px(8.))
-                    .py(px(3.))
-                    .t(s, 12.0)
-                    .text_color(theme::TEXT)
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .hover(|st| st.bg(theme::BG_HOVER))
-                    .child(div().flex_shrink_0().child(leaf_icon(leaf)))
-                    .child(name)
-                    .into_any_element()
-            }
+            RowKind::LeafItem { conn, db, schema, leaf, item } => self.render_leaf_item(conn, db, schema, leaf, item, h, s, cx),
             RowKind::Gap => div().into_any_element(),
         };
         div()
@@ -998,7 +964,99 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The "Tables", "Views" and "Indexes" headers.
+    /// A column of an open table. A column that is part of an index carries a
+    /// lightning bolt after its name; resting the pointer on it lists each
+    /// index it belongs to.
+    #[allow(clippy::too_many_arguments)]
+    fn render_column_row(&mut self, ci: usize, db: u32, schema: u32, table: u32, column: u32, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        let tree = self.connections[ci].schema.clone();
+        let Some(t) = tree.as_deref().and_then(|t| nav_rows::tables_of(t, db, schema).get(table as usize)) else {
+            return div().into_any_element();
+        };
+        let Some(c) = t.columns.get(column as usize) else { return div().into_any_element() };
+        let covering: Vec<TableIndex> = t.indexes.iter().filter(|ix| ix.columns.iter().any(|name| *name == c.name)).cloned().collect();
+        let tip_key = format!("{ci}\u{1f}{db}\u{1f}{schema}\u{1f}{table}\u{1f}{column}");
+        let bolt = (!covering.is_empty()).then(|| {
+            let (enter_key, leave_key, column_name) = (tip_key.clone(), tip_key.clone(), c.name.clone());
+            div()
+                .id(SharedString::from(format!("ix-{tip_key}")))
+                .flex_shrink_0()
+                .t(s, 10.0)
+                .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                    if *hovered {
+                        let pos = window.mouse_position();
+                        this.nav_index_tip = Some(NavIndexTip {
+                            key: enter_key.clone(),
+                            pos,
+                            column: column_name.clone(),
+                            indexes: covering.clone(),
+                        });
+                    } else if this.nav_index_tip.as_ref().is_some_and(|tip| tip.key == leave_key) {
+                        this.nav_index_tip = None;
+                    }
+                    cx.notify();
+                }))
+                .child("⚡")
+        });
+        div()
+            .h(px(h))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .py(px(2.))
+            .t(s, 11.0)
+            .text_color(theme::TEXT_MUTED)
+            .min_w_full()
+            .child(div().flex_shrink_0().whitespace_nowrap().child(c.name.clone()))
+            .when_some(bolt, |d, bolt| d.child(bolt))
+            .child(div().flex_1().min_w(px(12.)))
+            .when(c.key == "PRI", |d| d.child(div().w(px(14.)).flex_shrink_0().child("🔑")))
+            .child(div().flex_shrink_0().opacity(0.6).italic().child(c.column_type.clone()))
+            .into_any_element()
+    }
+
+    /// A view under a schema's "Views" header. Right-clicking one offers a
+    /// quick `SELECT * FROM` it.
+    #[allow(clippy::too_many_arguments)]
+    fn render_leaf_item(&mut self, ci: usize, db: u32, schema: u32, leaf: Leaf, item: u32, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        let name = self.connections[ci]
+            .schema
+            .as_ref()
+            .map(|t| nav_rows::leaf_name(t, db, schema, leaf, item).to_string())
+            .unwrap_or_default();
+        let (conn_id, dbname, sc_name) = self.row_names(ci, db, schema);
+        let key = nav_rows::table_key(&conn_id, &dbname, sc_name.as_deref(), &name);
+        // Flat trees have no database level to name.
+        let database = if dbname.is_empty() || schema == NONE { None } else { Some(dbname) };
+        let view = name.clone();
+        div()
+            .id(SharedString::from(format!("view-{key}")))
+            .h(px(h))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .pl(px(24.))
+            .pr(px(8.))
+            .py(px(3.))
+            .t(s, 12.0)
+            .text_color(theme::TEXT)
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .hover(|st| st.bg(theme::BG_HOVER))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let pos = clamp_menu(e.position, "view", window);
+                this.nav_index_tip = None;
+                this.nav_menu = Some(NavMenu::View { pos, conn_id: conn_id.clone(), view: view.clone(), schema: sc_name.clone(), database: database.clone() });
+                cx.notify();
+            }))
+            .child(div().flex_shrink_0().child(leaf_icon(leaf)))
+            .child(name)
+            .into_any_element()
+    }
+
+    /// The "Tables" and "Views" headers.
     #[allow(clippy::too_many_arguments)]
     fn section_header(&mut self, key: String, label: &'static str, count: usize, open: bool, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
         let k = key.clone();
@@ -1149,6 +1207,24 @@ impl Workspace {
                             .child(item("m-drop".into(), "Drop Table...".into(), true).on_click(cx.listener(move |this, _, window, cx| {
                                 let pos = clamp_menu(pos, "dropConfirm", window);
                                 this.nav_menu = Some(NavMenu::DropConfirm { pos, conn_id: c4.clone(), table: t4.clone(), schema: s4.clone() });
+                                cx.notify();
+                            }))),
+                    )
+                }
+                NavMenu::View { pos, conn_id, view, schema, database } => {
+                    let (c1, v1, s1, d1) = (conn_id.clone(), view.clone(), schema.clone(), database.clone());
+                    let (c2, v2, s2) = (conn_id.clone(), view.clone(), schema.clone());
+                    (
+                        pos,
+                        div()
+                            .child(item("m-view-select".into(), format!("SELECT * FROM {view} (LIMIT 100)"), false).on_click(cx.listener(move |this, _, _, cx| {
+                                this.nav_menu = None;
+                                this.open_table_query(&c1, &v1, s1.as_deref(), d1.as_deref(), cx);
+                            })))
+                            .child(item("m-view-copy".into(), "Copy Name".into(), false).on_click(cx.listener(move |this, _, _, cx| {
+                                this.nav_menu = None;
+                                let q = this.qualified_name(&c2, &v2, s2.as_deref());
+                                this.copy_to_clipboard(q, cx);
                                 cx.notify();
                             }))),
                     )
@@ -1348,6 +1424,15 @@ impl Workspace {
                 ),
             );
         }
+        // The index card for the column bolt under the pointer.
+        if self.nav_menu.is_none() {
+            if let Some(tip) = &self.nav_index_tip {
+                any = true;
+                layer = layer.child(
+                    deferred(gpui::anchored().position(point(tip.pos.x + px(12.), tip.pos.y + px(16.))).child(index_card(s, tip))).with_priority(2),
+                );
+            }
+        }
         any.then(|| layer.into_any_element())
     }
 
@@ -1399,6 +1484,73 @@ impl Workspace {
         })
         .detach();
     }
+}
+
+/// The hover card listing the indexes a column belongs to: each index's name
+/// and kind, then its columns in order with the hovered one picked out.
+fn index_card(s: Scale, tip: &NavIndexTip) -> Div {
+    let heading = if tip.indexes.len() == 1 { "1 index".to_string() } else { format!("{} indexes", tip.indexes.len()) };
+    let mut card = div()
+        .min_w(px(200.))
+        .max_w(px(380.))
+        .bg(theme::BG_PANEL)
+        .border_1()
+        .border_color(theme::BORDER)
+        .rounded(px(4.))
+        .px(px(10.))
+        .py(px(8.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .shadow(vec![shadow(0.0, 4.0, 12.0, 0.0, theme::rgba8(0, 0, 0, 0.4))])
+        .child(
+            div()
+                .flex()
+                .gap(px(6.))
+                .t(s, 11.0)
+                .text_color(theme::TEXT_MUTED)
+                .child(div().text_color(theme::TEXT).font_weight(FontWeight::MEDIUM).child(tip.column.clone()))
+                .child(format!("is in {heading}")),
+        );
+    for ix in &tip.indexes {
+        let mut tags: Vec<&str> = Vec::new();
+        if ix.primary {
+            tags.push("PRIMARY");
+        }
+        if ix.unique && !ix.primary {
+            tags.push("UNIQUE");
+        }
+        if !ix.method.is_empty() {
+            tags.push(ix.method.as_str());
+        }
+        let mut columns = div().flex().flex_wrap().items_center().t(s, 11.0).text_color(theme::TEXT_MUTED).child("(");
+        let last = ix.columns.len().saturating_sub(1);
+        for (i, name) in ix.columns.iter().enumerate() {
+            let here = *name == tip.column;
+            columns = columns.child(
+                div()
+                    .when(here, |d| d.text_color(theme::ACCENT_HOVER).font_weight(FontWeight::SEMIBOLD))
+                    .child(if i == last { name.clone() } else { format!("{name},\u{a0}") }),
+            );
+        }
+        columns = columns.child(")");
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().t(s, 12.0).text_color(theme::TEXT).font_weight(FontWeight::MEDIUM).child(ix.name.clone()))
+                        .when(!tags.is_empty(), |d| d.child(div().t(s, 10.0).text_color(theme::ACCENT).child(tags.join(" · ")))),
+                )
+                .child(columns),
+        );
+    }
+    card
 }
 
 fn chevron(s: Scale, open: bool) -> Div {
