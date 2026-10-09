@@ -1,43 +1,48 @@
 name: Release
 
-# Builds macOS + Windows when Cargo.toml is pushed to main, and publishes
-# a GitHub release tagged with the version in that file (e.g. 0.3.0 -> v0.3.0).
-# If that tag already exists (Cargo.toml changed without a version bump) the
-# release step is skipped.
+# Cargo.toml's version is the canonical release version.
+# On every push to main (and on manual runs) the workflow reads that version:
+#   - if tag vX.Y.Z already exists, nothing is built or released;
+#   - otherwise it builds macOS + Windows and publishes release vX.Y.Z.
+# To release, bump `version` in Cargo.toml and push to main.
 
 on:
   push:
     branches: [main]
-    paths:
-      - Cargo.toml
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.read.outputs.version }}
-      release_exists: ${{ steps.read.outputs.release_exists }}
+      should_release: ${{ steps.read.outputs.should_release }}
     steps:
       - uses: actions/checkout@v4
       - id: read
-        env:
-          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
+          git fetch --tags --force origin
           VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release_exists=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Release v$VERSION already exists - build will run but no release will be published"
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tag v$VERSION already exists - Cargo.toml version unchanged, no release"
           else
-            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Releasing v$VERSION from Cargo.toml"
           fi
 
   build:
     needs: version
+    if: needs.version.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -79,7 +84,7 @@ jobs:
 
   release:
     needs: [version, build]
-    if: needs.version.outputs.release_exists == 'false'
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
