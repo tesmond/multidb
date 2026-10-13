@@ -20,7 +20,118 @@ pub async fn get_schema(pool: &AnyPool, driver: &str) -> Result<SchemaTree> {
     }
 }
 
+// Publish names before loading columns, indexes, relationships, or sizes.
+const MYSQL_SCHEMA_NAMES: &str = r#"
+    SELECT s.SCHEMA_NAME, IFNULL(t.TABLE_NAME, ''), IFNULL(t.TABLE_TYPE, '')
+    FROM information_schema.SCHEMATA s
+    LEFT JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = s.SCHEMA_NAME
+    WHERE s.SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql')
+    ORDER BY s.SCHEMA_NAME, t.TABLE_NAME
+"#;
+
+fn schema_names(rows: Vec<(String, String, String)>) -> SchemaTree {
+    let mut tree = SchemaTree::default();
+    for (schema_name, name, table_type) in rows {
+        if tree.schemas.last().is_none_or(|s| s.name != schema_name) {
+            tree.schemas.push(Schema {
+                name: schema_name,
+                ..Schema::default()
+            });
+        }
+        if name.is_empty() {
+            continue;
+        }
+        let schema = tree.schemas.last_mut().unwrap();
+        let table = Table {
+            name,
+            table_type: if table_type == "VIEW" {
+                "VIEW"
+            } else {
+                "TABLE"
+            }
+            .into(),
+            ..Table::default()
+        };
+        if table.table_type == "VIEW" {
+            schema.views.push(table);
+        } else {
+            schema.tables.push(table);
+        }
+    }
+    tree
+}
+
+pub async fn get_mysql_schema_preview(pool: &MySqlPool) -> Result<SchemaTree> {
+    let rows = sqlx::query(MYSQL_SCHEMA_NAMES).fetch_all(pool).await?;
+    let names = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                decode_mysql_text(row, 0)?,
+                decode_mysql_text(row, 1)?,
+                decode_mysql_text(row, 2)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(schema_names(names))
+}
+
+pub async fn get_schema_preview(pool: &AnyPool, driver: &str) -> Result<SchemaTree> {
+    if driver == "sqlite" {
+        let rows = sqlx::query("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .fetch_all(pool).await?;
+        let mut tree = SchemaTree::default();
+        for row in rows {
+            let is_view = decode_any_text(&row, 1)? == "view";
+            let table = Table {
+                name: decode_any_text(&row, 0)?,
+                table_type: if is_view { "VIEW" } else { "TABLE" }.into(),
+                ..Table::default()
+            };
+            if is_view {
+                tree.views.push(table);
+            } else {
+                tree.tables.push(table);
+            }
+        }
+        return Ok(tree);
+    }
+    let query = match driver {
+        "mysql" => MYSQL_SCHEMA_NAMES,
+        "postgres" => {
+            r#"
+            SELECT s.schema_name::text, COALESCE(t.table_name, '')::text, COALESCE(t.table_type, '')::text
+            FROM information_schema.schemata s
+            LEFT JOIN information_schema.tables t ON t.table_schema = s.schema_name
+            WHERE s.schema_name NOT IN ('pg_catalog', 'information_schema')
+              AND s.schema_name NOT LIKE 'pg_%'
+            ORDER BY s.schema_name, t.table_name
+        "#
+        }
+        other => return Err(anyhow!("unsupported driver: {other}")),
+    };
+    let rows = sqlx::query(query).fetch_all(pool).await?;
+    let names = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                decode_any_text(row, 0)?,
+                decode_any_text(row, 1)?,
+                decode_any_text(row, 2)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(schema_names(names))
+}
+
 pub async fn postgres_database_catalog(pool: &PgPool) -> Result<SchemaTree> {
+    postgres_database_catalog_with_progress(pool, None).await
+}
+
+pub async fn postgres_database_catalog_with_progress(
+    pool: &PgPool,
+    progress: Option<&futures::channel::mpsc::UnboundedSender<SchemaTree>>,
+) -> Result<SchemaTree> {
     let database_names = sqlx::query_scalar::<_, String>(
         r#"
         SELECT datname::text
@@ -34,8 +145,20 @@ pub async fn postgres_database_catalog(pool: &PgPool) -> Result<SchemaTree> {
     .fetch_all(pool)
     .await?;
 
-    let mut tree = SchemaTree::default();
-    for database_name in database_names {
+    let mut tree = SchemaTree {
+        databases: database_names
+            .iter()
+            .map(|name| Database {
+                name: name.clone(),
+                ..Database::default()
+            })
+            .collect(),
+        ..SchemaTree::default()
+    };
+    if let Some(progress) = progress {
+        let _ = progress.unbounded_send(tree.clone());
+    }
+    for (database_index, database_name) in database_names.into_iter().enumerate() {
         let connect_options = pool
             .connect_options()
             .as_ref()
@@ -48,6 +171,12 @@ pub async fn postgres_database_catalog(pool: &PgPool) -> Result<SchemaTree> {
             .await
             .with_context(|| format!("connect to PostgreSQL database {database_name}"))?;
 
+        if let Some(progress) = progress {
+            if let Ok(preview) = get_schema_preview(&database_pool, "postgres").await {
+                tree.databases[database_index].schemas = preview.schemas;
+                let _ = progress.unbounded_send(tree.clone());
+            }
+        }
         let schema_tree = postgres_schema(&database_pool)
             .await
             .with_context(|| format!("load schemas for PostgreSQL database {database_name}"));
@@ -56,12 +185,15 @@ pub async fn postgres_database_catalog(pool: &PgPool) -> Result<SchemaTree> {
 
         tree.size_bytes =
             Some(tree.size_bytes.unwrap_or_default() + schema_tree.size_bytes.unwrap_or_default());
-        tree.databases.push(Database {
+        tree.databases[database_index] = Database {
             name: database_name,
             size_bytes: schema_tree.size_bytes,
             schemas: schema_tree.schemas,
             relationships: schema_tree.relationships,
-        });
+        };
+        if let Some(progress) = progress {
+            let _ = progress.unbounded_send(tree.clone());
+        }
     }
     Ok(tree)
 }
@@ -212,6 +344,8 @@ async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
         .fetch_all(pool)
         .await?;
 
+        let mut indexes = mysql_indexes(pool, &db_name).await.unwrap_or_default();
+        let mut columns = mysql_columns(pool, &db_name).await?;
         for row in tables {
             let name = decode_any_text(&row, 0)?;
             let table_type = decode_any_text(&row, 1)?;
@@ -227,7 +361,8 @@ async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
                 ..Table::default()
             };
             if table.table_type == "TABLE" {
-                table.columns = mysql_columns(pool, &db_name, &table.name).await?;
+                table.columns = columns.remove(&table.name).unwrap_or_default();
+                table.indexes = indexes.remove(&table.name).unwrap_or_default();
                 schema.tables.push(table);
             } else {
                 schema.views.push(table);
@@ -285,6 +420,7 @@ pub async fn get_mysql_schema(pool: &MySqlPool) -> Result<SchemaTree> {
         // Index details are a nicety: a server that will not list them still
         // gets its tables and columns shown.
         let mut indexes = mysql_indexes_typed(pool, &db_name).await.unwrap_or_default();
+        let mut columns = mysql_columns_typed(pool, &db_name).await?;
         for row in tables {
             let name = decode_mysql_text(&row, 0)?;
             let table_type = decode_mysql_text(&row, 1)?;
@@ -300,7 +436,7 @@ pub async fn get_mysql_schema(pool: &MySqlPool) -> Result<SchemaTree> {
                 ..Table::default()
             };
             if table.table_type == "TABLE" {
-                table.columns = mysql_columns_typed(pool, &db_name, &table.name).await?;
+                table.columns = columns.remove(&table.name).unwrap_or_default();
                 table.indexes = indexes.remove(&table.name).unwrap_or_default();
                 schema.tables.push(table);
             } else {
@@ -360,15 +496,35 @@ fn group_index_rows(rows: Vec<IndexRow>) -> HashMap<String, Vec<TableIndex>> {
 }
 
 /// Every index of every table in one MySQL schema, by table name.
+const MYSQL_INDEXES_SQL: &str = r#"
+    SELECT TABLE_NAME, INDEX_NAME, CAST(NON_UNIQUE AS SIGNED), INDEX_TYPE, IFNULL(COLUMN_NAME, '')
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = ?
+    ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX
+"#;
+
+async fn mysql_indexes(pool: &AnyPool, db_name: &str) -> Result<HashMap<String, Vec<TableIndex>>> {
+    let rows = sqlx::query(MYSQL_INDEXES_SQL)
+        .bind(db_name)
+        .fetch_all(pool)
+        .await?;
+    let mut parsed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name = decode_any_text(&row, 1)?;
+        parsed.push(IndexRow {
+            table: decode_any_text(&row, 0)?,
+            primary: name == "PRIMARY",
+            unique: decode_any_i64(&row, 2)? == 0,
+            method: decode_any_text(&row, 3)?,
+            column: decode_any_text(&row, 4)?,
+            name,
+        });
+    }
+    Ok(group_index_rows(parsed))
+}
+
 async fn mysql_indexes_typed(pool: &MySqlPool, db_name: &str) -> Result<HashMap<String, Vec<TableIndex>>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT TABLE_NAME, INDEX_NAME, CAST(NON_UNIQUE AS SIGNED), INDEX_TYPE, IFNULL(COLUMN_NAME, '')
-        FROM information_schema.STATISTICS
-        WHERE TABLE_SCHEMA = ?
-        ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX
-        "#,
-    )
+    let rows = sqlx::query(MYSQL_INDEXES_SQL)
     .bind(db_name)
     .fetch_all(pool)
     .await?;
@@ -467,30 +623,30 @@ async fn mysql_table_sizes(pool: &AnyPool) -> Result<HashMap<String, i64>> {
     Ok(out)
 }
 
-async fn mysql_columns(pool: &AnyPool, db_name: &str, table: &str) -> Result<Vec<DbColumn>> {
+async fn mysql_columns(pool: &AnyPool, db_name: &str) -> Result<HashMap<String, Vec<DbColumn>>> {
     let rows = sqlx::query(
         r#"
-        SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, IFNULL(COLUMN_DEFAULT,''), COLUMN_KEY
+        SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, IFNULL(COLUMN_DEFAULT,''), COLUMN_KEY
         FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-        ORDER BY ORDINAL_POSITION
+        WHERE TABLE_SCHEMA = ?
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
         "#,
     )
     .bind(db_name)
-    .bind(table)
     .fetch_all(pool)
     .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(DbColumn {
-                name: decode_any_text(&row, 0)?,
-                column_type: decode_any_text(&row, 1)?,
-                nullable: decode_any_text(&row, 2)? == "YES",
-                default: decode_any_text(&row, 3)?,
-                key: decode_any_text(&row, 4)?,
-            })
-        })
-        .collect()
+    let mut columns: HashMap<String, Vec<DbColumn>> = HashMap::new();
+    for row in rows {
+        let table = decode_any_text(&row, 0)?;
+        columns.entry(table).or_default().push(DbColumn {
+            name: decode_any_text(&row, 1)?,
+            column_type: decode_any_text(&row, 2)?,
+            nullable: decode_any_text(&row, 3)? == "YES",
+            default: decode_any_text(&row, 4)?,
+            key: decode_any_text(&row, 5)?,
+        });
+    }
+    Ok(columns)
 }
 
 async fn mysql_table_sizes_typed(pool: &MySqlPool) -> Result<HashMap<String, i64>> {
@@ -520,31 +676,30 @@ async fn mysql_table_sizes_typed(pool: &MySqlPool) -> Result<HashMap<String, i64
 async fn mysql_columns_typed(
     pool: &MySqlPool,
     db_name: &str,
-    table: &str,
-) -> Result<Vec<DbColumn>> {
+) -> Result<HashMap<String, Vec<DbColumn>>> {
     let rows = sqlx::query(
         r#"
-        SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, IFNULL(COLUMN_DEFAULT,''), COLUMN_KEY
+        SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, IFNULL(COLUMN_DEFAULT,''), COLUMN_KEY
         FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-        ORDER BY ORDINAL_POSITION
+        WHERE TABLE_SCHEMA = ?
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
         "#,
     )
     .bind(db_name)
-    .bind(table)
     .fetch_all(pool)
     .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(DbColumn {
-                name: decode_mysql_text(&row, 0)?,
-                column_type: decode_mysql_text(&row, 1)?,
-                nullable: decode_mysql_text(&row, 2)? == "YES",
-                default: decode_mysql_text(&row, 3)?,
-                key: decode_mysql_text(&row, 4)?,
-            })
-        })
-        .collect()
+    let mut columns: HashMap<String, Vec<DbColumn>> = HashMap::new();
+    for row in rows {
+        let table = decode_mysql_text(&row, 0)?;
+        columns.entry(table).or_default().push(DbColumn {
+            name: decode_mysql_text(&row, 1)?,
+            column_type: decode_mysql_text(&row, 2)?,
+            nullable: decode_mysql_text(&row, 3)? == "YES",
+            default: decode_mysql_text(&row, 4)?,
+            key: decode_mysql_text(&row, 5)?,
+        });
+    }
+    Ok(columns)
 }
 
 async fn postgres_schema(pool: &AnyPool) -> Result<SchemaTree> {
@@ -583,6 +738,7 @@ async fn postgres_schema(pool: &AnyPool) -> Result<SchemaTree> {
         .await?;
 
         let mut indexes = postgres_indexes(pool, &schema_name).await.unwrap_or_default();
+        let mut columns = postgres_columns(pool, &schema_name).await?;
         for row in rows {
             let name: String = row.try_get(0)?;
             let table_type: String = row.try_get(1)?;
@@ -598,7 +754,7 @@ async fn postgres_schema(pool: &AnyPool) -> Result<SchemaTree> {
                 ..Table::default()
             };
             if table.table_type == "TABLE" {
-                table.columns = postgres_columns(pool, &schema_name, &table.name).await?;
+                table.columns = columns.remove(&table.name).unwrap_or_default();
                 table.indexes = indexes.remove(&table.name).unwrap_or_default();
                 schema.tables.push(table);
             } else {
@@ -643,30 +799,33 @@ async fn postgres_table_sizes(pool: &AnyPool) -> Result<HashMap<String, i64>> {
     Ok(out)
 }
 
-async fn postgres_columns(pool: &AnyPool, schema_name: &str, table: &str) -> Result<Vec<DbColumn>> {
+async fn postgres_columns(
+    pool: &AnyPool,
+    schema_name: &str,
+) -> Result<HashMap<String, Vec<DbColumn>>> {
     let rows = sqlx::query(
         r#"
-        SELECT column_name::text, data_type::text, is_nullable::text, COALESCE(column_default, '')
+        SELECT table_name::text, column_name::text, data_type::text, is_nullable::text, COALESCE(column_default, '')
         FROM information_schema.columns
-        WHERE table_schema = $1 AND table_name = $2
-        ORDER BY ordinal_position
+        WHERE table_schema = $1
+        ORDER BY table_name, ordinal_position
         "#,
     )
     .bind(schema_name)
-    .bind(table)
     .fetch_all(pool)
     .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(DbColumn {
-                name: row.try_get(0)?,
-                column_type: row.try_get(1)?,
-                nullable: row.try_get::<String, _>(2)? == "YES",
-                default: row.try_get(3)?,
-                key: String::new(),
-            })
-        })
-        .collect()
+    let mut columns: HashMap<String, Vec<DbColumn>> = HashMap::new();
+    for row in rows {
+        let table: String = row.try_get(0)?;
+        columns.entry(table).or_default().push(DbColumn {
+            name: row.try_get(1)?,
+            column_type: row.try_get(2)?,
+            nullable: row.try_get::<String, _>(3)? == "YES",
+            default: row.try_get(4)?,
+            key: String::new(),
+        });
+    }
+    Ok(columns)
 }
 
 async fn sqlite_schema(pool: &AnyPool) -> Result<SchemaTree> {
@@ -1226,6 +1385,94 @@ mod tests {
     use sqlx::mysql::MySqlPoolOptions;
     use sqlx::postgres::PgPoolOptions;
 
+    #[test]
+    fn preview_preserves_empty_schemas_and_separates_views() {
+        let tree = super::schema_names(vec![
+            ("empty".into(), "".into(), "".into()),
+            ("public".into(), "orders".into(), "BASE TABLE".into()),
+            ("public".into(), "summary".into(), "VIEW".into()),
+        ]);
+        assert_eq!(tree.schemas.len(), 2);
+        assert!(tree.schemas[0].tables.is_empty());
+        assert_eq!(tree.schemas[1].tables[0].name, "orders");
+        assert_eq!(tree.schemas[1].views[0].name, "summary");
+        assert!(tree.schemas[1].tables[0].columns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn schema_preview_lists_400_tables_before_metadata_is_loaded() {
+        sqlx::any::install_default_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for i in 0..400 {
+            sqlx::query(&format!(
+                "CREATE TABLE table_{i:03} (id INTEGER PRIMARY KEY, payload TEXT)"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("CREATE VIEW summary AS SELECT id FROM table_000")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let preview = super::get_schema_preview(&pool, "sqlite").await.unwrap();
+        println!("400-table name preview: {:?}", started.elapsed());
+        assert_eq!(preview.tables.len(), 400);
+        assert_eq!(preview.views[0].name, "summary");
+        assert!(preview
+            .tables
+            .iter()
+            .all(|t| t.columns.is_empty() && t.indexes.is_empty()));
+        let started = std::time::Instant::now();
+        let complete = get_schema(&pool, "sqlite").await.unwrap();
+        println!("400-table complete metadata: {:?}", started.elapsed());
+        assert_eq!(
+            preview.tables.iter().map(|t| &t.name).collect::<Vec<_>>(),
+            complete.tables.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        assert!(complete.tables.iter().all(|t| t.columns.len() == 2));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn mysql_batch_columns_preserves_table_assignment_and_column_order() {
+        // SQLite can execute this MySQL catalog query against a catalog fixture.
+        sqlx::any::install_default_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("ATTACH DATABASE ':memory:' AS information_schema")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE information_schema.COLUMNS (TABLE_SCHEMA TEXT, TABLE_NAME TEXT, COLUMN_NAME TEXT, COLUMN_TYPE TEXT, IS_NULLABLE TEXT, COLUMN_DEFAULT TEXT, COLUMN_KEY TEXT, ORDINAL_POSITION INT)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO information_schema.COLUMNS VALUES ('app','orders','payload','text','YES',NULL,'',2), ('app','users','email','text','NO','test','UNI',1), ('other','orders','wrong','text','YES',NULL,'',1), ('app','orders','id','int','NO',NULL,'PRI',1)")
+            .execute(&pool).await.unwrap();
+        let columns = super::mysql_columns(&pool, "app").await.unwrap();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(
+            columns["orders"]
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "payload"]
+        );
+        assert_eq!(columns["orders"][0].key, "PRI");
+        assert!(!columns["orders"][0].nullable);
+        assert!(columns["orders"][1].nullable);
+        assert_eq!(columns["orders"][1].default, "");
+        assert_eq!(columns["users"][0].default, "test");
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn decode_any_text_handles_sqlite_blob_values() {
         sqlx::any::install_default_drivers();
@@ -1501,6 +1748,102 @@ mod tests {
         }
 
         pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MYSQL_REPRO_URL pointing to a disposable MySQL database"]
+    async fn mysql_schema_refresh_links_indexes_to_columns() {
+        let url = std::env::var("MYSQL_REPRO_URL").expect("MYSQL_REPRO_URL must be set");
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to MySQL");
+        let database = format!("multidb_indexes_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE DATABASE `{database}`"))
+            .execute(&pool)
+            .await
+            .expect("create reproduction database");
+        sqlx::query(&format!(
+            "CREATE TABLE `{database}`.users (
+                id INT PRIMARY KEY,
+                email VARCHAR(100),
+                tenant_id INT,
+                unindexed INT,
+                UNIQUE KEY email_unique (email),
+                KEY tenant_email (tenant_id, email)
+            )"
+        ))
+        .execute(&pool)
+        .await
+        .expect("create indexed table");
+
+        let typed_result = get_mysql_schema(&pool).await;
+        sqlx::any::install_default_drivers();
+        let any_pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to MySQL through AnyPool");
+        let any_result = get_schema(&any_pool, "mysql").await;
+        any_pool.close().await;
+        sqlx::query(&format!("DROP DATABASE `{database}`"))
+            .execute(&pool)
+            .await
+            .expect("remove reproduction database");
+        pool.close().await;
+
+        for result in [typed_result, any_result] {
+            let tree = result.expect("refresh MySQL schema with indexes");
+            let table = tree
+                .schemas
+                .iter()
+                .find(|schema| schema.name == database)
+                .expect("reproduction schema")
+                .tables
+                .iter()
+                .find(|table| table.name == "users")
+                .expect("indexed table");
+            assert_eq!(
+                table.indexes.len(),
+                3,
+                "schema refresh must retain every index"
+            );
+            for (name, columns, unique, primary) in [
+                ("PRIMARY", vec!["id"], true, true),
+                ("email_unique", vec!["email"], true, false),
+                ("tenant_email", vec!["tenant_id", "email"], false, false),
+            ] {
+                let index = table
+                    .indexes
+                    .iter()
+                    .find(|index| index.name == name)
+                    .expect("index should be present");
+                assert_eq!(index.columns, columns, "index column order for {name}");
+                assert_eq!(index.unique, unique);
+                assert_eq!(index.primary, primary);
+                assert_eq!(index.method, "BTREE");
+            }
+            for (name, expected_indexes) in [
+                ("id", vec!["PRIMARY"]),
+                ("email", vec!["email_unique", "tenant_email"]),
+                ("tenant_id", vec!["tenant_email"]),
+                ("unindexed", vec![]),
+            ] {
+                let column = table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == name)
+                    .expect("column should be present");
+                let covering: Vec<_> = table
+                    .indexes
+                    .iter()
+                    .filter(|index| index.columns.contains(&column.name))
+                    .map(|index| index.name.as_str())
+                    .collect();
+                assert_eq!(covering, expected_indexes, "indexes linked to {name}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -322,9 +322,10 @@ impl Builder<'_> {
             self.push(RowKind::Info { conn: ci, info: Info::Loading }, base, 0.0, self.m.info());
         } else if conn.schema_error.is_some() {
             self.push(RowKind::Info { conn: ci, info: Info::Error }, base, 0.0, self.m.info());
-        } else if let Some(schema) = conn.schema.clone() {
+        }
+        if let Some(schema) = conn.schema.clone() {
             self.conn_children(ci, &schema, base);
-        } else {
+        } else if !conn.schema_loading && conn.schema_error.is_none() {
             self.push(RowKind::Info { conn: ci, info: Info::NotLoaded }, base, 0.0, self.m.info());
         }
         self.push(RowKind::Gap, 0.0, 0.0, CONN_TAIL);
@@ -852,6 +853,28 @@ mod tests {
                 RowKind::Gap,
             ]
         );
+    }
+
+    #[test]
+    fn refresh_status_keeps_last_successful_schema_visible() {
+        let mut f = Fixture::new(vec![conn(
+            "a",
+            "sqlite",
+            "",
+            sqlite(vec![table("orders", &["id"])]),
+        )]);
+        f.expanded.insert("a".into());
+        let baseline = kinds(&f.rows(None));
+        assert!(baseline.iter().any(|r| matches!(r, RowKind::Tables { .. })));
+        for loading in [true, false] {
+            f.conns[0].schema_loading = loading;
+            f.conns[0].schema_error = (!loading).then(|| "temporary connection failure".into());
+            let rows = kinds(&f.rows(None));
+            assert!(rows.iter().any(|r| matches!(r, RowKind::Info { info, .. } if *info == if loading { Info::Loading } else { Info::Error })));
+            for row in &baseline {
+                assert!(rows.contains(row), "refresh status hid schema row {row:?}");
+            }
+        }
     }
 
     #[test]

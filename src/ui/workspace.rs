@@ -681,6 +681,7 @@ impl Workspace {
                 if let Some(tree) = parsed {
                     this.update(cx, |this, cx| {
                         if let Some(c) = this.connection_mut(&conn_id) {
+                            if c.schema_loading || c.schema.is_some() { return; }
                             c.schema = Some(Arc::new(tree));
                         }
                         this.reindex_schema(&conn_id, cx);
@@ -698,29 +699,43 @@ impl Workspace {
         if conn.schema_loading {
             return Task::ready(());
         }
+        let previous_schema = conn.schema.clone();
         conn.schema_loading = true;
         conn.schema_error = None;
         cx.notify();
         let state = runtime::state();
         let id = conn_id.to_string();
+        let (progress, mut previews) = futures::channel::mpsc::unbounded();
         let fut = runtime::spawn(async move {
-            let tree = commands::get_schema(state.clone(), id.clone()).await;
-            if let Ok(tree) = &tree {
-                if let Ok(json) = serde_json::to_string(tree) {
-                    let _ = commands::save_schema(state, id, json, String::new()).await;
-                }
-            }
-            tree
+            commands::get_schema_with_progress(state, id, progress).await.map(Arc::new)
         });
         let conn_id = conn_id.to_string();
         cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(tree) = previews.next().await {
+                // A refresh keeps the last complete snapshot visible. On first
+                // load, publish table names while the details arrive.
+                if previous_schema.is_none() {
+                    this.update(cx, |this, cx| {
+                        if let Some(c) = this.connection_mut(&conn_id) {
+                            c.schema = Some(Arc::new(tree));
+                        }
+                        this.reindex_schema(&conn_id, cx);
+                        cx.notify();
+                    }).ok();
+                }
+            }
             let res = fut.await;
+            let successful_schema = res.as_ref().ok().cloned();
             this.update(cx, |this, cx| {
                 if let Some(c) = this.connection_mut(&conn_id) {
                     c.schema_loading = false;
                     match res {
-                        Ok(tree) => c.schema = Some(Arc::new(tree)),
-                        Err(e) => c.schema_error = Some(e),
+                        Ok(tree) => c.schema = Some(tree),
+                        Err(e) => {
+                            c.schema = previous_schema;
+                            c.schema_error = Some(e);
+                        },
                     }
                 }
                 this.reindex_schema(&conn_id, cx);
@@ -728,6 +743,14 @@ impl Workspace {
                 cx.notify();
             })
             .ok();
+            if let Some(tree) = successful_schema {
+                // Persist only complete snapshots, after publishing to the UI.
+                runtime::spawn(async move {
+                    if let Ok(json) = serde_json::to_string(tree.as_ref()) {
+                        let _ = commands::save_schema(runtime::state(), conn_id, json, String::new()).await;
+                    }
+                }).await;
+            }
         })
     }
 
@@ -1095,7 +1118,7 @@ impl Workspace {
             }
         }
         store.update(cx, |st, cx| {
-            st.clear();
+            st.start();
             cx.notify();
         });
         self.status = "Running query…".into();
@@ -1122,14 +1145,23 @@ impl Workspace {
             return;
         }
         let state = runtime::state();
+        let cancelled_id = qid.clone();
         let fut = runtime::spawn(async move { commands::cancel_query(state, qid).await });
         let tab_id = tab_id.to_string();
         cx.spawn(async move |this, cx| {
             let _ = fut.await;
             this.update(cx, |this, cx| {
+                if !this.tab(&tab_id).and_then(|t| t.sql()).is_some_and(|s| s.query_id == cancelled_id) {
+                    return;
+                }
                 if let Some(s) = this.tab_mut(&tab_id).and_then(|t| t.sql_mut()) {
                     s.running = false;
                     s.query_id.clear();
+                    s.store.update(cx, |st, cx| {
+                        st.set_phase(commands::QueryPhase::Cancelled);
+                        st.loading = false;
+                        cx.notify();
+                    });
                 }
                 this.status = "Query cancelled".into();
                 cx.notify();
@@ -1312,6 +1344,8 @@ impl Workspace {
     }
 
     pub fn export_csv(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else { return };
+        let filename = crate::ui::textfmt::csv_export_filename(&tab.title);
         let Some(result) = self.active_store().and_then(|s| s.read(cx).result.clone()) else { return };
         let rows = result.rows.to_vec();
         let columns = result.columns.clone();
@@ -1320,7 +1354,7 @@ impl Workspace {
             if csv.is_empty() {
                 return Ok(());
             }
-            commands::save_csv(csv, "query_results.csv".into())
+            commands::save_csv(csv, filename)
         });
         cx.spawn(async move |this, cx| {
             if let Err(e) = fut.await {
@@ -1419,6 +1453,10 @@ async fn stream_query(
                 res = call => {
                     call_done = true;
                     if let Err(e) = res {
+                        let current = this.update(cx, |this, _| {
+                            this.tab(&tab_id).and_then(|t| t.sql()).is_some_and(|s| s.query_id == query_id)
+                        }).unwrap_or(false);
+                        if !current { return; }
                         store.update(cx, |st, cx| {
                             st.fail(e.clone());
                             cx.notify();
@@ -1438,6 +1476,11 @@ async fn stream_query(
                 }
             }
         };
+        // Ignore events from a cancelled run or a tab that has since run again.
+        let current = this.update(cx, |this, _| {
+            this.tab(&tab_id).and_then(|t| t.sql()).is_some_and(|s| s.query_id == query_id)
+        }).unwrap_or(false);
+        if !current { return; }
         // Take everything that has arrived, in order, and apply it in one go.
         let mut events = vec![first];
         while let Ok(ev) = rx.try_recv() {
@@ -1447,6 +1490,12 @@ async fn stream_query(
         let mut done = None;
         for ev in events {
             match ev {
+                StreamEvent::Progress { query_id: id, phase } if id == query_id => {
+                    store.update(cx, |st, cx| {
+                        st.set_phase(phase);
+                        cx.notify();
+                    }).ok();
+                }
                 StreamEvent::Meta(meta) if meta.query_id == query_id => {
                     store
                         .update(cx, |st, cx| {

@@ -175,6 +175,7 @@ static POSTGRES: LazyLock<DialectSpec> = LazyLock::new(|| {
 static MYSQL: LazyLock<DialectSpec> = LazyLock::new(|| {
     spec(
         |s| {
+            s.backslash_escapes = true;
             s.operator_chars = "*+-%<>!=&|^";
             s.char_set_casts = true;
             s.double_quoted_strings = true;

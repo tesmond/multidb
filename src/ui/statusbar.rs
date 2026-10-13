@@ -3,23 +3,26 @@
 //! result that is still streaming in, which it reads from the result store so
 //! the workspace is not disturbed for every batch of rows.
 
-use crate::ui::result_store::ResultStore;
+use crate::ui::result_store::{format_elapsed, ResultStore};
 use crate::ui::theme;
 use crate::ui::widgets::{Scale, TextExt};
 use crate::ui::workspace::Workspace;
-use gpui::{div, prelude::*, px, Context, Entity, SharedString, Subscription, WeakEntity, Window};
+use gpui::{div, prelude::*, px, Context, Entity, SharedString, Subscription, Task, WeakEntity, Window};
+
+use std::time::Duration;
 
 pub struct StatusBar {
     ws: WeakEntity<Workspace>,
     store: Option<Entity<ResultStore>>,
     store_sub: Option<Subscription>,
     _ws_sub: Subscription,
+    timer: Option<Task<()>>,
 }
 
 impl StatusBar {
     pub fn new(ws: &Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let sub = cx.observe(ws, |_, _, cx| cx.notify());
-        StatusBar { ws: ws.downgrade(), store: None, store_sub: None, _ws_sub: sub }
+        StatusBar { ws: ws.downgrade(), store: None, store_sub: None, _ws_sub: sub, timer: None }
     }
 
     /// Follow the active tab's result store.
@@ -30,8 +33,33 @@ impl StatusBar {
             _ => false,
         };
         if !same {
+            self.timer = None;
             self.store_sub = store.as_ref().map(|s| cx.observe(s, |_, _, cx| cx.notify()));
             self.store = store;
+        }
+    }
+
+    fn update_timer(&mut self, cx: &mut Context<Self>) {
+        let running = self.store.as_ref().is_some_and(|store| {
+            store.read(cx).progress.as_ref().is_some_and(|p| p.phase.running())
+        });
+        if !running {
+            self.timer = None;
+        } else if self.timer.is_none() {
+            self.timer = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    let delay = this.update(cx, |this, cx| {
+                        let progress = this.store.as_ref()?.read(cx).progress.as_ref()?;
+                        if !progress.phase.running() { return None; }
+                        let elapsed = progress.elapsed();
+                        let interval = if elapsed.as_secs() < 10 { 100 } else { 1000 };
+                        Some(Duration::from_millis(interval - (elapsed.as_millis() % interval as u128) as u64))
+                    }).ok().flatten();
+                    let Some(delay) = delay else { break };
+                    cx.background_executor().timer(delay).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() { break; }
+                }
+            }));
         }
     }
 }
@@ -44,17 +72,22 @@ impl Render for StatusBar {
             (w.status.clone(), w.active_store(), w.scale())
         };
         self.follow(store, cx);
+        self.update_timer(cx);
         let s = Scale(scale);
-        let (rows, duration, loading) = match self.store.as_ref().map(|st| st.read(cx)) {
-            Some(st) => match &st.result {
-                Some(r) => (Some(r.rows.len()), r.duration, st.loading),
-                None => (None, 0, st.loading),
-            },
-            None => (None, 0, false),
+        let (rows, duration, progress, error) = match self.store.as_ref().map(|st| st.read(cx)) {
+            Some(st) => (
+                st.result.as_ref().map(|r| r.rows.len()),
+                st.result.as_ref().map_or(0, |r| r.duration),
+                st.progress.clone(),
+                st.result.as_ref().map(|r| r.error.clone()).unwrap_or_default(),
+            ),
+            None => (None, 0, None, String::new()),
         };
-        let text: SharedString = match (loading, rows) {
-            (true, Some(n)) => format!("Loading… {n} rows").into(),
-            _ => status,
+        let text: SharedString = if let Some(progress) = &progress {
+            let detail = if error.is_empty() { String::new() } else { format!(": {error}") };
+            format!("{} · {}{detail}", progress.phase.label(), format_elapsed(progress.elapsed())).into()
+        } else {
+            status
         };
         let mut bar = div()
             .flex()

@@ -150,10 +150,50 @@ pub fn build_csv(columns: &[String], rows: &[Vec<Value>], sort_index: Option<&[u
     lines.join("\n")
 }
 
+/// Suggested filename for the tab being exported.
+pub fn csv_export_filename(tab_title: &str) -> String {
+    let name: String = tab_title
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        "query_results.csv".into()
+    } else if name.to_ascii_lowercase().ends_with(".csv") {
+        name
+    } else {
+        format!("{name}.csv")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn csv_export_filename_uses_current_tab_name() {
+        assert_eq!(csv_export_filename("Query 1"), "Query 1.csv");
+        assert_eq!(csv_export_filename("public.customers"), "public.customers.csv");
+        let mut title = "Query 2".to_string();
+        assert_eq!(csv_export_filename(&title), "Query 2.csv");
+        title = "Monthly sales".into();
+        assert_eq!(csv_export_filename(&title), "Monthly sales.csv");
+        assert_eq!(csv_export_filename("売上.csv"), "売上.csv");
+    }
+
+    #[test]
+    fn csv_export_filename_handles_unsafe_or_empty_names() {
+        assert_eq!(csv_export_filename("  sales/2026\\Q4: totals?  "), "sales_2026_Q4_ totals_.csv");
+        assert_eq!(csv_export_filename("sales\nreport"), "sales_report.csv");
+        assert_eq!(csv_export_filename("  "), "query_results.csv");
+    }
 
     #[test]
     fn clipboard_formats_json_columns() {

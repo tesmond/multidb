@@ -17,9 +17,44 @@ pub type CommandResult<T> = std::result::Result<T, String>;
 /// Streaming query events delivered to the UI.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
+    Progress { query_id: String, phase: QueryPhase },
     Meta(QueryStreamMeta),
     Chunk(QueryStreamChunk),
     Done(QueryStreamDone),
+}
+
+/// Stages the client can observe while executing a query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryPhase {
+    Received,
+    Connecting,
+    Waiting,
+    Streaming,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl QueryPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Received => "Query received",
+            Self::Connecting => "Connecting",
+            Self::Waiting => "Waiting for data to return",
+            Self::Streaming => "Streaming output",
+            Self::Completed => "Query completed",
+            Self::Failed => "Query failed",
+            Self::Cancelled => "Query cancelled",
+        }
+    }
+
+    pub fn running(self) -> bool {
+        matches!(self, Self::Received | Self::Connecting | Self::Waiting | Self::Streaming)
+    }
+}
+
+fn emit_progress(emitter: &EventEmitter, query_id: &str, phase: QueryPhase) {
+    emitter(StreamEvent::Progress { query_id: query_id.to_string(), phase });
 }
 
 pub type EventEmitter = Arc<dyn Fn(StreamEvent) + Send + Sync + 'static>;
@@ -155,6 +190,8 @@ pub async fn execute_query_streamed(
     query: String,
     max_rows: i64,
 ) -> CommandResult<()> {
+    emit_progress(&emitter, &query_id, QueryPhase::Received);
+    emit_progress(&emitter, &query_id, QueryPhase::Connecting);
     let cfg = match state.get_config_or_saved(&conn_id).await {
         Ok(cfg) => cfg,
         Err(err) => {
@@ -192,6 +229,7 @@ pub async fn execute_query_streamed(
             .await
         {
             Ok(pool) => {
+                emit_progress(&emitter, &query_id, QueryPhase::Waiting);
                 if queries::looks_like_row_returning_query(&query) {
                     stream_postgres_rows(
                         &emitter,
@@ -219,6 +257,7 @@ pub async fn execute_query_streamed(
     } else if cfg.driver == "mysql" {
         match state.get_mysql_pool_or_reconnect(&conn_id).await {
             Ok(pool) => {
+                emit_progress(&emitter, &query_id, QueryPhase::Waiting);
                 if queries::looks_like_row_returning_query(&query) {
                     stream_mysql_rows(
                         &emitter,
@@ -246,6 +285,7 @@ pub async fn execute_query_streamed(
     } else if cfg.driver == "sqlite" {
         match state.get_sqlite_pool_or_reconnect(&conn_id).await {
             Ok(pool) => {
+                emit_progress(&emitter, &query_id, QueryPhase::Waiting);
                 if queries::looks_like_row_returning_query(&query) {
                     stream_sqlite_rows(
                         &emitter,
@@ -273,6 +313,7 @@ pub async fn execute_query_streamed(
     } else {
         match state.get_pool_or_reconnect(&conn_id).await {
             Ok(pool) => {
+                emit_progress(&emitter, &query_id, QueryPhase::Waiting);
                 if queries::looks_like_row_returning_query(&query) {
                     stream_rows(
                         &emitter,
@@ -862,6 +903,46 @@ pub async fn get_table_primary_keys(
     schema::get_primary_keys(&pool, &driver, &schema_name, &table_name)
         .await
         .map_err(command_err)
+}
+
+/// Table names are available before the complete metadata snapshot.
+/// Only the final successful snapshot is persisted by the caller.
+pub async fn get_schema_with_progress(
+    state: Arc<AppState>,
+    conn_id: String,
+    progress: futures::channel::mpsc::UnboundedSender<SchemaTree>,
+) -> CommandResult<SchemaTree> {
+    let cfg = state
+        .get_config_or_saved(&conn_id)
+        .await
+        .map_err(command_err)?;
+    if cfg.driver == "postgres" && cfg.database.trim().is_empty() {
+        let pool = state
+            .get_pg_pool_or_reconnect(&conn_id)
+            .await
+            .map_err(command_err)?;
+        return schema::postgres_database_catalog_with_progress(&pool, Some(&progress))
+            .await
+            .map_err(command_err);
+    }
+    let preview = if cfg.driver == "mysql" {
+        let pool = state
+            .get_mysql_pool_or_reconnect(&conn_id)
+            .await
+            .map_err(command_err)?;
+        schema::get_mysql_schema_preview(&pool).await
+    } else {
+        let pool = state
+            .get_pool_or_reconnect(&conn_id)
+            .await
+            .map_err(command_err)?;
+        schema::get_schema_preview(&pool, &cfg.driver).await
+    };
+    // A preview query failing should not prevent a full refresh from succeeding.
+    if let Ok(tree) = preview {
+        let _ = progress.unbounded_send(tree);
+    }
+    get_schema(state, conn_id).await
 }
 
 pub async fn get_schema(state: Arc<AppState>, conn_id: String) -> CommandResult<SchemaTree> {

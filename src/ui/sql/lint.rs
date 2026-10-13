@@ -2,7 +2,7 @@
 //! (ports of `findSqlCommonSyntaxDiagnostics` / `findSqlSemanticDiagnostics`)
 //! and parser-error detection equivalent to lang-sql's Lezer error nodes.
 
-use super::complete::{is_reserved, normalize_ident};
+use super::complete::normalize_ident;
 use super::schema::DbSchema;
 use super::tokenizer::{Dialect, Tok, Token};
 use regex::Regex;
@@ -366,33 +366,46 @@ struct ColumnRef {
     to: usize,
 }
 
-fn find_column_refs(expr: &str) -> Vec<ColumnRef> {
-    static TOKEN: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?-u)([A-Za-z_][\w$]*)(?:\s*\.\s*([A-Za-z_][\w$]*))?").unwrap());
-    static CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*\(").unwrap());
-    static WILD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*\.\s*\*").unwrap());
+fn find_column_refs(expr: &str, dialect: Dialect) -> Vec<ColumnRef> {
+    // Use the same lexical rules as highlighting: words inside strings and
+    // comments, and dialect keywords such as INTERVAL/MONTH, are not columns.
+    let tokens = super::tokenize(expr, dialect);
+    let tokens: Vec<_> = super::tokenizer::significant(&tokens).collect();
     let mut refs = Vec::new();
-    for m in TOKEN.captures_iter(expr) {
-        let whole = m.get(0).unwrap();
-        let first = m.get(1).unwrap().as_str();
-        let second = m.get(2).map(|g| g.as_str());
-        let after = &expr[whole.end()..];
-        let is_fn = second.is_none() && CALL.is_match(after);
-        let is_wild = second.is_none() && WILD.is_match(after);
-        if is_fn || is_wild || is_reserved(first) {
+    let mut i = 0;
+    while i < tokens.len() {
+        let first = tokens[i];
+        i += 1;
+        if !matches!(first.kind, Tok::Identifier | Tok::QuotedIdentifier) {
             continue;
         }
-        if let Some(second) = second {
-            let off = whole.as_str().rfind(second).unwrap_or(0);
-            refs.push(ColumnRef {
-                table: Some(normalize_ident(first)),
-                column: normalize_ident(second),
-                from: whole.start() + off,
-                to: whole.start() + off + second.len(),
-            });
+        let mut column = first;
+        let mut table = None;
+        if tokens.get(i).is_some_and(|t| t.kind == Tok::Dot) {
+            i += 1;
+            let Some(second) = tokens.get(i) else { continue };
+            // Qualified names can use keyword spellings, including when
+            // whitespace around the dot prevents contextual tokenization.
+            if matches!(
+                second.kind,
+                Tok::Identifier | Tok::QuotedIdentifier | Tok::Keyword | Tok::Type | Tok::Builtin
+            ) {
+                table = Some(normalize_ident(&expr[first.from..first.to]));
+                column = second;
+                i += 1;
+            } else {
+                continue;
+            }
+        }
+        if tokens.get(i).is_some_and(|t| t.kind == Tok::ParenL) {
             continue;
         }
-        refs.push(ColumnRef { table: None, column: normalize_ident(first), from: whole.start(), to: whole.start() + first.len() });
+        refs.push(ColumnRef {
+            table,
+            column: normalize_ident(&expr[column.from..column.to]),
+            from: column.from,
+            to: column.to,
+        });
     }
     refs
 }
@@ -415,7 +428,7 @@ pub fn semantic(sql: &str, db: &DbSchema) -> Vec<Diagnostic> {
             continue;
         }
         let alias_removed = remove_select_alias(trimmed);
-        for r in find_column_refs(&alias_removed) {
+        for r in find_column_refs(&alias_removed, Dialect::for_driver(&db.driver)) {
             let label = &alias_removed[r.from..r.to];
             if let Some(table) = &r.table {
                 if let Some(tr) = refs.iter().rev().find(|x| &x.table == table) {
@@ -471,5 +484,84 @@ mod tests {
     fn parser_errors_are_filtered() {
         assert!(lint("SELECT users.* FROM users", Dialect::Sqlite, None).is_empty());
         assert_eq!(lint("SELECT (1 FROM t", Dialect::Sqlite, None).len(), 1);
+    }
+
+    #[test]
+    fn mysql_promo_expiry_buckets_have_no_diagnostics() {
+        // CURDATE() and balanced quotes/parentheses restore the intended SQL
+        // from the issue's pasted query.
+        let sql = "SELECT p.store_id,
+CASE WHEN b.end_date IS NULL THEN 'open-ended'
+WHEN b.end_date >= CURDATE() THEN 'live'
+WHEN b.end_date >= CURDATE() - INTERVAL 12 MONTH THEN 'expired<12m'
+WHEN b.end_date >= CURDATE() - INTERVAL 24 MONTH THEN 'expired 12-24m'
+ELSE 'expired> 24m' END AS bucket,
+COUNT(*) AS codes
+FROM tails_default.promo_code c
+JOIN tails_default.promo_code_batch b ON b.promo_code_batch_id = c.promo_code_batch_id
+JOIN tails_default.promo p ON p.promo_id = b.promo_id
+GROUP BY 1, 2;";
+        let schema = DbSchema {
+            driver: "mysql".into(),
+            schemas: Some(vec![crate::ui::sql::schema::SchemaInfo {
+                name: "tails_default".into(),
+                tables: [
+                    ("promo_code", &["promo_code_batch_id"][..]),
+                    ("promo_code_batch", &["promo_code_batch_id", "promo_id", "end_date"][..]),
+                    ("promo", &["promo_id", "store_id"][..]),
+                ]
+                .into_iter()
+                .map(|(name, columns)| TableInfo {
+                    name: name.into(),
+                    columns: columns.iter().map(|name| ColInfo {
+                        name: (*name).into(),
+                        col_type: String::new(),
+                        key: String::new(),
+                    }).collect(),
+                    is_view: false,
+                })
+                .collect(),
+            }]),
+            ..Default::default()
+        };
+        for db in [None, Some(&schema)] {
+            let found = lint(sql, Dialect::MySql, db);
+            assert!(found.is_empty(), "{found:?}");
+        }
+    }
+
+    #[test]
+    fn literals_are_not_column_references() {
+        let mut schema = db();
+        schema.driver = "mysql".into();
+        for sql in [
+            "SELECT 'open-ended' FROM users;",
+            "SELECT \"open-ended\" FROM users;",
+            "SELECT 'it''s expired' FROM users;",
+            "SELECT 'it\\'s expired' FROM users;",
+            "SELECT id /* explanatory words */ FROM users;",
+        ] {
+            let found = lint(sql, Dialect::MySql, Some(&schema));
+            assert!(found.is_empty(), "{sql}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn interval_units_are_not_column_references() {
+        let found = lint("SELECT CURDATE() - INTERVAL 12 MONTH AS expiry FROM users;", Dialect::MySql, Some(&db()));
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn case_expressions_still_report_unknown_columns() {
+        let sql = "SELECT CASE WHEN id > 0 THEN 'open-ended' ELSE nope END AS bucket FROM users;";
+        let found = lint(sql, Dialect::MySql, Some(&db()));
+        let from = sql.find("nope").unwrap();
+        assert_eq!(found, vec![diag(from, from + 4, "Unknown column nope")]);
+
+        let sql = "SELECT users.nope, 'open-ended' FROM users;";
+        let found = lint(sql, Dialect::MySql, Some(&db()));
+        let from = sql.find("nope").unwrap();
+        assert_eq!(found, vec![diag(from, from + 4, "Unknown column nope")]);
     }
 }
