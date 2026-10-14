@@ -24,16 +24,38 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const SDK_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// `aws sso login` opens a browser and waits for the person to approve there,
 /// so this is a human timeout rather than a network one.
 const SSO_LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
-/// How long an RDS auth token is valid for. `AWS_IAM_REFRESH_AGE` in
-/// `connections` reconnects before this runs out.
+/// Maximum lifetime of an RDS auth token.
 pub const TOKEN_LIFETIME_SECS: u64 = 900;
+
+/// Read the signing timestamp and lifetime from an RDS token.
+pub(crate) fn token_expires_at(token: &str) -> Result<SystemTime> {
+    // Never include the URL in errors: it contains the bearer credential.
+    let url = url::Url::parse(&format!("https://{token}"))
+        .map_err(|_| anyhow!("invalid AWS IAM token URL"))?;
+    let params: HashMap<_, _> = url.query_pairs().collect();
+    let signed_at = params
+        .get("X-Amz-Date")
+        .ok_or_else(|| anyhow!("AWS IAM token is missing its signing timestamp"))?;
+    let signed_at = chrono::NaiveDateTime::parse_from_str(signed_at, "%Y%m%dT%H%M%SZ")
+        .map_err(|_| anyhow!("AWS IAM token has an invalid signing timestamp"))?
+        .and_utc();
+    let lifetime: u64 = params
+        .get("X-Amz-Expires")
+        .and_then(|value| value.parse().ok())
+        .filter(|seconds| *seconds > 0 && *seconds <= TOKEN_LIFETIME_SECS)
+        .ok_or_else(|| anyhow!("AWS IAM token has a missing or invalid lifetime"))?;
+    let expires_at = signed_at
+        .checked_add_signed(chrono::TimeDelta::seconds(lifetime as i64))
+        .ok_or_else(|| anyhow!("AWS IAM token expiry is out of range"))?;
+    Ok(expires_at.into())
+}
 
 /// Generate an RDS IAM auth token for `cfg`, signing in to AWS SSO only if the
 /// credentials cannot be had without.
@@ -330,6 +352,31 @@ fn error_chain(err: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iam_token_expiry_uses_the_signed_timestamp_and_lifetime() {
+        let token = "db.example:3306/?X-Amz-Date=20261014T120000Z&X-Amz-Expires=900";
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-10-14T12:15:00Z").unwrap();
+        assert_eq!(token_expires_at(token).unwrap(), SystemTime::from(expected));
+        let shorter = token.replace("900", "120");
+        assert_eq!(
+            token_expires_at(&shorter).unwrap(),
+            SystemTime::from(expected) - Duration::from_secs(780)
+        );
+    }
+
+    #[test]
+    fn iam_token_expiry_rejects_missing_or_invalid_metadata() {
+        for query in [
+            "X-Amz-Expires=900",
+            "X-Amz-Date=20261014T120000Z",
+            "X-Amz-Date=invalid&X-Amz-Expires=900",
+            "X-Amz-Date=20261014T120000Z&X-Amz-Expires=invalid",
+            "X-Amz-Date=20261014T120000Z&X-Amz-Expires=18446744073709551615",
+        ] {
+            assert!(token_expires_at(&format!("db.example:3306/?{query}")).is_err());
+        }
+    }
 
     const CONFIG: &str = r#"
 [default]

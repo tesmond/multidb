@@ -19,7 +19,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex as StdMutex,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
@@ -35,7 +35,17 @@ struct ManagedConnection {
     sqlite_pool: Option<SqlitePool>,
     config: ConnectionConfig,
     port_forward: Option<PortForwardProcess>,
-    connected_at: Instant,
+    iam_token_expires_at: Option<SystemTime>,
+}
+
+impl ManagedConnection {
+    fn needs_iam_refresh(&self, now: SystemTime) -> bool {
+        self.config.uses_aws_iam_auth()
+            && self
+                .iam_token_expires_at
+                .and_then(|expiry| expiry.duration_since(now).ok())
+                .is_none_or(|remaining| remaining <= AWS_IAM_REFRESH_BUFFER)
+    }
 }
 
 struct PortForwardProcess {
@@ -104,8 +114,7 @@ const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 const IAM_MAX_CONNECTIONS: u32 = 1;
 /// Reconnect (and so re-sign the IAM token) a minute before the current one
 /// runs out, so a query never meets an expired token.
-const AWS_IAM_REFRESH_AGE: Duration =
-    Duration::from_secs(crate::aws_auth::TOKEN_LIFETIME_SECS - 60);
+const AWS_IAM_REFRESH_BUFFER: Duration = Duration::from_secs(60);
 const MYSQL_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const MYSQL_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 const CONNECTION_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -113,11 +122,17 @@ const CONNECTION_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Default, Clone)]
 pub struct ConnectionManager {
     inner: Arc<RwLock<HashMap<String, ManagedConnection>>>,
+    iam_refresh_locks: Arc<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl ConnectionManager {
     pub async fn connect(&self, cfg: ConnectionConfig) -> Result<()> {
         let (effective, mut port_forward) = prepare_runtime_connection_config(&cfg, None).await?;
+        let iam_token_expires_at = if effective.uses_aws_iam_auth() {
+            Some(crate::aws_auth::token_expires_at(&effective.password)?)
+        } else {
+            None
+        };
         let connection_result = async {
             let max_connections = max_connections_for(&effective);
             let (pool, pg_pool, mysql_pool, sqlite_pool) = if effective.driver == "mysql" {
@@ -206,7 +221,7 @@ impl ConnectionManager {
                 sqlite_pool,
                 config: cfg,
                 port_forward,
-                connected_at: Instant::now(),
+                iam_token_expires_at,
             },
         );
         Ok(())
@@ -393,9 +408,43 @@ impl ConnectionManager {
 
     pub async fn should_refresh_iam_connection(&self, id: &str) -> bool {
         let inner = self.inner.read().await;
-        inner.get(id).is_some_and(|conn| {
-            conn.config.uses_aws_iam_auth() && conn.connected_at.elapsed() >= AWS_IAM_REFRESH_AGE
-        })
+        inner
+            .get(id)
+            .is_some_and(|conn| conn.needs_iam_refresh(SystemTime::now()))
+    }
+
+    pub async fn refresh_iam_connection_if_needed(&self, id: &str) -> Result<()> {
+        self.refresh_iam_connection_with(id, |cfg| self.connect(cfg))
+            .await
+    }
+
+    async fn refresh_iam_connection_with<F, Fut>(&self, id: &str, reconnect: F) -> Result<()>
+    where
+        F: FnOnce(ConnectionConfig) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        if !self.should_refresh_iam_connection(id).await {
+            return Ok(());
+        }
+        let lock = {
+            let mut locks = self.iam_refresh_locks.lock().expect("IAM refresh locks");
+            Arc::clone(locks.entry(id.to_string()).or_default())
+        };
+        let _held = lock.lock().await;
+        // Another request may have renewed the token while we waited.
+        let cfg = {
+            let inner = self.inner.read().await;
+            inner
+                .get(id)
+                .filter(|conn| conn.needs_iam_refresh(SystemTime::now()))
+                .map(|conn| conn.config.clone())
+        };
+        if let Some(cfg) = cfg {
+            // connect only replaces the old pools once new ones are ready.
+            // A failed renewal leaves the expired deadline in place for retry.
+            reconnect(cfg).await?;
+        }
+        Ok(())
     }
 
     pub async fn list_connections(&self) -> Vec<ConnectionConfig> {
@@ -927,6 +976,167 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
+
+    async fn iam_manager(expires_at: std::time::SystemTime) -> super::ConnectionManager {
+        let manager = super::ConnectionManager::default();
+        manager.inner.write().await.insert(
+            "iam".into(),
+            super::ManagedConnection {
+                pool: None,
+                pg_pool: None,
+                pg_database_pools: std::collections::HashMap::new(),
+                mysql_pool: Some(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(
+                    sqlx::mysql::MySqlConnectOptions::new().host("expired.example"),
+                )),
+                sqlite_pool: None,
+                config: ConnectionConfig {
+                    id: "iam".into(),
+                    driver: "mysql".into(),
+                    auth_mode: "awsIam".into(),
+                    aws_profile: "active-profile".into(),
+                    ..ConnectionConfig::default()
+                },
+                port_forward: None,
+                iam_token_expires_at: Some(expires_at),
+            },
+        );
+        manager
+    }
+
+    #[tokio::test]
+    async fn iam_expired_token_requires_refresh_even_when_connection_is_recent() {
+        let manager = iam_manager(std::time::SystemTime::now() - Duration::from_secs(1)).await;
+        assert!(manager.should_refresh_iam_connection("iam").await);
+    }
+
+    #[tokio::test]
+    async fn iam_refresh_uses_expiry_and_preserves_password_connections() {
+        let now = std::time::SystemTime::now();
+        let manager = iam_manager(now).await;
+        let mut inner = manager.inner.write().await;
+        let conn = inner.get_mut("iam").unwrap();
+        for driver in ["mysql", "postgres"] {
+            conn.config.driver = driver.into();
+            for (remaining, expected) in
+                [(900, false), (61, false), (60, true), (1, true), (0, true)]
+            {
+                conn.iam_token_expires_at = Some(now + Duration::from_secs(remaining));
+                assert_eq!(conn.needs_iam_refresh(now), expected);
+            }
+        }
+        conn.iam_token_expires_at = None;
+        assert!(conn.needs_iam_refresh(now));
+        conn.config.auth_mode = "password".into();
+        assert!(!conn.needs_iam_refresh(now));
+        drop(inner);
+        assert!(!manager.should_refresh_iam_connection("missing").await);
+    }
+
+    async fn install_renewed_iam_pool(
+        manager: &super::ConnectionManager,
+        cfg: ConnectionConfig,
+    ) -> anyhow::Result<()> {
+        // Substitute only AWS/database I/O. Exercise the production expiry
+        // parser and renewal coordinator without credentials or a live RDS.
+        assert_eq!(cfg.aws_profile, "active-profile");
+        let signed_at = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let token = format!("db.example:3306/?X-Amz-Date={signed_at}&X-Amz-Expires=900");
+        let expiry = crate::aws_auth::token_expires_at(&token)?;
+        let pool = sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(
+            sqlx::mysql::MySqlConnectOptions::new()
+                .host("renewed.example")
+                .password(&token),
+        );
+        let mut inner = manager.inner.write().await;
+        let conn = inner.get_mut(&cfg.id).unwrap();
+        conn.mysql_pool = Some(pool);
+        conn.iam_token_expires_at = Some(expiry);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn iam_expired_token_is_renewed_before_returning_a_pool() {
+        let now = std::time::SystemTime::now();
+        for expiry in [now - Duration::from_secs(1), now + Duration::from_secs(30)] {
+            let manager = iam_manager(expiry).await;
+            manager
+                .refresh_iam_connection_with("iam", |cfg| install_renewed_iam_pool(&manager, cfg))
+                .await
+                .unwrap();
+            let pool = manager.get_mysql_pool("iam").await.unwrap();
+            assert_eq!(pool.connect_options().get_host(), "renewed.example");
+            assert!(!manager.should_refresh_iam_connection("iam").await);
+            manager
+                .refresh_iam_connection_with("iam", |_| async {
+                    panic!("fresh token renewed again")
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn iam_failed_renewal_is_retried_on_the_next_request() {
+        let manager = iam_manager(std::time::SystemTime::now() - Duration::from_secs(1)).await;
+        let error = manager
+            .refresh_iam_connection_with("iam", |_| async {
+                Err(anyhow!("credentials unavailable"))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "credentials unavailable");
+        assert!(manager.should_refresh_iam_connection("iam").await);
+        assert_eq!(
+            manager
+                .get_mysql_pool("iam")
+                .await
+                .unwrap()
+                .connect_options()
+                .get_host(),
+            "expired.example"
+        );
+        manager
+            .refresh_iam_connection_with("iam", |cfg| install_renewed_iam_pool(&manager, cfg))
+            .await
+            .unwrap();
+        assert!(!manager.should_refresh_iam_connection("iam").await);
+    }
+
+    #[tokio::test]
+    async fn iam_concurrent_requests_share_one_token_renewal() {
+        let manager = iam_manager(std::time::SystemTime::now() - Duration::from_secs(1)).await;
+        let started = tokio::sync::Notify::new();
+        let release = tokio::sync::Notify::new();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let first = manager.refresh_iam_connection_with("iam", |cfg| async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            started.notify_one();
+            release.notified().await;
+            install_renewed_iam_pool(&manager, cfg).await
+        });
+        let second = async {
+            started.notified().await;
+            let renewal = manager.refresh_iam_connection_with("iam", |cfg| async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                install_renewed_iam_pool(&manager, cfg).await
+            });
+            let unblock = async {
+                tokio::task::yield_now().await;
+                release.notify_one();
+            };
+            let (result, ()) = tokio::join!(renewal, unblock);
+            result
+        };
+        let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .unwrap();
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!manager.should_refresh_iam_connection("iam").await);
+    }
 
     #[test]
     fn sqlite_requires_database_path() {

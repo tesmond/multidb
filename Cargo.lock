@@ -4329,7 +4329,7 @@ dependencies = [
 
 [[package]]
 name = "multidb"
-version = "0.5.2"
+version = "0.5.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
