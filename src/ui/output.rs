@@ -16,6 +16,7 @@ use crate::ui::result_store::ResultStore;
 use crate::ui::theme::{self, Rgba};
 use crate::ui::widgets::text_input::{InputEvent, InputLook, TextInput};
 use crate::ui::widgets::{shadow, Scale, TextExt};
+use crate::ui::icons::{icon, Icon};
 use crate::ui::workspace::Workspace;
 use crate::models::{QueryRecord, SavedQuery};
 use gpui::{
@@ -614,7 +615,7 @@ impl OutputPanel {
                     }))
                     .child(div().flex_1().min_w(px(0.)).overflow_hidden().text_ellipsis().child(name2))
                     .when_some(sorted, |d, dir| {
-                        d.child(div().flex_shrink_0().opacity(0.7).t(s, 10.0).child(if dir == SortDirection::Asc { "▲" } else { "▼" }))
+                        d.child(div().flex_shrink_0().opacity(0.7).child(icon(if dir == SortDirection::Asc { Icon::SortAsc } else { Icon::SortDesc }, s.fs(11.0), theme::TEXT_DIM)))
                     })
                     .child(
                         div()

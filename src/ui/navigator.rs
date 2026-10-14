@@ -3,6 +3,7 @@
 
 use crate::models::TableIndex;
 use crate::ui::dialogs::{self, Btn};
+use crate::ui::icons::{icon, Icon};
 use crate::ui::model::format_bytes;
 use crate::ui::nav_index::NONE;
 use crate::ui::nav_rows::{self, Info, Leaf, Row, RowKind};
@@ -17,9 +18,6 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
 };
 
-const CHEVRON_OPEN: &str = "▾";
-const CHEVRON_CLOSED: &str = "▸";
-
 /// Padding above the first row of the tree.
 const NAV_PAD_TOP: f32 = 4.0;
 /// Room left below the last row.
@@ -32,10 +30,16 @@ fn nav_metrics(s: Scale) -> nav_rows::Metrics {
     nav_rows::Metrics { lh13: s.lh_f(13.0), lh12: s.lh_f(12.0), lh11: s.lh_f(11.0) }
 }
 
-fn leaf_icon(leaf: Leaf) -> &'static str {
+fn leaf_icon(leaf: Leaf) -> Icon {
     match leaf {
-        Leaf::Views => "👁",
+        Leaf::Views => Icon::View,
     }
+}
+
+/// A tree row's object icon (connection, database, schema, table, …),
+/// painted in `tint` (a tab colour) when given, muted otherwise.
+fn nav_obj_icon(s: Scale, i: Icon, tint: Option<Rgba>) -> gpui::Svg {
+    icon(i, s.fs(13.0), tint.unwrap_or(theme::TEXT_MUTED))
 }
 
 pub fn swatch_color(tab_color: &str) -> Option<Rgba> {
@@ -49,6 +53,9 @@ fn clamp_menu(pos: Point<Pixels>, kind: &str, window: &Window) -> Point<Pixels> 
         "database" => 318.0,
         "databaseNode" => 50.0,
         "view" => 90.0,
+        "table" => 205.0,
+        "group" => 90.0,
+        "groupDelete" => 210.0,
         "dropConfirm" => 120.0,
         _ => 165.0,
     };
@@ -57,6 +64,23 @@ fn clamp_menu(pos: Point<Pixels>, kind: &str, window: &Window) -> Point<Pixels> 
     let max_x = (vw - w - pad).max(pad);
     let max_y = (vh - h - pad).max(pad);
     point(px(f32::from(pos.x).min(max_x).max(pad)), px(f32::from(pos.y).min(max_y).max(pad)))
+}
+
+/// The statements the "SQL Template" submenu writes.
+#[derive(Clone, Copy)]
+enum SqlTemplate {
+    CreateTable,
+    Insert,
+    Update,
+}
+
+/// Hovering another item of a table's context menu closes its "SQL Template"
+/// submenu.
+fn close_templates_on_hover(this: &mut Workspace, hovered: &bool, _: &mut Window, cx: &mut Context<Workspace>) {
+    if *hovered && this.nav_template_open {
+        this.nav_template_open = false;
+        cx.notify();
+    }
 }
 
 /// `<select>` drawn like WebKit's styled menulist-button.
@@ -125,7 +149,7 @@ pub fn native_select(
                     .t(s, 13.0)
                     .text_color(theme::WHITE)
                     .hover(|st| st.bg(theme::hex(0x0a64d8)))
-                    .child(div().w(px(12.)).child(if is_sel { "✓" } else { "" }))
+                    .child(div().w(px(12.)).flex().items_center().when(is_sel, |d| d.child(icon(Icon::Check, s.fs(12.0), theme::WHITE))))
                     .child(text)
                     .on_click(move |_, w, cx| pick(&v, w, cx)),
             );
@@ -145,8 +169,8 @@ pub fn select_arrows(s: Scale) -> Div {
         .gap(px(2.))
         .w(px(8.))
         .flex_shrink_0()
-        .child(div().text_size(px(7.0 * s.0)).line_height(px(5.)).child("▲"))
-        .child(div().text_size(px(7.0 * s.0)).line_height(px(5.)).child("▼"))
+        .child(icon(Icon::CaretUp, px(6.0 * s.0), theme::TEXT))
+        .child(icon(Icon::CaretDown, px(6.0 * s.0), theme::TEXT))
 }
 
 /// The last frame's rows (see `Workspace::nav_rows`).
@@ -170,6 +194,19 @@ impl Workspace {
             .text_color(theme::TEXT_MUTED)
             .cursor_pointer()
             .child(glyph)
+    }
+
+    /// An icon button in the navigator: muted, brightening on hover.
+    fn nav_svg_btn(&self, id: impl Into<SharedString>, s: Scale, i: Icon) -> Stateful<Div> {
+        div()
+            .id(gpui::ElementId::Name(id.into()))
+            .group("nav-svg-btn")
+            .flex()
+            .items_center()
+            .px(px(4.))
+            .py(px(2.))
+            .cursor_pointer()
+            .child(icon(i, s.fs(13.0), theme::TEXT_MUTED).group_hover("nav-svg-btn", |st| st.text_color(theme::TEXT)))
     }
 
     fn toggle_conn(&mut self, conn_id: &str, cx: &mut Context<Self>) {
@@ -205,12 +242,103 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A new query tab with `SELECT *` from the table. The tab's default
+    /// schema is the table's schema, so the query names the table on its own.
     fn open_table_query(&mut self, conn_id: &str, table: &str, schema: Option<&str>, database: Option<&str>, cx: &mut Context<Self>) {
         let driver = self.connection(conn_id).map(|c| c.config.driver.clone()).unwrap_or_else(|| "postgres".into());
-        let q = sql_text::qualify_table(&driver, table, schema);
-        let sql = format!("SELECT * FROM {q} LIMIT 100;");
-        self.open_query_tab_with_sql(conn_id, database.unwrap_or(""), &sql, Some(table.to_string()), cx);
+        let sql = format!("SELECT * FROM {} LIMIT 100;", sql_text::ident(table, &driver));
+        self.open_query_tab_in_schema(conn_id, database.unwrap_or(""), schema.unwrap_or(""), &sql, Some(table.to_string()), cx);
         self.selected_conn_id = conn_id.to_string();
+    }
+
+    /// A new query tab holding a template statement for the table, opened in
+    /// the table's schema like `open_table_query`.
+    fn open_sql_template(
+        &mut self,
+        conn_id: &str,
+        table: &str,
+        schema: Option<&str>,
+        database: Option<&str>,
+        template: SqlTemplate,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_conn_id = conn_id.to_string();
+        let (database_name, schema_name) = (database.unwrap_or("").to_string(), schema.unwrap_or("").to_string());
+        let driver = self.connection(conn_id).map(|c| c.config.driver.clone()).unwrap_or_else(|| "postgres".into());
+        let sql = match template {
+            // Read from the database, which knows exactly how the table was made.
+            SqlTemplate::CreateTable => {
+                let state = crate::ui::runtime::state();
+                let args = (conn_id.to_string(), database_name.clone(), schema_name.clone(), table.to_string());
+                let fut = crate::ui::runtime::spawn(async move {
+                    let (c, d, sc, t) = args;
+                    crate::commands::get_table_ddl(state, c, d, sc, t).await
+                });
+                self.status = format!("Reading the definition of {table}…").into();
+                let (conn_id, table) = (conn_id.to_string(), table.to_string());
+                cx.spawn(async move |this, cx| {
+                    let res = fut.await;
+                    this.update(cx, |this, cx| {
+                        match res {
+                            Ok(sql) => {
+                                this.status = format!("CREATE TABLE template for {table}").into();
+                                this.open_query_tab_in_schema(&conn_id, &database_name, &schema_name, &sql, Some(table.clone()), cx);
+                            }
+                            Err(e) => this.status = e.into(),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+                cx.notify();
+                return;
+            }
+            SqlTemplate::Insert | SqlTemplate::Update => {
+                let found = self.find_table(conn_id, database, schema, table).map(|t| {
+                    let columns: Vec<String> = t.columns.iter().map(|c| c.name.clone()).collect();
+                    let primary_key: Vec<String> = t
+                        .indexes
+                        .iter()
+                        .find(|ix| ix.primary && !ix.columns.is_empty())
+                        .map(|ix| ix.columns.clone())
+                        .unwrap_or_else(|| t.columns.iter().filter(|c| c.key == "PRI").map(|c| c.name.clone()).collect());
+                    (columns, primary_key)
+                });
+                let Some((columns, primary_key)) = found else {
+                    self.status = format!("Table {table} not found.").into();
+                    cx.notify();
+                    return;
+                };
+                if columns.is_empty() {
+                    self.status = format!("The columns of {table} are still loading.").into();
+                    cx.notify();
+                    return;
+                }
+                if matches!(template, SqlTemplate::Insert) {
+                    sql_text::insert_template(&driver, table, &columns)
+                } else {
+                    sql_text::update_template(&driver, table, &columns, &primary_key)
+                }
+            }
+        };
+        self.open_query_tab_in_schema(conn_id, &database_name, &schema_name, &sql, Some(table.to_string()), cx);
+    }
+
+    /// A table of the connection's loaded schema tree.
+    fn find_table(&self, conn_id: &str, database: Option<&str>, schema: Option<&str>, table: &str) -> Option<&crate::models::Table> {
+        let tree = self.connection(conn_id)?.schema.as_ref()?;
+        let tables = match schema {
+            None => &tree.tables,
+            Some(schema) => {
+                let schemas = database
+                    .and_then(|d| tree.databases.iter().find(|db| db.name == d))
+                    .map(|db| &db.schemas)
+                    .unwrap_or(&tree.schemas);
+                &schemas.iter().find(|s| s.name == schema)?.tables
+            }
+        };
+        tables.iter().find(|t| t.name == table)
     }
 
     fn qualified_name(&self, conn_id: &str, table: &str, schema: Option<&str>) -> String {
@@ -373,7 +501,7 @@ impl Workspace {
                 cx.notify();
             }));
         let settings_btn = self
-            .nav_icon_btn("nav-settings", s, "⚙")
+            .nav_svg_btn("nav-settings", s, Icon::Settings)
             .size(px(22.))
             .p_0()
             .flex()
@@ -432,7 +560,7 @@ impl Workspace {
                     })))
                     .child(item("add-group", "New Server Group").on_click(cx.listener(|this, _, window, cx| {
                         this.add_menu_open = false;
-                        this.server_group_dialog = Some(dialogs::ServerGroupDialog::new(this.scale(), window, cx));
+                        this.server_group_dialog = Some(dialogs::ServerGroupDialog::new(None, this.scale(), window, cx));
                         cx.notify();
                     }))),
             ).with_priority(2));
@@ -747,13 +875,14 @@ impl Workspace {
     fn render_group_row(&mut self, gi: usize, count: usize, open: bool, h: f32, s: Scale, cx: &mut Context<Self>) -> AnyElement {
         let Some(g) = self.settings.server_groups.get(gi) else { return div().into_any_element() };
         let (id, title) = (g.id.clone(), g.title.clone());
+        let swatch = swatch_color(&g.tab_color);
         let active = self.active_server_group_id == id;
         let drag = self.nav_drag.clone();
         let is_target = drag.as_ref().is_some_and(|d| d.active && d.target_group.as_deref() == Some(&id));
         let show_line = is_target && matches!(drag.as_ref().map(|d| &d.kind), Some(DragKind::Group(_)));
         let after = drag.as_ref().is_some_and(|d| d.after);
         let dragging = drag.as_ref().is_some_and(|d| d.active && d.kind == DragKind::Group(id.clone()));
-        let (i1, i2, i3) = (id.clone(), id.clone(), id.clone());
+        let (i1, i2, i3, i4) = (id.clone(), id.clone(), id.clone(), id.clone());
         let row = div()
             .id(SharedString::from(format!("group-{id}")))
             .relative()
@@ -786,8 +915,17 @@ impl Workspace {
                 }
                 this.toggle_group(&i2, cx);
             }))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let pos = clamp_menu(e.position, "group", window);
+                this.nav_index_tip = None;
+                this.nav_template_open = false;
+                this.nav_menu = Some(NavMenu::Group { pos, group_id: i4.clone() });
+                cx.notify();
+            }))
             .child(chevron(s, open))
-            .child(div().flex_shrink_0().child("▣"))
+            // Tinted with the group's default tab colour, when it has one.
+            .child(nav_obj_icon(s, Icon::Group, swatch))
             .child(div().flex_shrink_0().child(title))
             .child(div().font_weight(FontWeight::NORMAL).opacity(0.7).child(format!("({count})")))
             .when(show_line, |d| d.child(drop_line(after)));
@@ -803,7 +941,8 @@ impl Workspace {
         let is_target = drag.as_ref().is_some_and(|d| d.active && d.target_conn.as_ref().is_some_and(|(c, _)| *c == id));
         let after = drag.as_ref().is_some_and(|d| d.after);
         let dragging = drag.as_ref().is_some_and(|d| d.active && d.kind == DragKind::Conn(id.clone()));
-        let swatch = swatch_color(&conn.config.tab_color);
+        // What the connection's tabs show: its own colour, else its group's.
+        let swatch = swatch_color(&self.effective_tab_color(&conn.config.id));
         let size_label = format_bytes(conn.schema.as_ref().and_then(|s| s.size_bytes));
         let group_name = SharedString::from(format!("conn-{id}"));
         let row_hovered = self.hover_conn.as_deref() == Some(id.as_str());
@@ -861,16 +1000,8 @@ impl Workspace {
                 cx.notify();
             }))
             .child(chevron(s, open))
-            .child(div().flex_shrink_0().child("🔌"))
-            .child(
-                div()
-                    .size(px(10.))
-                    .flex_shrink_0()
-                    .rounded(px(2.))
-                    .border_1()
-                    .border_color(if swatch.is_some() { theme::rgba8(255, 255, 255, 0.35) } else { theme::BORDER })
-                    .when_some(swatch, |d, c| d.bg(c)),
-            )
+            // Tinted with the connection's tab colour, when it has one.
+            .child(nav_obj_icon(s, Icon::Connection, swatch))
             .child(
                 div()
                     .flex()
@@ -900,12 +1031,12 @@ impl Workspace {
                     .when(row_hovered, |d| d.flex())
                     .gap(px(2.))
                     .items_center()
-                    .child(self.nav_icon_btn(format!("edit-{id}"), s, "✏️").hover(|st| st.text_color(theme::TEXT)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(cx.listener(move |this, _, window, cx| {
+                    .child(self.nav_svg_btn(format!("edit-{id}"), s, Icon::Edit).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         let cfg = this.connection(&i5).map(|c| c.config.clone());
                         this.open_connection_dialog(cfg, window, cx);
                     })))
-                    .child(self.nav_icon_btn(format!("disc-{id}"), s, "✕").hover(|st| st.text_color(theme::TEXT)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(cx.listener(move |this, _, _, cx| {
+                    .child(self.nav_svg_btn(format!("disc-{id}"), s, Icon::Close).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.disconnect_conn(&i6, cx);
                     }))),
@@ -932,7 +1063,7 @@ impl Workspace {
             .h(px(h))
             .whitespace_nowrap()
             .on_mouse_down(MouseButton::Right, self.storage_menu_listener(&id, scope, cx))
-            .child(div().flex_shrink_0().child("🗄"))
+            .child(nav_obj_icon(s, Icon::Database, None))
             .child(div().flex_shrink_0().child(dbname))
             .into_any_element()
     }
@@ -958,7 +1089,7 @@ impl Workspace {
             .h(px(h))
             .whitespace_nowrap()
             .on_mouse_down(MouseButton::Right, self.storage_menu_listener(&id, scope, cx))
-            .child(div().flex_shrink_0().child("🗂"))
+            .child(nav_obj_icon(s, Icon::Schema, None))
             .child(div().flex_shrink_0().child(name))
             .when(!size.is_empty(), |d| d.child(size_label(s, &size)))
             .into_any_element()
@@ -996,7 +1127,7 @@ impl Workspace {
                     }
                     cx.notify();
                 }))
-                .child("⚡")
+                .child(icon(Icon::Index, s.fs(10.0), theme::TEXT_MUTED))
         });
         div()
             .h(px(h))
@@ -1010,7 +1141,7 @@ impl Workspace {
             .min_w_full()
             .child(div().flex_shrink_0().whitespace_nowrap().child(c.name.clone()))
             .when_some(bolt, |d, bolt| d.child(bolt))
-            .when(c.key == "PRI", |d| d.child(div().w(px(14.)).flex_shrink_0().child("🔑")))
+            .when(c.key == "PRI", |d| d.child(div().w(px(14.)).flex_shrink_0().flex().items_center().child(icon(Icon::Key, s.fs(11.0), theme::TEXT_MUTED))))
             .child(div().flex_1().min_w(px(12.)))
             .child(div().flex_shrink_0().opacity(0.6).italic().child(c.column_type.clone()))
             .into_any_element()
@@ -1051,7 +1182,7 @@ impl Workspace {
                 this.nav_menu = Some(NavMenu::View { pos, conn_id: conn_id.clone(), view: view.clone(), schema: sc_name.clone(), database: database.clone() });
                 cx.notify();
             }))
-            .child(div().flex_shrink_0().child(leaf_icon(leaf)))
+            .child(nav_obj_icon(s, leaf_icon(leaf), None))
             .child(name)
             .into_any_element()
     }
@@ -1113,11 +1244,12 @@ impl Workspace {
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 let pos = clamp_menu(e.position, "table", window);
+                this.nav_template_open = false;
                 this.nav_menu = Some(NavMenu::Table { pos, conn_id: cid.clone(), table: tname.clone(), schema: sc2.clone(), database: db2.clone() });
                 cx.notify();
             }))
             .child(chevron(s, open))
-            .child(div().flex_shrink_0().child("📋"))
+            .child(nav_obj_icon(s, Icon::Table, None))
             .child(div().flex_shrink_0().child(t.name.clone()))
             .when(!size.is_empty(), |d| d.child(size_label(s, &size)))
             .into_any_element()
@@ -1161,6 +1293,89 @@ impl Workspace {
 
     // ─── Overlays ───────────────────────────────────────────────────────────
 
+    /// "SQL Template ▸" in a table's context menu, with its submenu of
+    /// CREATE TABLE / INSERT / UPDATE templates beside it while open.
+    fn render_template_item(
+        &self,
+        s: Scale,
+        conn_id: &str,
+        table: &str,
+        schema: Option<String>,
+        database: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.nav_template_open;
+        let mut row = div()
+            .id("m-template")
+            .relative()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(16.))
+            .px(px(16.))
+            .py(px(8.))
+            .t(s, 13.0)
+            .text_color(theme::TEXT)
+            .cursor_pointer()
+            .when(open, |d| d.bg(theme::BG_HOVER))
+            .hover(|st| st.bg(theme::BG_HOVER))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if *hovered && !this.nav_template_open {
+                    this.nav_template_open = true;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.nav_template_open = !this.nav_template_open;
+                cx.notify();
+            }))
+            .child("SQL Template")
+            .child(icon(Icon::ChevronRight, s.fs(11.0), theme::TEXT_MUTED));
+        if open {
+            let mut menu = div()
+                .id("m-template-menu")
+                .occlude()
+                .absolute()
+                .top(px(-1.))
+                .left(gpui::relative(1.))
+                .min_w(px(150.))
+                .bg(theme::BG_SURFACE)
+                .border_1()
+                .border_color(theme::BORDER)
+                .rounded(px(4.))
+                .shadow(vec![shadow(0.0, 4.0, 16.0, 0.0, theme::rgba8(0, 0, 0, 0.4))])
+                .overflow_hidden()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            for (id, label, template) in [
+                ("m-tpl-create", "Create Table", SqlTemplate::CreateTable),
+                ("m-tpl-insert", "Insert", SqlTemplate::Insert),
+                ("m-tpl-update", "Update", SqlTemplate::Update),
+            ] {
+                let (c, t, sc, db) = (conn_id.to_string(), table.to_string(), schema.clone(), database.clone());
+                menu = menu.child(
+                    div()
+                        .id(id)
+                        .w_full()
+                        .px(px(16.))
+                        .py(px(8.))
+                        .t(s, 13.0)
+                        .text_color(theme::TEXT)
+                        .cursor_pointer()
+                        .whitespace_nowrap()
+                        .hover(|st| st.bg(theme::BG_HOVER))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_floating();
+                            this.open_sql_template(&c, &t, sc.as_deref(), db.as_deref(), template, cx);
+                        })),
+                );
+            }
+            row = row.child(deferred(menu).with_priority(1));
+        }
+        row.into_any_element()
+    }
+
     pub fn render_nav_overlays(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let s = Scale(self.scale());
         let mut layer = div().absolute().top_0().left_0().size_full();
@@ -1186,26 +1401,29 @@ impl Workspace {
                     let (c2, t2, s2) = (conn_id.clone(), table.clone(), schema.clone());
                     let (c3, t3, s3) = (conn_id.clone(), table.clone(), schema.clone());
                     let (c4, t4, s4) = (conn_id.clone(), table.clone(), schema.clone());
+                    let template_item = self.render_template_item(s, &conn_id, &table, schema.clone(), database.clone(), cx);
                     (
                         pos,
                         div()
-                            .child(item("m-view".into(), "View Data (SELECT * LIMIT 100)".into(), false).on_click(cx.listener(move |this, _, _, cx| {
+                            .child(item("m-view".into(), "View Data (SELECT * LIMIT 100)".into(), false).on_hover(cx.listener(close_templates_on_hover)).on_click(cx.listener(move |this, _, _, cx| {
                                 this.nav_menu = None;
                                 this.open_table_query(&c1, &t1, s1.as_deref(), d1.as_deref(), cx);
                             })))
-                            .child(item("m-copy".into(), "Copy Name".into(), false).on_click(cx.listener(move |this, _, _, cx| {
+                            .child(template_item)
+                            .child(item("m-copy".into(), "Copy Name".into(), false).on_hover(cx.listener(close_templates_on_hover)).on_click(cx.listener(move |this, _, _, cx| {
                                 this.nav_menu = None;
                                 let q = this.qualified_name(&c2, &t2, s2.as_deref());
                                 this.copy_to_clipboard(q, cx);
                                 cx.notify();
                             })))
-                            .child(item("m-backup".into(), "Backup Table...".into(), false).on_click(cx.listener(move |this, _, _, cx| {
+                            .child(item("m-backup".into(), "Backup Table...".into(), false).on_hover(cx.listener(close_templates_on_hover)).on_click(cx.listener(move |this, _, _, cx| {
                                 this.nav_menu = None;
                                 this.backup_table(&c3, &t3, s3.clone(), cx);
                             })))
                             .child(separator(3.0))
-                            .child(item("m-drop".into(), "Drop Table...".into(), true).on_click(cx.listener(move |this, _, window, cx| {
+                            .child(item("m-drop".into(), "Drop Table...".into(), true).on_hover(cx.listener(close_templates_on_hover)).on_click(cx.listener(move |this, _, window, cx| {
                                 let pos = clamp_menu(pos, "dropConfirm", window);
+                                this.nav_template_open = false;
                                 this.nav_menu = Some(NavMenu::DropConfirm { pos, conn_id: c4.clone(), table: t4.clone(), schema: s4.clone() });
                                 cx.notify();
                             }))),
@@ -1315,6 +1533,63 @@ impl Workspace {
                         this.show_storage(&conn_id, scope.clone(), cx);
                     }))),
                 ),
+                NavMenu::Group { pos, group_id } => {
+                    let (g1, g2) = (group_id.clone(), group_id.clone());
+                    (
+                        pos,
+                        div()
+                            .child(item("m-group-edit".into(), "Edit Server Group...".into(), false).on_click(cx.listener(move |this, _, window, cx| {
+                                this.nav_menu = None;
+                                let group = this.settings.server_groups.iter().find(|g| g.id == g1).cloned();
+                                if let Some(group) = group {
+                                    this.server_group_dialog = Some(dialogs::ServerGroupDialog::new(Some(&group), this.scale(), window, cx));
+                                }
+                                cx.notify();
+                            })))
+                            .child(separator(3.0))
+                            .child(item("m-group-delete".into(), "Delete Server Group...".into(), true).on_click(cx.listener(move |this, _, window, cx| {
+                                let pos = clamp_menu(pos, "groupDelete", window);
+                                this.nav_menu = Some(NavMenu::GroupDeleteConfirm { pos, group_id: g2.clone() });
+                                cx.notify();
+                            }))),
+                    )
+                }
+                NavMenu::GroupDeleteConfirm { pos, group_id } => {
+                    let (title, count) = self
+                        .settings
+                        .server_groups
+                        .iter()
+                        .find(|g| g.id == group_id)
+                        .map(|g| (g.title.clone(), g.connection_ids.iter().filter(|c| self.connection(c).is_some()).count()))
+                        .unwrap_or_default();
+                    let question = format!("Delete server group \u{201c}{title}\u{201d}?");
+                    let warning = match count {
+                        0 => None,
+                        1 => Some("The connection in this group will be deleted too. Move it out of the group first if you don't want to lose it.".to_string()),
+                        n => Some(format!("All {n} connections in this group will be deleted too. Move them out of the group first if you don't want to lose them.")),
+                    };
+                    let confirm = match count {
+                        0 => "Yes, delete group".to_string(),
+                        1 => "Delete group and 1 connection".to_string(),
+                        n => format!("Delete group and {n} connections"),
+                    };
+                    (
+                        pos,
+                        div()
+                            .w(px(280.))
+                            .child(div().t(s, 12.0).text_color(theme::TEXT).px(px(16.)).pt(px(10.)).pb(px(8.)).child(question))
+                            .when_some(warning, |d, w| d.child(div().t(s, 12.0).text_color(theme::ERROR).px(px(16.)).pb(px(10.)).child(w)))
+                            .child(div().border_b_1().border_color(theme::BORDER))
+                            .child(item("m-group-delete-yes".into(), confirm, true).on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_floating();
+                                this.delete_server_group(&group_id, cx);
+                            })))
+                            .child(item("m-group-delete-no".into(), "No, cancel".into(), false).on_click(cx.listener(|this, _, _, cx| {
+                                this.close_floating();
+                                cx.notify();
+                            }))),
+                    )
+                }
                 NavMenu::DropConfirm { pos, conn_id, table, schema } => {
                     let label = match &schema {
                         Some(sc) if !sc.is_empty() => format!("Drop {sc}.{table}?"),
@@ -1388,12 +1663,16 @@ impl Workspace {
             any = true;
             let error = d.error.clone();
             let input = d.input.clone();
+            let editing = d.editing.is_some();
+            let color_input = d.tab_color.clone();
+            let picker = dialogs::parse_hex(&color_input.read(cx).text().to_string())
+                .unwrap_or_else(|| dialogs::parse_hex(dialogs::DEFAULT_TAB_COLOR).unwrap());
             layer = layer.child(
                 overlay(0.6).child(
                     dialogs::modal_box(420.0)
                         .id("group-modal")
                         .occlude()
-                        .child(dialogs::modal_header(s, "New Server Group", cx.listener(|this, _, _, cx| {
+                        .child(dialogs::modal_header(s, if editing { "Edit Server Group" } else { "New Server Group" }, cx.listener(|this, _, _, cx| {
                             this.server_group_dialog = None;
                             cx.notify();
                         })))
@@ -1404,6 +1683,66 @@ impl Workspace {
                                 .flex_col()
                                 .gap(px(12.))
                                 .child(div().flex().flex_col().gap(px(4.)).child(dialogs::field_label(s, "Group Title")).child(input))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(4.))
+                                        .child(dialogs::field_label(s, "Default Tab Colour"))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(8.))
+                                                .child(div().flex_1().min_w(px(0.)).child(color_input))
+                                                .child(
+                                                    div()
+                                                        .id("group-color-well")
+                                                        .w(px(36.))
+                                                        .h(px(32.))
+                                                        .flex_shrink_0()
+                                                        .rounded(px(4.))
+                                                        .border_1()
+                                                        .border_color(theme::hex(0x767676))
+                                                        .bg(theme::hex(0xefefef))
+                                                        .p(px(4.))
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(|this, _, window, cx| {
+                                                            this.open_color_panel_for(dialogs::server_group_color, window, cx)
+                                                        }))
+                                                        .child(div().size_full().rounded(px(2.)).bg(picker).border_1().border_color(theme::hex(0x777777))),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("group-clear-color")
+                                                        .h(px(32.))
+                                                        .px(px(10.))
+                                                        .flex()
+                                                        .items_center()
+                                                        .border_1()
+                                                        .border_color(theme::BORDER)
+                                                        .rounded(px(4.))
+                                                        .bg(theme::BG_INPUT)
+                                                        .text_color(theme::TEXT)
+                                                        .t(s, 12.0)
+                                                        .cursor_pointer()
+                                                        .hover(|st| st.border_color(theme::ACCENT))
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            if let Some(d) = &this.server_group_dialog {
+                                                                d.tab_color.update(cx, |i, cx| i.set_text("", cx));
+                                                            }
+                                                            cx.notify();
+                                                        }))
+                                                        .child("Clear"),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .t(s, 11.0)
+                                                .text_color(theme::TEXT_MUTED)
+                                                .child("Tabs of connections in this group use this colour unless the connection sets its own."),
+                                        ),
+                                )
                                 .when(!error.is_empty(), |d| d.child(div().t(s, 12.0).text_color(theme::ERROR).child(error.clone()))),
                         )
                         .child(
@@ -1419,7 +1758,7 @@ impl Workspace {
                                     this.server_group_dialog = None;
                                     cx.notify();
                                 })))
-                                .child(dialogs::button("group-create", s, "Create Group", Btn::Primary, false, cx.listener(|this, _, _, cx| this.save_server_group(cx)))),
+                                .child(dialogs::button("group-create", s, if editing { "Save" } else { "Create Group" }, Btn::Primary, false, cx.listener(|this, _, _, cx| this.save_server_group(cx)))),
                         ),
                 ),
             );
@@ -1557,10 +1896,11 @@ fn chevron(s: Scale, open: bool) -> Div {
     div()
         .w(px(10.))
         .flex_shrink_0()
+        .h(s.lh(10.0))
+        .flex()
+        .items_center()
         .opacity(0.5)
-        .text_size(s.fs(10.0))
-        .line_height(s.lh(10.0))
-        .child(if open { CHEVRON_OPEN } else { CHEVRON_CLOSED })
+        .child(icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }, s.fs(10.0), theme::TEXT))
 }
 
 fn size_label(s: Scale, text: &str) -> Div {

@@ -22,6 +22,9 @@ use std::time::Duration;
 
 pub struct SqlTab {
     pub database_name: String,
+    /// The schema unqualified table names resolve to; empty for none, in
+    /// which case tables must be written schema-qualified.
+    pub default_schema: String,
     pub editor: Entity<SqlEditor>,
     /// The tab's result, sort order and pending cell edits.
     pub store: Entity<ResultStore>,
@@ -96,6 +99,10 @@ pub enum NavMenu {
     /// A database or schema node inside a connection's tree.
     DatabaseNode { pos: Point<Pixels>, conn_id: String, scope: StorageScope },
     DropConfirm { pos: Point<Pixels>, conn_id: String, table: String, schema: Option<String> },
+    /// A server group: edit or delete it.
+    Group { pos: Point<Pixels>, group_id: String },
+    /// Confirmation before deleting a server group and its connections.
+    GroupDeleteConfirm { pos: Point<Pixels>, group_id: String },
 }
 
 #[derive(Clone, PartialEq)]
@@ -200,6 +207,10 @@ pub struct Workspace {
     nav_index_pending: std::collections::HashMap<String, u64>,
 
     pub conn_select_open: Option<(TabId, usize)>,
+    /// The default-schema dropdown: which tab's is open, and the highlighted row.
+    pub schema_select_open: Option<(TabId, usize)>,
+    /// The "SQL Template" submenu of a table's context menu is showing.
+    pub nav_template_open: bool,
 
     pub hovered: Option<SharedString>,
     _subs: Vec<Subscription>,
@@ -296,6 +307,8 @@ impl Workspace {
             nav_generation: 0,
             nav_index_pending: std::collections::HashMap::new(),
             conn_select_open: None,
+            schema_select_open: None,
+            nav_template_open: false,
             hovered: None,
             settings,
             _subs: subs,
@@ -357,6 +370,7 @@ impl Workspace {
             manually_renamed: false,
             kind: TabKind::Sql(SqlTab {
                 database_name,
+                default_schema: String::new(),
                 editor,
                 store,
                 running: false,
@@ -382,11 +396,12 @@ impl Workspace {
     }
 
     pub fn tab_custom_color(&self, conn_id: &str) -> Option<crate::ui::theme::Rgba> {
-        let c = self.connection(conn_id)?;
-        if c.config.tab_color.is_empty() {
+        self.connection(conn_id)?;
+        let color = self.effective_tab_color(conn_id);
+        if color.is_empty() {
             return None;
         }
-        Some(crate::ui::dialogs::parse_hex(&c.config.tab_color).unwrap_or(crate::ui::theme::BG_SURFACE))
+        Some(crate::ui::dialogs::parse_hex(&color).unwrap_or(crate::ui::theme::BG_SURFACE))
     }
 
     /// The result store of the active tab, if it is a query tab.
@@ -501,11 +516,16 @@ impl Workspace {
         let Some(orig) = self.tabs[index].sql() else { return };
         let text = orig.editor.read(cx).text().to_string();
         let database = orig.database_name.clone();
+        let default_schema = orig.default_schema.clone();
         let copy = orig.store.read(cx).duplicate();
         let title = format!("{} (Copy)", self.tabs[index].title);
         let conn_id = self.tabs[index].conn_id.clone();
         let mut dup = self.make_sql_tab(conn_id, database, cx);
         dup.title = title;
+        if let Some(sql) = dup.sql_mut() {
+            sql.default_schema = default_schema;
+        }
+        self.configure_editor(&mut dup, cx);
         if let Some(sql) = dup.sql_mut() {
             sql.editor.update(cx, |e, cx| e.set_text(&text, cx));
             // The copy starts idle: the query that is streaming into the
@@ -560,6 +580,7 @@ impl Workspace {
             t.conn_id = conn_id;
             if let Some(sql) = t.sql_mut() {
                 sql.database_name.clear();
+                sql.default_schema.clear();
             }
         }
         self.configure_editors(cx);
@@ -568,7 +589,24 @@ impl Workspace {
     }
 
     pub fn open_query_tab_with_sql(&mut self, conn_id: &str, database: &str, sql: &str, title: Option<String>, cx: &mut Context<Self>) {
+        self.open_query_tab_in_schema(conn_id, database, "", sql, title, cx);
+    }
+
+    /// `open_query_tab_with_sql` with the new tab's default schema set, so
+    /// `sql` can name tables in that schema without qualifying them.
+    pub fn open_query_tab_in_schema(
+        &mut self,
+        conn_id: &str,
+        database: &str,
+        default_schema: &str,
+        sql: &str,
+        title: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.add_tab(conn_id.to_string(), database.to_string(), cx);
+        if !default_schema.is_empty() {
+            self.set_tab_default_schema(&id, default_schema.to_string(), cx);
+        }
         self.set_tab_sql(&id, sql, cx);
         if let Some(title) = title {
             if let Some(t) = self.tab_mut(&id) {
@@ -576,6 +614,46 @@ impl Workspace {
             }
         }
         self.set_active_tab(id, cx);
+    }
+
+    pub fn set_tab_default_schema(&mut self, id: &str, schema: String, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|t| t.id == id) else { return };
+        let Some(sql) = self.tabs[index].sql_mut() else { return };
+        if sql.default_schema == schema {
+            return;
+        }
+        sql.default_schema = schema;
+        let mut tab = self.tabs.remove(index);
+        self.configure_editor(&mut tab, cx);
+        self.tabs.insert(index, tab);
+        // Whether the result is editable depends on which table it came from.
+        if self.active_tab_id == id {
+            self.schedule_edit_check(cx);
+        }
+        cx.notify();
+    }
+
+    /// The schemas a tab's default-schema dropdown offers: those of the
+    /// database the tab runs against (for Postgres, the connection's own
+    /// database when the tab names none). Empty for engines without schemas
+    /// and before the connection's schema has loaded.
+    pub fn schema_names(&self, conn_id: &str, database_name: &str) -> Vec<String> {
+        let Some(conn) = self.connection(conn_id) else { return Vec::new() };
+        if conn.config.driver == "sqlite" {
+            return Vec::new();
+        }
+        let Some(tree) = conn.schema.as_ref() else { return Vec::new() };
+        let configured = conn.config.database.trim();
+        let database = tree
+            .databases
+            .iter()
+            .find(|d| d.name == database_name)
+            .or_else(|| if database_name.is_empty() { tree.databases.iter().find(|d| d.name == configured) } else { None });
+        let schemas = match database {
+            Some(db) => &db.schemas,
+            None => &tree.schemas,
+        };
+        schemas.iter().map(|s| s.name.clone()).collect()
     }
 
     // ─── Editors ────────────────────────────────────────────────────────────
@@ -590,7 +668,12 @@ impl Workspace {
         let conn_id = tab.conn_id.clone();
         let Some(sql) = tab.sql_mut() else { return };
         let driver = self.connections.iter().find(|c| c.config.id == conn_id).map(|c| c.config.driver.clone()).unwrap_or_default();
-        let db = self.db_schema(&conn_id, &sql.database_name);
+        let db = self.db_schema(&conn_id, &sql.database_name).map(|mut db| {
+            if !sql.default_schema.is_empty() {
+                db.default_schema = Some(sql.default_schema.clone());
+            }
+            db
+        });
         sql.editor.update(cx, |e, cx| e.configure(&driver, db, cx));
     }
 
@@ -613,7 +696,10 @@ impl Workspace {
                 let unchanged = this.active_tab().and_then(|t| t.sql()).is_some_and(|s| {
                     let sql = s.editor.read(cx).text().to_string();
                     match (&s.store.read(cx).edit_info, sql_text::parse_simple_select(&sql)) {
-                        (Some(info), Some(p)) => info.table_name == p.table_name && info.schema_name == p.schema_name,
+                        (Some(info), Some(p)) => {
+                            let schema = if p.schema_name.is_empty() { &s.default_schema } else { &p.schema_name };
+                            info.table_name == p.table_name && info.schema_name == *schema
+                        }
                         _ => false,
                     }
                 });
@@ -859,17 +945,69 @@ impl Workspace {
 
     // ─── Server groups ──────────────────────────────────────────────────────
 
-    pub fn add_server_group(&mut self, title: &str) -> String {
+    pub fn add_server_group(&mut self, title: &str, tab_color: &str) -> String {
         let id = new_id();
         let t = title.trim();
         self.settings.server_groups.push(ServerGroup {
             id: id.clone(),
             title: if t.is_empty() { "Server Group".into() } else { t.into() },
             connection_ids: Vec::new(),
+            tab_color: tab_color.trim().to_string(),
         });
         self.settings.save();
         self.active_server_group_id = id.clone();
         id
+    }
+
+    pub fn update_server_group(&mut self, group_id: &str, title: &str, tab_color: &str) {
+        let Some(g) = self.settings.server_groups.iter_mut().find(|g| g.id == group_id) else { return };
+        let t = title.trim();
+        if !t.is_empty() {
+            g.title = t.to_string();
+        }
+        g.tab_color = tab_color.trim().to_string();
+        self.settings.save();
+    }
+
+    /// Removes the group and deletes every connection in it, just as
+    /// "Remove Connection" would one at a time.
+    pub fn delete_server_group(&mut self, group_id: &str, cx: &mut Context<Self>) {
+        let Some(pos) = self.settings.server_groups.iter().position(|g| g.id == group_id) else { return };
+        let group = self.settings.server_groups.remove(pos);
+        self.settings.save();
+        self.expanded_groups.remove(group_id);
+        if self.active_server_group_id == group_id {
+            self.active_server_group_id.clear();
+        }
+        let mut removed = 0;
+        for conn_id in &group.connection_ids {
+            if self.connection(conn_id).is_some() {
+                self.disconnect_conn(conn_id, cx);
+                removed += 1;
+            }
+        }
+        self.status = match removed {
+            0 => format!("Deleted server group {}", group.title),
+            1 => format!("Deleted server group {} and 1 connection", group.title),
+            n => format!("Deleted server group {} and {n} connections", group.title),
+        }
+        .into();
+        cx.notify();
+    }
+
+    /// The server group a connection belongs to, if any.
+    pub fn group_of(&self, conn_id: &str) -> Option<&ServerGroup> {
+        self.settings.server_groups.iter().find(|g| g.connection_ids.iter().any(|c| c == conn_id))
+    }
+
+    /// The tab colour a connection's tabs get: its own, else its server
+    /// group's, else none (empty).
+    pub fn effective_tab_color(&self, conn_id: &str) -> String {
+        let own = self.connection(conn_id).map(|c| c.config.tab_color.trim()).unwrap_or("");
+        if !own.is_empty() {
+            return own.to_string();
+        }
+        self.group_of(conn_id).map(|g| g.tab_color.trim().to_string()).unwrap_or_default()
     }
 
     pub fn add_connection_to_group(&mut self, conn_id: &str, group_id: &str) {
@@ -1108,6 +1246,7 @@ impl Workspace {
             return;
         }
         let database = sql_tab.database_name.clone();
+        let default_schema = sql_tab.default_schema.clone();
         let store = sql_tab.store.clone();
         let query_id = new_id();
         if let Some(t) = self.tab_mut(tab_id) {
@@ -1131,7 +1270,9 @@ impl Workspace {
         });
         let state = runtime::state();
         let (c2, q2, s2, d2) = (conn_id.clone(), query_id.clone(), sql.clone(), database.clone());
-        let call = runtime::spawn(async move { commands::execute_query_streamed(emitter, state, c2, d2, q2, s2, 1_000_000).await });
+        let call = runtime::spawn(async move {
+            commands::execute_query_streamed(emitter, state, c2, d2, default_schema, q2, s2, 1_000_000).await
+        });
         let tab_id = tab_id.to_string();
         cx.spawn(async move |this, cx| {
             stream_query(this, cx, tab_id, query_id, conn_id, sql, store, rx, call).await;
@@ -1282,6 +1423,11 @@ impl Workspace {
         };
         let conn_id = tab.conn_id.clone();
         let database = s.database_name.clone();
+        // An unqualified table is the one in the tab's default schema.
+        let mut parsed = parsed;
+        if parsed.schema_name.is_empty() {
+            parsed.schema_name = s.default_schema.clone();
+        }
         let Some(conn) = self.connection(&conn_id) else {
             clear(&store, cx);
             return;
@@ -1331,8 +1477,9 @@ impl Workspace {
         if sql.is_empty() {
             return;
         }
-        let (conn, db) = (tab.conn_id.clone(), s.database_name.clone());
+        let (conn, db, schema) = (tab.conn_id.clone(), s.database_name.clone(), s.default_schema.clone());
         let id = self.add_tab(conn, db, cx);
+        self.set_tab_default_schema(&id, schema, cx);
         self.set_tab_sql(&id, &sql, cx);
         self.set_active_tab(id, cx);
     }
@@ -1370,6 +1517,7 @@ impl Workspace {
 
     pub fn close_floating(&mut self) {
         self.nav_menu = None;
+        self.nav_template_open = false;
         self.add_menu_open = false;
         self.settings_open = false;
     }

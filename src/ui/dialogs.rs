@@ -3,11 +3,12 @@
 
 use crate::commands;
 use crate::models::ConnectionConfig;
-use crate::ui::model::{new_id, ActiveConnection};
+use crate::ui::model::{new_id, ActiveConnection, ServerGroup};
 use crate::ui::runtime;
 use crate::ui::theme::{self, hsla, Rgba};
 use crate::ui::widgets::text_input::{InputEvent, InputLook, TextInput};
 use crate::ui::widgets::{shadow, Scale, TextExt};
+use crate::ui::icons::{icon, Icon};
 use crate::ui::workspace::Workspace;
 use gpui::{
     div, prelude::*, px, AnyElement, App, ClickEvent, Context, Entity, FontWeight, MouseButton, SharedString,
@@ -49,6 +50,14 @@ pub fn rescale_inputs(ws: &mut Workspace, scale: f32, cx: &mut Context<Workspace
         i.look = font_scale_look(scale);
         cx.notify()
     });
+    if let Some(d) = &ws.server_group_dialog {
+        for input in [d.input.clone(), d.tab_color.clone()] {
+            input.update(cx, |i, cx| {
+                i.look = InputLook::dialog(scale);
+                cx.notify()
+            });
+        }
+    }
     if let Some(d) = &ws.conn_dialog {
         for input in d.inputs() {
             input.update(cx, |i, cx| {
@@ -76,24 +85,32 @@ fn input(cx: &mut App, scale: f32, text: &str, placeholder: &str) -> Entity<Text
 // ─── Server group ───────────────────────────────────────────────────────────
 
 pub struct ServerGroupDialog {
+    /// The group being edited; `None` while creating a new one.
+    pub editing: Option<String>,
     pub input: Entity<TextInput>,
+    /// Default tab colour for the group's connections (hex, or empty).
+    pub tab_color: Entity<TextInput>,
     pub error: String,
-    _sub: Subscription,
+    _subs: Vec<Subscription>,
 }
 
 impl ServerGroupDialog {
-    pub fn new(scale: f32, window: &mut Window, cx: &mut Context<Workspace>) -> Self {
-        let input = input(cx, scale, "", "Production");
-        let sub = cx.subscribe_in(&input, window, |ws, _i, ev: &InputEvent, _w, cx| {
+    /// A dialog for a new group, or for editing `group` when given.
+    pub fn new(group: Option<&ServerGroup>, scale: f32, window: &mut Window, cx: &mut Context<Workspace>) -> Self {
+        let tab_color = input(cx, scale, group.map_or("", |g| g.tab_color.as_str()), "Default");
+        let input = input(cx, scale, group.map_or("", |g| g.title.as_str()), "Production");
+        let submit = |ws: &mut Workspace, _i: &Entity<TextInput>, ev: &InputEvent, _w: &mut Window, cx: &mut Context<Workspace>| {
             if matches!(ev, InputEvent::Submit) {
                 ws.save_server_group(cx);
             }
-        });
+        };
+        let subs = vec![cx.subscribe_in(&input, window, submit), cx.subscribe_in(&tab_color, window, submit)];
+        tab_color.update(cx, |i, _| i.tab_index = Some(1));
         input.update(cx, |i, _| {
             i.tab_index = Some(0);
             i.focus(window);
         });
-        ServerGroupDialog { input, error: String::new(), _sub: sub }
+        ServerGroupDialog { editing: group.map(|g| g.id.clone()), input, tab_color, error: String::new(), _subs: subs }
     }
 }
 
@@ -432,13 +449,24 @@ impl Workspace {
     pub fn save_server_group(&mut self, cx: &mut Context<Self>) {
         let Some(d) = &mut self.server_group_dialog else { return };
         let title = d.input.read(cx).text().trim().to_string();
+        let tab_color = d.tab_color.read(cx).text().trim().to_string();
         if title.is_empty() {
             d.error = "Title is required".into();
             cx.notify();
             return;
         }
-        let id = self.add_server_group(&title);
-        self.expanded_groups.insert(id);
+        if !tab_color.is_empty() && parse_hex(&tab_color).is_none() {
+            d.error = "Tab colour must be a hex colour such as #6366f1".into();
+            cx.notify();
+            return;
+        }
+        match d.editing.clone() {
+            Some(group_id) => self.update_server_group(&group_id, &title, &tab_color),
+            None => {
+                let id = self.add_server_group(&title, &tab_color);
+                self.expanded_groups.insert(id);
+            }
+        }
         self.server_group_dialog = None;
         cx.notify();
     }
@@ -800,7 +828,8 @@ pub fn modal_header(s: Scale, title: &str, on_close: impl Fn(&ClickEvent, &mut W
                 .cursor_pointer()
                 .hover(|st| st.text_color(theme::TEXT))
                 .on_click(on_close)
-                .child("✕"),
+                .group("modal-close")
+                .child(icon(Icon::Close, s.fs(14.0), theme::TEXT_MUTED).group_hover("modal-close", |st| st.text_color(theme::TEXT))),
         )
         .into_any_element()
 }
@@ -1169,8 +1198,14 @@ impl Workspace {
     }
 
     pub fn open_color_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(d) = &self.conn_dialog else { return };
-        let current = parse_hex(&d.tab_color.read(cx).text().to_string()).unwrap_or_else(|| parse_hex(DEFAULT_TAB_COLOR).unwrap());
+        self.open_color_panel_for(conn_dialog_color, window, cx);
+    }
+
+    /// The system colour panel, feeding the colour picked into the tab colour
+    /// field `target` finds, for as long as that field's dialog is open.
+    pub fn open_color_panel_for(&mut self, target: ColorTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(field) = target(self) else { return };
+        let current = parse_hex(&field.read(cx).text().to_string()).unwrap_or_else(|| parse_hex(DEFAULT_TAB_COLOR).unwrap());
         crate::ui::color_panel::show(current);
         cx.spawn_in(window, async move |this, cx| {
             let mut last: Option<String> = None;
@@ -1187,8 +1222,8 @@ impl Workspace {
                     let hex = hex.unwrap();
                     let ok = this
                         .update(cx, |this, cx| {
-                            let Some(d) = &this.conn_dialog else { return false };
-                            d.tab_color.update(cx, |i, cx| i.set_text(hex.clone(), cx));
+                            let Some(field) = target(this) else { return false };
+                            field.update(cx, |i, cx| i.set_text(hex.clone(), cx));
                             cx.notify();
                             true
                         })
@@ -1198,7 +1233,7 @@ impl Workspace {
                         break;
                     }
                 }
-                let open = this.update(cx, |this, _| this.conn_dialog.is_some()).unwrap_or(false);
+                let open = this.update(cx, |this, _| target(this).is_some()).unwrap_or(false);
                 if !open {
                     crate::ui::color_panel::close();
                     break;
@@ -1210,6 +1245,17 @@ impl Workspace {
         })
         .detach();
     }
+}
+
+/// Finds the tab colour field the colour panel writes to.
+pub type ColorTarget = fn(&Workspace) -> Option<Entity<TextInput>>;
+
+fn conn_dialog_color(ws: &Workspace) -> Option<Entity<TextInput>> {
+    ws.conn_dialog.as_ref().map(|d| d.tab_color.clone())
+}
+
+pub fn server_group_color(ws: &Workspace) -> Option<Entity<TextInput>> {
+    ws.server_group_dialog.as_ref().map(|d| d.tab_color.clone())
 }
 
 /// Native (light appearance) macOS checkbox as rendered by WebKit.
@@ -1224,7 +1270,7 @@ pub fn checkbox(checked: bool, disabled: bool) -> AnyElement {
         .when(disabled, |d| d.opacity(0.5));
     if checked {
         base.bg(theme::hex(0x0a82ff))
-            .child(div().text_size(px(11.)).line_height(px(11.)).text_color(theme::WHITE).font_weight(FontWeight::BOLD).child("✓"))
+            .child(icon(Icon::Check, px(11.), theme::WHITE))
             .into_any_element()
     } else {
         base.bg(theme::WHITE).border_1().border_color(theme::hex(0xb4b4b4)).into_any_element()

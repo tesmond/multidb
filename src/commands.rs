@@ -186,6 +186,7 @@ pub async fn execute_query_streamed(
     state: Arc<AppState>,
     conn_id: String,
     database_name: String,
+    default_schema: String,
     query_id: String,
     query: String,
     max_rows: i64,
@@ -230,26 +231,21 @@ pub async fn execute_query_streamed(
         {
             Ok(pool) => {
                 emit_progress(&emitter, &query_id, QueryPhase::Waiting);
-                if queries::looks_like_row_returning_query(&query) {
-                    stream_postgres_rows(
-                        &emitter,
-                        &pool,
-                        &query_id,
-                        &query,
-                        max_rows,
-                        cancel.clone(),
-                        start,
-                    )
-                    .await
-                } else {
-                    let result = queries::execute_postgres_non_query(&pool, &query).await;
-                    Ok(QueryStreamDone {
-                        query_id: query_id.clone(),
-                        total_rows: 0,
-                        rows_affected: result.rows_affected,
-                        duration: result.duration,
-                        error: result.error,
-                    })
+                match pool.acquire().await {
+                    Ok(conn) => {
+                        run_postgres(
+                            emitter.clone(),
+                            conn,
+                            default_schema.clone(),
+                            query_id.clone(),
+                            query.clone(),
+                            max_rows,
+                            cancel.clone(),
+                            start,
+                        )
+                        .await
+                    }
+                    Err(err) => Err(err.into()),
                 }
             }
             Err(err) => Err(err),
@@ -258,26 +254,21 @@ pub async fn execute_query_streamed(
         match state.get_mysql_pool_or_reconnect(&conn_id).await {
             Ok(pool) => {
                 emit_progress(&emitter, &query_id, QueryPhase::Waiting);
-                if queries::looks_like_row_returning_query(&query) {
-                    stream_mysql_rows(
-                        &emitter,
-                        &pool,
-                        &query_id,
-                        &query,
-                        max_rows,
-                        cancel.clone(),
-                        start,
-                    )
-                    .await
-                } else {
-                    let result = queries::execute_mysql_non_query(&pool, &query).await;
-                    Ok(QueryStreamDone {
-                        query_id: query_id.clone(),
-                        total_rows: 0,
-                        rows_affected: result.rows_affected,
-                        duration: result.duration,
-                        error: result.error,
-                    })
+                match pool.acquire().await {
+                    Ok(conn) => {
+                        run_mysql(
+                            emitter.clone(),
+                            conn,
+                            default_schema.clone(),
+                            query_id.clone(),
+                            query.clone(),
+                            max_rows,
+                            cancel.clone(),
+                            start,
+                        )
+                        .await
+                    }
+                    Err(err) => Err(err.into()),
                 }
             }
             Err(err) => Err(err),
@@ -499,16 +490,145 @@ async fn terminate_mysql_connection(
     Ok(())
 }
 
+/// Runs one editor query on a single Postgres connection. With a default
+/// schema, that schema is put at the front of the connection's search path
+/// for the query and taken off again afterwards, so the pool never hands out a
+/// connection still pointing at another tab's schema.
+#[allow(clippy::too_many_arguments)]
+async fn run_postgres(
+    emitter: EventEmitter,
+    mut conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    default_schema: String,
+    query_id: String,
+    query: String,
+    max_rows: usize,
+    cancel: CancellationToken,
+    start: Instant,
+) -> Result<QueryStreamDone> {
+    let scoped = !default_schema.is_empty();
+    if scoped {
+        if let Err(err) = set_postgres_default_schema(&mut conn, &default_schema).await {
+            drop(conn.detach());
+            return Err(err);
+        }
+    }
+    let done = if queries::looks_like_row_returning_query(&query) {
+        stream_postgres_rows(&emitter, &mut conn, &query_id, &query, max_rows, cancel.clone(), start).await
+    } else {
+        let result = queries::execute_postgres_non_query(&mut conn, &query).await;
+        Ok(QueryStreamDone {
+            query_id: query_id.clone(),
+            total_rows: 0,
+            rows_affected: result.rows_affected,
+            duration: result.duration,
+            error: result.error,
+        })
+    };
+    if scoped {
+        // A cancelled query may still be running on the server: close the
+        // connection rather than wait for it to finish.
+        let restored = !cancel.is_cancelled() && reset_postgres_search_path(&mut conn).await.is_ok();
+        if !restored {
+            drop(conn.detach());
+        }
+    }
+    done
+}
+
+async fn set_postgres_default_schema(conn: &mut sqlx::PgConnection, schema: &str) -> Result<()> {
+    // The `Executor` methods return boxed `Send` futures; the generic
+    // `Query::execute` over a `&mut` connection trips rustc's `Send` check
+    // for the spawned query future.
+    let set = sqlx::query("SELECT set_config('search_path', $1::text || ', ' || current_setting('search_path'), false)")
+        .bind(backup::quote_identifier("postgres", schema));
+    sqlx::Executor::execute(&mut *conn, set).await?;
+    // Postgres binds a prepared statement to the search path it was prepared
+    // under, so cached statements must not outlive a change of schema.
+    sqlx::Connection::clear_cached_statements(conn).await?;
+    Ok(())
+}
+
+async fn reset_postgres_search_path(conn: &mut sqlx::PgConnection) -> Result<()> {
+    sqlx::Executor::execute(&mut *conn, "RESET search_path").await?;
+    sqlx::Connection::clear_cached_statements(conn).await?;
+    Ok(())
+}
+
+/// The MySQL counterpart of `run_postgres`: a default schema is a `USE` of
+/// that database for the query, followed by a `USE` of the one the connection
+/// was on before. A connection that had no database selected cannot go back
+/// to that state, so it is closed instead of returned to the pool.
+#[allow(clippy::too_many_arguments)]
+async fn run_mysql(
+    emitter: EventEmitter,
+    mut conn: sqlx::pool::PoolConnection<sqlx::MySql>,
+    default_schema: String,
+    query_id: String,
+    query: String,
+    max_rows: usize,
+    cancel: CancellationToken,
+    start: Instant,
+) -> Result<QueryStreamDone> {
+    let previous = if default_schema.is_empty() {
+        None
+    } else {
+        match use_mysql_database(&mut conn, &default_schema).await {
+            Ok(previous) => Some(previous),
+            Err(err) => {
+                drop(conn.detach());
+                return Err(err);
+            }
+        }
+    };
+    let done = if queries::looks_like_row_returning_query(&query) {
+        stream_mysql_rows(&emitter, &mut conn, &query_id, &query, max_rows, cancel.clone(), start).await
+    } else {
+        let result = queries::execute_mysql_non_query(&mut conn, &query).await;
+        Ok(QueryStreamDone {
+            query_id: query_id.clone(),
+            total_rows: 0,
+            rows_affected: result.rows_affected,
+            duration: result.duration,
+            error: result.error,
+        })
+    };
+    if let Some(previous) = previous {
+        let restored = match previous {
+            Some(db) if !cancel.is_cancelled() => use_mysql_database(&mut conn, &db).await.is_ok(),
+            _ => false,
+        };
+        if !restored {
+            drop(conn.detach());
+        }
+    }
+    done
+}
+
+/// `USE db` on this connection; returns the database it was on before.
+async fn use_mysql_database(conn: &mut sqlx::MySqlConnection, database: &str) -> Result<Option<String>> {
+    let row = sqlx::Executor::fetch_one(&mut *conn, "SELECT DATABASE()").await?;
+    // Unchecked: the column's reported type varies with the connection's
+    // character set, and it is a database name either way.
+    let previous: Option<String> = row.try_get_unchecked(0)?;
+    // A plain string with no arguments goes over the text protocol, which
+    // `USE` needs: it is not allowed as a prepared statement.
+    let sql = format!("USE {}", backup::quote_identifier("mysql", database));
+    sqlx::Executor::execute(&mut *conn, sql.as_str()).await?;
+    // Cached statements resolved their table names in the old database.
+    sqlx::Connection::clear_cached_statements(conn).await?;
+    Ok(previous)
+}
+
 async fn stream_mysql_rows(
     emitter: &EventEmitter,
-    pool: &sqlx::MySqlPool,
+    conn: &mut sqlx::MySqlConnection,
     query_id: &str,
     query: &str,
     max_rows: usize,
     cancel: CancellationToken,
     start: Instant,
 ) -> Result<QueryStreamDone> {
-    let mut stream = sqlx::query(query).fetch(pool);
+    let mut stream = sqlx::query(query).fetch(conn);
     let mut chunk = Vec::new();
     let mut pacer = Pacer::new();
     let mut total_rows = 0_usize;
@@ -730,14 +850,14 @@ async fn stream_sqlite_rows(
 
 async fn stream_postgres_rows(
     emitter: &EventEmitter,
-    pool: &sqlx::PgPool,
+    conn: &mut sqlx::PgConnection,
     query_id: &str,
     query: &str,
     max_rows: usize,
     cancel: CancellationToken,
     start: Instant,
 ) -> Result<QueryStreamDone> {
-    let mut stream = sqlx::query(query).fetch(pool);
+    let mut stream = sqlx::query(query).fetch(conn);
     let mut chunk = Vec::new();
     let mut pacer = Pacer::new();
     let mut total_rows = 0_usize;
@@ -903,6 +1023,37 @@ pub async fn get_table_primary_keys(
     schema::get_primary_keys(&pool, &driver, &schema_name, &table_name)
         .await
         .map_err(command_err)
+}
+
+/// The `CREATE TABLE` (and index) statements for a table, as the database
+/// describes it.
+pub async fn get_table_ddl(
+    state: Arc<AppState>,
+    conn_id: String,
+    database_name: String,
+    schema_name: String,
+    table_name: String,
+) -> CommandResult<String> {
+    let cfg = state.get_config_or_saved(&conn_id).await.map_err(command_err)?;
+    match cfg.driver.as_str() {
+        "postgres" => {
+            let pool = state
+                .get_pg_pool_for_database_or_reconnect(&conn_id, &database_name)
+                .await
+                .map_err(command_err)?;
+            let schema_name = if schema_name.is_empty() { "public".to_string() } else { schema_name };
+            crate::ddl::postgres_create_table(&pool, &schema_name, &table_name).await.map_err(command_err)
+        }
+        "mysql" => {
+            let pool = state.get_mysql_pool_or_reconnect(&conn_id).await.map_err(command_err)?;
+            crate::ddl::mysql_create_table(&pool, &schema_name, &table_name).await.map_err(command_err)
+        }
+        "sqlite" => {
+            let pool = state.get_sqlite_pool_or_reconnect(&conn_id).await.map_err(command_err)?;
+            crate::ddl::sqlite_create_table(&pool, &table_name).await.map_err(command_err)
+        }
+        other => Err(format!("CREATE TABLE templates are not supported for {other}")),
+    }
 }
 
 /// Table names are available before the complete metadata snapshot.

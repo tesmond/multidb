@@ -3,11 +3,34 @@
 
 use crate::ui::theme::{self, Rgba};
 use crate::ui::widgets::{shadow, Scale, TextExt};
+use crate::ui::icons::{icon, Icon};
+use crate::ui::model::TabId;
 use crate::ui::workspace::{TabKind, Workspace};
 use gpui::{
     deferred, div, point, prelude::*, px, AnyElement, Context, CursorStyle, FontWeight, MouseButton, MouseMoveEvent,
     SharedString, Window,
 };
+
+/// What the empty choice of the default-schema dropdown reads.
+const NO_SCHEMA: &str = "— no default schema —";
+
+/// Which toolbar dropdown `render_toolbar_select` draws.
+struct ToolbarSelect {
+    id: &'static str,
+    /// Its open state: the tab it is open on and the highlighted option.
+    state: fn(&mut Workspace) -> &mut Option<(TabId, usize)>,
+    /// The other toolbar dropdown's, closed when this one opens.
+    other: fn(&mut Workspace) -> &mut Option<(TabId, usize)>,
+    min_w: f32,
+}
+
+fn conn_select_state(ws: &mut Workspace) -> &mut Option<(TabId, usize)> {
+    &mut ws.conn_select_open
+}
+
+fn schema_select_state(ws: &mut Workspace) -> &mut Option<(TabId, usize)> {
+    &mut ws.schema_select_open
+}
 
 impl Workspace {
     // ─── Editor panel ───────────────────────────────────────────────────────
@@ -37,7 +60,7 @@ impl Workspace {
         let label = options.iter().find(|(v, _)| *v == conn_id).map(|(_, l)| l.clone()).unwrap_or_else(|| "— select connection —".into());
         let has_selection = options.iter().any(|(v, _)| *v == conn_id);
 
-        let btn = |id: &'static str, label: &'static str, bg: Rgba, border: Rgba| {
+        let btn = |id: &'static str, glyph: Icon, label: &'static str, bg: Rgba, border: Rgba| {
             div()
                 .id(id)
                 .px(px(14.))
@@ -50,6 +73,10 @@ impl Workspace {
                 .t(s, 12.0)
                 .font_weight(FontWeight::MEDIUM)
                 .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(icon(glyph, s.fs(12.0), theme::WHITE))
                 .child(label)
         };
         let t1 = tab_id.clone();
@@ -67,9 +94,12 @@ impl Workspace {
             .border_color(theme::BORDER)
             .flex_shrink_0()
             .child(self.render_conn_select(&tab_id, &label, has_selection, open, options, s, cx));
+        if let Some(schema_select) = self.render_schema_select(&tab_id, s, cx) {
+            toolbar = toolbar.child(schema_select);
+        }
         if running {
             toolbar = toolbar.child(
-                btn("btn-stop", "⏹ Stop", theme::ERROR, theme::ERROR)
+                btn("btn-stop", Icon::Stop, "Stop", theme::ERROR, theme::ERROR)
                     .cursor_pointer()
                     .hover(|st| st.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| this.cancel_query(&t1, cx))),
@@ -77,13 +107,13 @@ impl Workspace {
         } else {
             toolbar = toolbar
                 .child(
-                    btn("btn-run", "▶ Run", theme::ACCENT, theme::ACCENT)
+                    btn("btn-run", Icon::Run, "Run", theme::ACCENT, theme::ACCENT)
                         .cursor_pointer()
                         .hover(|st| st.bg(theme::ACCENT_HOVER))
                         .on_click(cx.listener(move |this, _, _, cx| this.run_query(&t2, cx))),
                 )
                 .child({
-                    let b = btn("btn-save", "💾 Save", theme::SAVE_BLUE, theme::TRANSPARENT);
+                    let b = btn("btn-save", Icon::Save, "Save", theme::SAVE_BLUE, theme::TRANSPARENT);
                     if empty {
                         b.opacity(0.5).cursor(CursorStyle::OperationNotAllowed)
                     } else {
@@ -115,13 +145,74 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let _ = has_selection;
-        let tid = tab_id.to_string();
         let current = self.tab(tab_id).map(|t| t.conn_id.clone()).unwrap_or_default();
-        let current_index = options.iter().position(|(v, _)| *v == current).unwrap_or(0);
+        self.render_toolbar_select(
+            ToolbarSelect { id: "conn-select", state: conn_select_state, other: schema_select_state, min_w: 180.0 },
+            tab_id,
+            label,
+            &current,
+            open,
+            options,
+            |this, tab_id, value, cx| this.set_tab_conn(tab_id, value, cx),
+            s,
+            cx,
+        )
+    }
+
+    /// The default-schema dropdown: the schema unqualified table names in the
+    /// tab's SQL resolve to, or none.
+    fn render_schema_select(&mut self, tab_id: &str, s: Scale, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tab = self.tab(tab_id)?;
+        let sql = tab.sql()?;
+        let conn = self.connection(&tab.conn_id)?;
+        if conn.config.driver == "sqlite" {
+            return None;
+        }
+        let current = sql.default_schema.clone();
+        let mut names = self.schema_names(&tab.conn_id, &sql.database_name);
+        // Keep a selection the loaded schema does not list (yet) visible.
+        if !current.is_empty() && !names.contains(&current) {
+            names.insert(0, current.clone());
+        }
+        let mut options = vec![(String::new(), NO_SCHEMA.to_string())];
+        options.extend(names.into_iter().map(|n| (n.clone(), n)));
+        let label = if current.is_empty() { NO_SCHEMA.to_string() } else { current.clone() };
+        let open = self.schema_select_open.as_ref().filter(|(t, _)| *t == tab_id).map(|(_, a)| *a);
+        Some(self.render_toolbar_select(
+            ToolbarSelect { id: "schema-select", state: schema_select_state, other: conn_select_state, min_w: 150.0 },
+            tab_id,
+            &label,
+            &current,
+            open,
+            options,
+            |this, tab_id, value, cx| this.set_tab_default_schema(tab_id, value, cx),
+            s,
+            cx,
+        ))
+    }
+
+    /// A toolbar dropdown: a button showing `label` and, while open, a menu of
+    /// `options` (value, text) with `current` ticked.
+    #[allow(clippy::too_many_arguments)]
+    fn render_toolbar_select(
+        &mut self,
+        sel: ToolbarSelect,
+        tab_id: &str,
+        label: &str,
+        current: &str,
+        open: Option<usize>,
+        options: Vec<(String, String)>,
+        on_pick: fn(&mut Workspace, &str, String, &mut Context<Workspace>),
+        s: Scale,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ToolbarSelect { id, state, other, min_w } = sel;
+        let tid = tab_id.to_string();
+        let current_index = options.iter().position(|(v, _)| v == current).unwrap_or(0);
         let n_options = options.len();
-        let mut root = div().relative().flex().min_w(px(180.)).flex_shrink_0().child(
+        let mut root = div().relative().flex().min_w(px(min_w)).flex_shrink_0().child(
             div()
-                .id("conn-select")
+                .id(id)
                 .w_full()
                 .flex()
                 .items_center()
@@ -139,19 +230,27 @@ impl Workspace {
                 .hover(|st| st.border_color(theme::ACCENT))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.conn_select_open.is_some() {
-                        this.conn_select_open = None;
+                    *other(this) = None;
+                    if state(this).is_some() {
+                        *state(this) = None;
                     } else if n_options > 0 {
-                        this.conn_select_open = Some((tid.clone(), current_index));
+                        *state(this) = Some((tid.clone(), current_index));
+                        // The schema list comes from the connection's schema tree.
+                        if id == "schema-select" {
+                            let conn_id = this.tab(&tid).map(|t| t.conn_id.clone()).unwrap_or_default();
+                            if this.connection(&conn_id).is_some_and(|c| c.schema.is_none()) {
+                                this.ensure_schema(&conn_id, cx);
+                            }
+                        }
                     }
                     cx.notify();
                 }))
                 .child(div().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label.to_string()))
-                .child(div().flex_shrink_0().opacity(0.8).text_size(s.fs(14.0)).line_height(s.fs(14.0)).child("▾")),
+                .child(div().flex_shrink_0().opacity(0.8).child(icon(Icon::ChevronDown, s.fs(12.0), theme::TEXT))),
         );
         if let Some(active) = open {
             let mut menu = div()
-                .id("conn-select-menu")
+                .id(SharedString::from(format!("{id}-menu")))
                 .occlude()
                 .absolute()
                 .left_0()
@@ -172,7 +271,7 @@ impl Workspace {
                 let v = value.clone();
                 menu = menu.child(
                     div()
-                        .id(SharedString::from(format!("opt-{i}")))
+                        .id(SharedString::from(format!("{id}-opt-{i}")))
                         .w_full()
                         .flex()
                         .items_center()
@@ -190,7 +289,7 @@ impl Workspace {
                                 .shadow(vec![gpui::BoxShadow { color: theme::hsla(theme::ACCENT), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(1.) }])
                         })
                         .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
-                            if let Some((_, a)) = &mut this.conn_select_open {
+                            if let Some((_, a)) = state(this) {
                                 if *a != i {
                                     *a = i;
                                     cx.notify();
@@ -198,25 +297,26 @@ impl Workspace {
                             }
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.conn_select_open = None;
-                            this.set_tab_conn(&tid, v.clone(), cx);
+                            *state(this) = None;
+                            on_pick(this, &tid, v.clone(), cx);
+                            cx.notify();
                         }))
                         .child(div().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text))
-                        .when(selected, |d| d.child(div().flex_shrink_0().text_color(theme::ACCENT).t(s, 11.0).child("✓"))),
+                        .when(selected, |d| d.child(icon(Icon::Check, s.fs(12.0), theme::ACCENT))),
                 );
             }
             root = root
                 .child(
                     deferred(
                         div()
-                            .id("conn-select-backdrop")
+                            .id(SharedString::from(format!("{id}-backdrop")))
                             .absolute()
                             .top(px(-2000.))
                             .left(px(-2000.))
                             .w(px(8000.))
                             .h(px(8000.))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                this.conn_select_open = None;
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                *state(this) = None;
                                 cx.notify();
                             })),
                     )

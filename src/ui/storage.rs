@@ -10,6 +10,7 @@ use crate::models::SchemaTree;
 use crate::ui::model::format_bytes;
 use crate::ui::theme::{self, hsla, Rgba};
 use crate::ui::widgets::{Scale, TextExt};
+use crate::ui::icons::{icon, Icon};
 use crate::ui::workspace::{Tab, TabKind, Workspace};
 use gpui::{
     canvas, div, point, prelude::*, px, uniform_list, AnyElement, Bounds, Context, FontWeight, MouseMoveEvent,
@@ -575,7 +576,11 @@ impl Workspace {
                         }
                         cx.notify();
                     }))
-                    .child(header_cell(if descending { "Size ▼" } else { "Size ▲" })),
+                    .group("storage-sort")
+                    .items_center()
+                    .gap(px(4.))
+                    .child(header_cell("Size"))
+                    .child(icon(if descending { Icon::SortDesc } else { Icon::SortAsc }, s.fs(10.0), theme::TEXT_MUTED).group_hover("storage-sort", |st| st.text_color(theme::TEXT))),
             )
             .child(div().w(px(56.)).flex_shrink_0().flex().justify_end().child(header_cell("% total")))
             .child(div().flex_1().min_w(px(48.)).max_w(px(220.)).child(header_cell("Relative size")));

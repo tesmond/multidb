@@ -2,6 +2,7 @@ mod aws_auth;
 mod backup;
 mod commands;
 mod connections;
+mod ddl;
 mod history;
 mod ipc_diagnostics;
 mod models;

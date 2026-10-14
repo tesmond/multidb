@@ -104,6 +104,7 @@ impl Workspace {
         self.tabbar.update(cx, |t, cx| t.close_menu(cx));
         self.output.update(cx, |o, cx| o.close_overlays(cx));
         self.conn_select_open = None;
+        self.schema_select_open = None;
         cx.notify();
     }
 

@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn grouped_connections_only_show_when_their_group_is_open() {
         let mut f = Fixture::new(vec![conn("a", "sqlite", "", sqlite(vec![])), conn("b", "sqlite", "", sqlite(vec![]))]);
-        f.groups = vec![ServerGroup { id: "g".into(), title: "G".into(), connection_ids: vec!["b".into()] }];
+        f.groups = vec![ServerGroup { id: "g".into(), title: "G".into(), connection_ids: vec!["b".into()], tab_color: String::new() }];
         assert_eq!(
             kinds(&f.rows(None)),
             vec![RowKind::Group { group: 0, count: 1, open: false }, RowKind::Conn { conn: 0, group: None, open: false }]

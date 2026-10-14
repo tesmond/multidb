@@ -3,6 +3,7 @@
 //! mouse, clipboard and IME support.
 
 use crate::ui::theme::{self, hsla};
+use crate::ui::icons::{icon, Icon};
 use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, AnyElement, App, Bounds, ClipboardItem, Context,
     CursorStyle,
@@ -1025,10 +1026,7 @@ fn spin_button(font_size: f32) -> AnyElement {
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(0.5 * font_size))
-            .line_height(px(0.42 * font_size))
-            .text_color(theme::hex(0x6b6b6b))
-            .child(if up { "▲" } else { "▼" })
+            .child(icon(if up { Icon::CaretUp } else { Icon::CaretDown }, px(0.42 * font_size), theme::hex(0x6b6b6b)))
     };
     div()
         .flex_shrink_0()

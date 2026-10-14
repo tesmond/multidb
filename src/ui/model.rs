@@ -35,6 +35,10 @@ pub struct ServerGroup {
     pub id: String,
     pub title: String,
     pub connection_ids: Vec<String>,
+    /// Tab colour for the group's connections that have no colour of their
+    /// own; empty for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tab_color: String,
 }
 
 /// Rows arrive in chunks while a query streams; storing the chunks behind

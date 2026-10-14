@@ -5,6 +5,7 @@ pub mod diagram;
 pub mod color_panel;
 pub mod dialogs;
 pub mod editor;
+pub mod icons;
 pub mod grid;
 pub mod js;
 pub mod metrics;
@@ -64,7 +65,7 @@ pub fn run() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("failed to install rustls aws-lc crypto provider"))?;
     sqlx::any::install_default_drivers();
 
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(icons::Assets).run(|cx: &mut App| {
         let mono = pick_mono_family(cx);
         metrics::init(cx, &mono);
         gpui_component::init(cx);

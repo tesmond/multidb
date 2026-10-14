@@ -11,6 +11,7 @@ use crate::ui::model::TabId;
 use crate::ui::theme::{self, Rgba};
 use crate::ui::widgets::text_input::{InputEvent, InputLook, TextInput};
 use crate::ui::widgets::{separator, shadow, Scale, TextExt};
+use crate::ui::icons::{icon, Icon};
 use crate::ui::workspace::{TabDrag, Workspace};
 use gpui::{
     anchored, deferred, div, point, prelude::*, px, Animation, AnimationExt, AnyElement, Bounds, Context, Corner,
@@ -275,6 +276,7 @@ impl TabBar {
                 .px(px(2.))
                 .rounded(px(2.))
                 .text_color(close_color)
+                .group("tab-close")
                 .opacity(0.)
                 .group_hover(close_group, |st| st.opacity(0.7))
                 .hover(move |st| {
@@ -290,7 +292,10 @@ impl TabBar {
                         this.with_ws(cx, |ws, cx| ws.remove_tab(&id, cx));
                     }
                 }))
-                .child("✕"),
+                .child({
+                    let hover = if custom.is_some() { close_color } else { theme::TEXT };
+                    icon(Icon::Close, s.fs(10.0), close_color).group_hover("tab-close", move |st| st.text_color(hover))
+                }),
         );
         let this = cx.entity().downgrade();
         el.into_any_element().map_bounds(i, this)
@@ -405,7 +410,7 @@ impl Render for TabBar {
         let can_left = self.scroll.offset().x < px(-1.);
         let can_right = self.scroll.offset().x > -self.scroll.max_offset().width + px(1.);
         let indicator = self.drag.as_ref().filter(|d| d.active && d.drop_index.is_some()).map(|d| d.indicator_x);
-        let scroll_btn = |id: &'static str, glyph: &'static str, enabled: bool| {
+        let scroll_btn = |id: &'static str, glyph: Icon, enabled: bool| {
             div()
                 .id(id)
                 .size(px(26.))
@@ -419,9 +424,11 @@ impl Render for TabBar {
                 .rounded(px(4.))
                 .bg(theme::BG_SURFACE)
                 .text_color(theme::TEXT)
-                .text_size(s.fs(11.0))
-                .line_height(px(11.0 * s.0))
-                .child(glyph)
+                .group(id)
+                .child({
+                    let i = icon(glyph, s.fs(11.0), theme::TEXT);
+                    if enabled { i.group_hover(id, |st| st.text_color(theme::ACCENT_HOVER)) } else { i }
+                })
                 .when(!enabled, |d| d.opacity(0.45))
                 .when(enabled, |d| d.cursor_pointer().hover(|st| st.border_color(theme::ACCENT).text_color(theme::ACCENT_HOVER)))
         };
@@ -468,11 +475,11 @@ impl Render for TabBar {
                     .border_color(theme::BORDER_SUBTLE)
                     .bg(theme::BG_TOOLBAR)
                     .when(overflow, |d| {
-                        d.child(scroll_btn("tab-left", "◀", can_left).on_click(cx.listener(|this, _, _, cx| {
+                        d.child(scroll_btn("tab-left", Icon::ChevronLeft, can_left).on_click(cx.listener(|this, _, _, cx| {
                             this.scroll_tabs(-1.0);
                             cx.notify();
                         })))
-                        .child(scroll_btn("tab-right", "▶", can_right).on_click(cx.listener(|this, _, _, cx| {
+                        .child(scroll_btn("tab-right", Icon::ChevronRight, can_right).on_click(cx.listener(|this, _, _, cx| {
                             this.scroll_tabs(1.0);
                             cx.notify();
                         })))

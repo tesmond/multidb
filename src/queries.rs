@@ -5,7 +5,7 @@ use sqlx::{
     mysql::MySqlRow,
     postgres::{PgRow, PgValueFormat},
     sqlite::SqliteRow,
-    AnyPool, Column, MySqlPool, PgPool, Row, SqlitePool, TypeInfo, Value as SqlxValue, ValueRef,
+    AnyPool, Column, MySqlConnection, PgConnection, Row, SqlitePool, TypeInfo, Value as SqlxValue, ValueRef,
 };
 use std::time::Instant;
 
@@ -48,12 +48,14 @@ pub async fn execute_non_query(pool: &AnyPool, query: &str) -> ExecuteResult {
 }
 
 
-pub async fn execute_postgres_non_query(pool: &PgPool, query: &str) -> ExecuteResult {
+/// Runs every statement on the one connection, so session state (a `SET`, a
+/// transaction) carries from one statement to the next.
+pub async fn execute_postgres_non_query(conn: &mut PgConnection, query: &str) -> ExecuteResult {
     let start = Instant::now();
     let mut rows_affected = 0_i64;
 
     for statement in split_statements(query) {
-        match sqlx::query(&statement).execute(pool).await {
+        match sqlx::Executor::execute(&mut *conn, sqlx::query(&statement)).await {
             Ok(done) => rows_affected += done.rows_affected() as i64,
             Err(err) => {
                 return ExecuteResult {
@@ -73,12 +75,13 @@ pub async fn execute_postgres_non_query(pool: &PgPool, query: &str) -> ExecuteRe
 }
 
 
-pub async fn execute_mysql_non_query(pool: &MySqlPool, query: &str) -> ExecuteResult {
+/// Runs every statement on the one connection (see `execute_postgres_non_query`).
+pub async fn execute_mysql_non_query(conn: &mut MySqlConnection, query: &str) -> ExecuteResult {
     let start = Instant::now();
     let mut rows_affected = 0_i64;
 
     for statement in split_statements(query) {
-        match sqlx::query(&statement).execute(pool).await {
+        match sqlx::Executor::execute(&mut *conn, sqlx::query(&statement)).await {
             Ok(done) => rows_affected += done.rows_affected() as i64,
             Err(err) => {
                 return ExecuteResult {

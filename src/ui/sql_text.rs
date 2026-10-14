@@ -94,6 +94,50 @@ pub fn qualify_table(driver: &str, table: &str, schema: Option<&str>) -> String 
     }
 }
 
+/// An identifier as it can be written in a query: bare when the database
+/// would read the bare word back as the same name, quoted otherwise.
+pub fn ident(name: &str, driver: &str) -> String {
+    let mut chars = name.chars();
+    let starts_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    // Postgres folds bare identifiers to lower case.
+    let rest_ok = name
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '_' || c.is_ascii_lowercase() || (c.is_ascii_uppercase() && driver != "postgres"));
+    if starts_ok && rest_ok && !crate::ui::sql::tokenizer::is_sql_keyword(name) {
+        name.to_string()
+    } else {
+        quote_identifier(name, driver)
+    }
+}
+
+/// `INSERT INTO t (a, b) VALUES (?, ?);` naming every column.
+pub fn insert_template(driver: &str, table: &str, columns: &[String]) -> String {
+    let names: Vec<String> = columns.iter().map(|c| ident(c, driver)).collect();
+    let marks = vec!["?"; names.len()];
+    format!("INSERT INTO {} ({})\nVALUES ({});\n", ident(table, driver), names.join(", "), marks.join(", "))
+}
+
+/// `UPDATE t SET a = ?, b = ? WHERE pk = ?;`: the primary key columns pick
+/// the row and every other column is set. A table without a primary key sets
+/// every column and matches the row on all of them.
+pub fn update_template(driver: &str, table: &str, columns: &[String], primary_key: &[String]) -> String {
+    let assign = |c: &String| format!("{} = ?", ident(c, driver));
+    let (set, keys): (Vec<&String>, Vec<&String>) = if primary_key.is_empty() {
+        (columns.iter().collect(), columns.iter().collect())
+    } else {
+        let set: Vec<&String> = columns.iter().filter(|c| !primary_key.contains(c)).collect();
+        // A table that is all key still needs something to set.
+        let set = if set.is_empty() { columns.iter().collect() } else { set };
+        (set, primary_key.iter().collect())
+    };
+    format!(
+        "UPDATE {}\nSET {}\nWHERE {};\n",
+        ident(table, driver),
+        set.into_iter().map(assign).collect::<Vec<_>>().join(",\n    "),
+        keys.into_iter().map(assign).collect::<Vec<_>>().join("\n  AND "),
+    )
+}
+
 /// `quoteValue` from OutputPanel.svelte. Pending edits are always strings;
 /// original values may be any JSON value.
 pub fn quote_value(value: &Value) -> String {
@@ -161,6 +205,34 @@ pub fn generate_update_sql(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ident_quotes_only_when_needed() {
+        assert_eq!(super::ident("users", "postgres"), "users");
+        assert_eq!(super::ident("Users", "postgres"), "\"Users\"");
+        assert_eq!(super::ident("Users", "mysql"), "Users");
+        assert_eq!(super::ident("order", "mysql"), "`order`");
+        assert_eq!(super::ident("user", "postgres"), "\"user\"");
+        assert_eq!(super::ident("2fa", "sqlite"), "\"2fa\"");
+        assert_eq!(super::ident("first name", "postgres"), "\"first name\"");
+    }
+
+    #[test]
+    fn insert_and_update_templates() {
+        let cols: Vec<String> = ["id", "name", "order"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            super::insert_template("postgres", "items", &cols),
+            "INSERT INTO items (id, name, \"order\")\nVALUES (?, ?, ?);\n"
+        );
+        assert_eq!(
+            super::update_template("mysql", "items", &cols, &["id".to_string()]),
+            "UPDATE items\nSET name = ?,\n    `order` = ?\nWHERE id = ?;\n"
+        );
+        assert_eq!(
+            super::update_template("sqlite", "items", &cols[..2], &[]),
+            "UPDATE items\nSET id = ?,\n    name = ?\nWHERE id = ?\n  AND name = ?;\n"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 

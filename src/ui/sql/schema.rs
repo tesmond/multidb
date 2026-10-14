@@ -30,6 +30,9 @@ pub struct DbSchema {
     pub schemas: Option<Vec<SchemaInfo>>,
     pub tables: Vec<TableInfo>,
     pub views: Vec<TableInfo>,
+    /// The schema unqualified table names resolve to, when the query tab has
+    /// one selected.
+    pub default_schema: Option<String>,
 }
 
 impl DbSchema {
@@ -72,6 +75,7 @@ pub fn db_schema_for(tree: &SchemaTree, driver: &str, database_name: &str) -> Db
             ),
             tables: Vec::new(),
             views: Vec::new(),
+            default_schema: None,
         };
     }
     DbSchema {
@@ -87,6 +91,7 @@ pub fn db_schema_for(tree: &SchemaTree, driver: &str, database_name: &str) -> Db
             .iter()
             .map(|t| TableInfo { name: t.name.clone(), columns: cols(t), is_view: true })
             .collect(),
+        default_schema: None,
     }
 }
 
@@ -121,7 +126,14 @@ pub fn build_namespace(db: &DbSchema) -> Namespace {
     let mut ns = Namespace::default();
     match &db.schemas {
         Some(schemas) if !schemas.is_empty() => {
-            for schema in schemas {
+            // Unqualified names go to the first schema that has the table, so
+            // put the default schema first.
+            let default = db.default_schema.as_deref();
+            let ordered = schemas
+                .iter()
+                .filter(|s| Some(s.name.as_str()) == default)
+                .chain(schemas.iter().filter(|s| Some(s.name.as_str()) != default));
+            for schema in ordered {
                 let mut schema_ns = Namespace::default();
                 for t in &schema.tables {
                     let cols: Vec<String> = t.columns.iter().map(|c| c.name.clone()).collect();

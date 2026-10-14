@@ -244,7 +244,14 @@ fn flatten(db: &DbSchema) -> (HashSet<String>, std::collections::HashMap<String,
     let mut table_columns: std::collections::HashMap<String, HashSet<String>> = Default::default();
     match &db.schemas {
         Some(list) if !list.is_empty() => {
-            for s in list {
+            // The first schema with a table supplies the columns of its
+            // unqualified name: the default schema's, when there is one.
+            let default = db.default_schema.as_deref();
+            let ordered = list
+                .iter()
+                .filter(|s| Some(s.name.as_str()) == default)
+                .chain(list.iter().filter(|s| Some(s.name.as_str()) != default));
+            for s in ordered {
                 let sn = s.name.to_lowercase();
                 schemas.insert(sn.clone());
                 let set = schema_tables.entry(sn).or_default();
@@ -464,6 +471,7 @@ mod tests {
                 is_view: false,
             }],
             views: vec![],
+            default_schema: None,
         }
     }
 
