@@ -19,17 +19,57 @@ use gpui::{
 };
 use std::time::Duration;
 
+/// WCAG relative luminance.
+fn luminance(c: Rgba) -> f32 {
+    let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// Whether white text contrasts more with `c` than black does (WCAG).
+fn prefers_light_text(c: Rgba) -> bool {
+    let l = luminance(c);
+    1.05 / (l + 0.05) >= (l + 0.05) / 0.05
+}
+
 /// `contrast-color()`: white or black, whichever contrasts more (WCAG).
 pub fn contrast_color(c: Rgba) -> Rgba {
-    let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
-    let l = 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
-    let with_white = 1.05 / (l + 0.05);
-    let with_black = (l + 0.05) / 0.05;
-    if with_white >= with_black {
+    if prefers_light_text(c) {
         theme::WHITE
     } else {
         theme::hex(0x000000)
     }
+}
+
+// Duotone tabs, matching the icons: a coloured tab is filled with a tint of
+// its colour, and the selected one is underlined in the full colour.
+const TINT_IDLE: f32 = 0.18;
+const TINT_HOVER: f32 = 0.26;
+const TINT_ACTIVE: f32 = 0.35;
+
+/// `c` laid over the tab bar's background at `alpha`, as an opaque colour.
+fn tint(c: Rgba, alpha: f32) -> Rgba {
+    let b = theme::BG_TOOLBAR;
+    let m = |x: f32, y: f32| x * alpha + y * (1.0 - alpha);
+    Rgba { r: m(c.r, b.r), g: m(c.g, b.g), b: m(c.b, b.b), a: 1.0 }
+}
+
+/// Text on a tinted tab: the normal UI text, or near-black on a very light tint.
+fn tint_text(bg: Rgba) -> Rgba {
+    if prefers_light_text(bg) {
+        theme::TEXT
+    } else {
+        theme::hex(0x0f0f17)
+    }
+}
+
+/// The selected tab's underline: the full tab colour, lifted towards white
+/// when it is too dark to show against the toolbar.
+fn underline(c: Rgba) -> Rgba {
+    if luminance(c) >= 0.06 {
+        return c;
+    }
+    let lift = |v: f32| v + (1.0 - v) * 0.35;
+    Rgba { r: lift(c.r), g: lift(c.g), b: lift(c.b), a: 1.0 }
 }
 
 /// What the bar needs to know about one tab, copied out of the workspace for
@@ -190,8 +230,14 @@ impl TabBar {
         let editing = self.edit.as_ref().filter(|(t, _)| *t == info.id).map(|(_, e)| e.clone());
         let title = info.title.clone();
         let (fg, bg, border) = match (custom, active) {
-            (Some(c), true) => (contrast_color(c), Some(c), contrast_color(c)),
-            (Some(c), false) => (contrast_color(c), Some(c), theme::TRANSPARENT),
+            (Some(c), true) => {
+                let bg = tint(c, TINT_ACTIVE);
+                (tint_text(bg), Some(bg), underline(c))
+            }
+            (Some(c), false) => {
+                let bg = tint(c, TINT_IDLE);
+                (tint_text(bg), Some(bg), theme::TRANSPARENT)
+            }
             (None, true) => (theme::TEXT, Some(theme::BG_SURFACE), theme::ACCENT),
             (None, false) => (theme::TEXT_MUTED, None, theme::TRANSPARENT),
         };
@@ -217,7 +263,11 @@ impl TabBar {
             .when_some(bg, |d, c| d.bg(c))
             .when(dragging, |d| d.opacity(0.5));
         el = match custom {
-            Some(c) => el.hover(move |st| st.bg(brighten(c, 1.03))),
+            Some(c) if !active => el.hover(move |st| {
+                let bg = tint(c, TINT_HOVER);
+                st.bg(bg).text_color(tint_text(bg))
+            }),
+            Some(_) => el,
             None if !active => el.hover(|st| st.text_color(theme::TEXT).bg(theme::BG_HOVER)),
             None => el,
         };
@@ -501,10 +551,6 @@ impl Render for TabBar {
             );
         div().flex_shrink_0().min_w(px(0.)).child(bar).children(self.render_menu(cx)).into_any_element()
     }
-}
-
-fn brighten(c: Rgba, f: f32) -> Rgba {
-    Rgba { r: (c.r * f).min(1.0), g: (c.g * f).min(1.0), b: (c.b * f).min(1.0), a: c.a }
 }
 
 /// Records each tab's painted bounds for drag-and-drop hit testing.
