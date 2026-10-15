@@ -39,6 +39,10 @@ struct ManagedConnection {
 }
 
 impl ManagedConnection {
+    fn needs_auth_refresh(&self, now: SystemTime) -> bool {
+        self.needs_iam_refresh(now) || crate::aws_auth::sso_login_due(&self.config)
+    }
+
     fn needs_iam_refresh(&self, now: SystemTime) -> bool {
         self.config.uses_aws_iam_auth()
             && self
@@ -410,7 +414,7 @@ impl ConnectionManager {
         let inner = self.inner.read().await;
         inner
             .get(id)
-            .is_some_and(|conn| conn.needs_iam_refresh(SystemTime::now()))
+            .is_some_and(|conn| conn.needs_auth_refresh(SystemTime::now()))
     }
 
     pub async fn refresh_iam_connection_if_needed(&self, id: &str) -> Result<()> {
@@ -436,7 +440,7 @@ impl ConnectionManager {
             let inner = self.inner.read().await;
             inner
                 .get(id)
-                .filter(|conn| conn.needs_iam_refresh(SystemTime::now()))
+                .filter(|conn| conn.needs_auth_refresh(SystemTime::now()))
                 .map(|conn| conn.config.clone())
         };
         if let Some(cfg) = cfg {
