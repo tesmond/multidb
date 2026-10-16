@@ -50,6 +50,7 @@ icons! {
     Stop => "stop",
     Save => "save",
     Format => "format",
+    Plus => "plus",
     Check => "check",
     ChevronRight => "chevron-right",
     ChevronDown => "chevron-down",

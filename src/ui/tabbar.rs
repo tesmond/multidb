@@ -527,10 +527,12 @@ impl Render for TabBar {
             .flex_shrink_0()
             .min_w(px(0.))
             .child(
+                // As wide as its tabs (so the add button follows the last
+                // one), shrinking and scrolling once they overflow.
                 div()
                     .id("tab-scroll")
                     .relative()
-                    .flex_1()
+                    .flex_initial()
                     .min_w(px(0.))
                     .flex()
                     .items_center()
@@ -552,6 +554,14 @@ impl Render for TabBar {
                     }),
             )
             .child(
+                crate::ui::widgets::plus_button("tab-add", s)
+                    .mx(px(6.))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.with_ws(cx, |ws, cx| ws.new_query_tab(cx));
+                    })),
+            )
+            .child(div().flex_1())
+            .when(overflow, |bar| bar.child(
                 div()
                     .flex()
                     .items_center()
@@ -559,31 +569,16 @@ impl Render for TabBar {
                     .border_l_1()
                     .border_color(theme::BORDER_SUBTLE)
                     .bg(theme::BG_TOOLBAR)
-                    .when(overflow, |d| {
-                        d.child(scroll_btn("tab-left", Icon::ChevronLeft, can_left).on_click(cx.listener(|this, _, _, cx| {
-                            this.scroll_tabs(-1.0);
-                            cx.notify();
-                        })))
-                        .child(scroll_btn("tab-right", Icon::ChevronRight, can_right).on_click(cx.listener(|this, _, _, cx| {
-                            this.scroll_tabs(1.0);
-                            cx.notify();
-                        })))
-                    })
-                    .child(
-                        div()
-                            .id("tab-add")
-                            .px(px(12.))
-                            .py(px(6.))
-                            .t(s, 14.0)
-                            .text_color(theme::TEXT_MUTED)
-                            .cursor_pointer()
-                            .hover(|st| st.text_color(theme::TEXT))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.with_ws(cx, |ws, cx| ws.new_query_tab(cx));
-                            }))
-                            .child("+"),
-                    ),
-            );
+                    .pr(px(4.))
+                    .child(scroll_btn("tab-left", Icon::ChevronLeft, can_left).on_click(cx.listener(|this, _, _, cx| {
+                        this.scroll_tabs(-1.0);
+                        cx.notify();
+                    })))
+                    .child(scroll_btn("tab-right", Icon::ChevronRight, can_right).on_click(cx.listener(|this, _, _, cx| {
+                        this.scroll_tabs(1.0);
+                        cx.notify();
+                    }))),
+            ));
         div().flex_shrink_0().min_w(px(0.)).child(bar).children(self.render_menu(cx)).into_any_element()
     }
 }

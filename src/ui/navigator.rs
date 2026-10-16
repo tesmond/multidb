@@ -183,19 +183,6 @@ pub struct NavRowsCache {
 }
 
 impl Workspace {
-    fn nav_icon_btn(&self, id: impl Into<SharedString>, s: Scale, glyph: &'static str) -> Stateful<Div> {
-        div()
-            .id(gpui::ElementId::Name(id.into()))
-            .px(px(4.))
-            .py(px(2.))
-            .text_size(s.fs(12.0))
-            .line_height(s.fs(12.0))
-            .font_weight(FontWeight::NORMAL)
-            .text_color(theme::TEXT_MUTED)
-            .cursor_pointer()
-            .child(glyph)
-    }
-
     /// An icon button in the navigator: muted, brightening on hover.
     fn nav_svg_btn(&self, id: impl Into<SharedString>, s: Scale, i: Icon) -> Stateful<Div> {
         div()
@@ -489,15 +476,7 @@ impl Workspace {
             theme::TEXT_MUTED,
             0.55 * s.0,
         );
-        let add_btn = self
-            .nav_icon_btn("nav-add", s, "+")
-            .size(px(22.))
-            .p_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.))
-            .hover(|st| st.bg(theme::BG_HOVER).text_color(theme::TEXT))
+        let add_btn = crate::ui::widgets::plus_button("nav-add", s)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.add_menu_open = !this.add_menu_open;
                 this.settings_open = false;
