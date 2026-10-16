@@ -17,8 +17,38 @@ use gpui::{
     prelude::*, App, AsyncApp, ClipboardItem, Context, Entity, FocusHandle, Focusable, Pixels, Point,
     ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window,
 };
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// How often the status bar refreshes an export's progress.
+const EXPORT_TICK: Duration = Duration::from_millis(150);
+/// How long "Saved …" / "Export failed …" stays in the status bar.
+const EXPORT_RESULT_LINGER: Duration = Duration::from_secs(10);
+
+/// Shared between a CSV export's writer thread and the UI task watching it.
+#[derive(Default)]
+struct ExportProgress {
+    /// The file has been chosen and writing has begun.
+    started: AtomicBool,
+    /// Data rows written so far.
+    written: AtomicUsize,
+    /// The chosen file's name, for the status text.
+    name: Mutex<String>,
+}
+
+/// `1234567` → `"1,234,567"`.
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
 
 pub struct SqlTab {
     pub database_name: String,
@@ -136,6 +166,14 @@ pub struct Workspace {
     pub output: Entity<OutputPanel>,
     pub statusbar: Entity<StatusBar>,
     pub status: SharedString,
+    /// A CSV export's progress or outcome. The status bar shows this in
+    /// preference to everything else while it is set.
+    pub export_status: Option<SharedString>,
+    /// An export is writing its file; a second one waits for it to finish.
+    export_running: bool,
+    /// Bumped per export, so clearing a finished export's message later
+    /// doesn't wipe out a newer export's.
+    export_seq: u64,
     pub mono_family: SharedString,
 
     // Layout
@@ -265,6 +303,9 @@ impl Workspace {
             output,
             statusbar,
             status: "Ready".into(),
+            export_status: None,
+            export_running: false,
+            export_seq: 0,
             mono_family,
             nav_width: 240.0,
             editor_ratio: 0.55,
@@ -602,6 +643,15 @@ impl Workspace {
     pub fn close_tabs_for_conn(&mut self, conn_id: &str, cx: &mut Context<Self>) {
         self.close_tabs_where(|_, t| t.conn_id == conn_id, cx);
         self.ensure_active_valid(cx);
+    }
+
+    /// Lay out the tab's SQL (or just its selection) in the Mozilla style.
+    pub fn format_tab_sql(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(t) = self.tab(id).and_then(|t| t.sql()) {
+            let editor = t.editor.clone();
+            editor.update(cx, |e, cx| e.format_sql(cx));
+            editor.update(cx, |e, _| e.focus(window));
+        }
     }
 
     pub fn set_tab_sql(&mut self, id: &str, sql: &str, cx: &mut Context<Self>) {
@@ -1514,6 +1564,7 @@ impl Workspace {
         if sql.is_empty() {
             return;
         }
+        let sql = sql_text::formatted(&sql, &driver);
         let (conn, db, schema) = (tab.conn_id.clone(), s.database_name.clone(), s.default_schema.clone());
         let id = self.add_tab(conn, db, cx);
         self.set_tab_default_schema(&id, schema, cx);
@@ -1528,6 +1579,9 @@ impl Workspace {
     }
 
     pub fn export_csv(&mut self, cx: &mut Context<Self>) {
+        if self.export_running {
+            return;
+        }
         let Some(tab) = self.active_tab() else { return };
         let filename = crate::ui::textfmt::csv_export_filename(&tab.title);
         // Cloning the result only bumps the `Arc`s on its row chunks; no row
@@ -1539,19 +1593,89 @@ impl Workspace {
         if result.columns.is_empty() {
             return;
         }
-        let fut = runtime::spawn_blocking(move || {
-            let Some(path) = commands::pick_csv_path(filename) else { return Ok(()) };
-            let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        let total = result.rows.len();
+        // The writer thread counts rows as it goes; the UI samples the count a
+        // few times a second rather than being woken for every row.
+        let progress = Arc::new(ExportProgress::default());
+        let shared = progress.clone();
+        let fut = runtime::spawn_blocking(move || -> Result<Option<(String, u64)>, String> {
+            let Some(path) = commands::pick_csv_path(filename) else { return Ok(None) };
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Ok(mut n) = shared.name.lock() {
+                *n = name.clone();
+            }
+            shared.started.store(true, Ordering::Relaxed);
+            let file = std::fs::File::create(&path).map_err(|e| format!("{name}: {e}"))?;
             let mut out = std::io::BufWriter::with_capacity(256 * 1024, file);
-            crate::ui::textfmt::write_csv(&mut out, &result.columns, result.rows.iter())
+            let rows = result.rows.iter().inspect(|_| {
+                shared.written.fetch_add(1, Ordering::Relaxed);
+            });
+            crate::ui::textfmt::write_csv(&mut out, &result.columns, rows)
                 .and_then(|_| std::io::Write::flush(&mut out))
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("{name}: {e}"))?;
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            Ok(Some((name, bytes)))
         });
+        self.export_running = true;
+        self.export_seq += 1;
+        let seq = self.export_seq;
         cx.spawn(async move |this, cx| {
-            if let Err(e) = fut.await {
+            use futures::FutureExt;
+            let mut fut = Box::pin(fut.fuse());
+            let outcome = loop {
+                let mut tick = Box::pin(cx.background_executor().timer(EXPORT_TICK).fuse());
+                futures::select! {
+                    res = fut => break res,
+                    _ = tick => {
+                        if !progress.started.load(Ordering::Relaxed) {
+                            continue; // still in the save dialog
+                        }
+                        let written = progress.written.load(Ordering::Relaxed).min(total);
+                        let name = progress.name.lock().map(|n| n.clone()).unwrap_or_default();
+                        let pct = if total == 0 { 100 } else { written * 100 / total };
+                        let text = format!(
+                            "Exporting {name}… {pct}% ({} of {} rows)",
+                            group_digits(written),
+                            group_digits(total)
+                        );
+                        if this.update(cx, |this, cx| {
+                            this.export_status = Some(text.into());
+                            cx.notify();
+                        }).is_err() {
+                            return;
+                        }
+                    }
+                }
+            };
+            let text: Option<SharedString> = match outcome {
+                Ok(None) => None, // dialog cancelled
+                Ok(Some((name, bytes))) => Some(
+                    format!(
+                        "✓ Saved {name} · {} rows · {}",
+                        group_digits(total),
+                        crate::ui::model::format_bytes(Some(bytes as i64))
+                    )
+                    .into(),
+                ),
+                Err(e) => Some(format!("Export failed: {e}").into()),
+            };
+            let shown = text.is_some();
+            if this.update(cx, |this, cx| {
+                this.export_running = false;
+                this.export_status = text;
+                cx.notify();
+            }).is_err() {
+                return;
+            }
+            // Leave the outcome up for a while, then give the bar back to the
+            // query status — unless another export has replaced it since.
+            if shown {
+                cx.background_executor().timer(EXPORT_RESULT_LINGER).await;
                 this.update(cx, |this, cx| {
-                    this.status = format!("Export failed: {e}").into();
-                    cx.notify();
+                    if this.export_seq == seq && !this.export_running {
+                        this.export_status = None;
+                        cx.notify();
+                    }
                 })
                 .ok();
             }

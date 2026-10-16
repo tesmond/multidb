@@ -110,6 +110,12 @@ pub fn ident(name: &str, driver: &str) -> String {
     }
 }
 
+/// `sql` laid out in the Mozilla SQL style for the connection's driver; what
+/// every statement the app writes for you is passed through.
+pub fn formatted(sql: &str, driver: &str) -> String {
+    crate::ui::sql::format::format_sql(sql, crate::ui::sql::Dialect::for_driver(driver))
+}
+
 /// `INSERT INTO t (a, b) VALUES (?, ?);` naming every column.
 pub fn insert_template(driver: &str, table: &str, columns: &[String]) -> String {
     let names: Vec<String> = columns.iter().map(|c| ident(c, driver)).collect();

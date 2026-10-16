@@ -246,7 +246,7 @@ impl Workspace {
     /// schema is the table's schema, so the query names the table on its own.
     fn open_table_query(&mut self, conn_id: &str, table: &str, schema: Option<&str>, database: Option<&str>, cx: &mut Context<Self>) {
         let driver = self.connection(conn_id).map(|c| c.config.driver.clone()).unwrap_or_else(|| "postgres".into());
-        let sql = format!("SELECT * FROM {} LIMIT 100;", sql_text::ident(table, &driver));
+        let sql = sql_text::formatted(&format!("SELECT * FROM {} LIMIT 100;", sql_text::ident(table, &driver)), &driver);
         self.open_query_tab_in_schema(conn_id, database.unwrap_or(""), schema.unwrap_or(""), &sql, Some(table.to_string()), cx);
         self.selected_conn_id = conn_id.to_string();
     }
@@ -276,11 +276,13 @@ impl Workspace {
                 });
                 self.status = format!("Reading the definition of {table}…").into();
                 let (conn_id, table) = (conn_id.to_string(), table.to_string());
+                let driver = driver.clone();
                 cx.spawn(async move |this, cx| {
                     let res = fut.await;
                     this.update(cx, |this, cx| {
                         match res {
                             Ok(sql) => {
+                                let sql = sql_text::formatted(&sql, &driver);
                                 this.status = format!("CREATE TABLE template for {table}").into();
                                 this.open_query_tab_in_schema(&conn_id, &database_name, &schema_name, &sql, Some(table.clone()), cx);
                             }
@@ -315,11 +317,12 @@ impl Workspace {
                     cx.notify();
                     return;
                 }
-                if matches!(template, SqlTemplate::Insert) {
+                let sql = if matches!(template, SqlTemplate::Insert) {
                     sql_text::insert_template(&driver, table, &columns)
                 } else {
                     sql_text::update_template(&driver, table, &columns, &primary_key)
-                }
+                };
+                sql_text::formatted(&sql, &driver)
             }
         };
         self.open_query_tab_in_schema(conn_id, &database_name, &schema_name, &sql, Some(table.to_string()), cx);

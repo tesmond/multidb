@@ -2,6 +2,7 @@
 //! statement tree, completion (CodeMirror-compatible ranking) and lint.
 
 pub mod complete;
+pub mod format;
 pub mod lint;
 pub mod parse_check;
 pub mod schema;

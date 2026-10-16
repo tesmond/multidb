@@ -301,30 +301,144 @@ fn system_table_columns(driver: &str, schema: &str, table: &str) -> Option<HashS
     Some(cols.iter().map(|s| s.to_string()).collect())
 }
 
-fn resolve_table_refs(sql: &str, db: &DbSchema, out: &mut Vec<Diagnostic>) -> Vec<TableRef> {
-    static RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i-u)\b(?:FROM|JOIN)\s+([A-Za-z_][\w$]*)(?:\s*\.\s*([A-Za-z_][\w$]*))?").unwrap()
-    });
-    static IDENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u)[A-Za-z_][\w$]*").unwrap());
-    let (schemas, schema_tables, table_columns) = flatten(db);
-    let mut refs = Vec::new();
-    for m in RE.captures_iter(sql) {
-        let whole = m.get(0).unwrap();
-        let first = m.get(1).unwrap().as_str();
-        let second = m.get(2).map(|g| g.as_str());
-        let first_lower = normalize_ident(first);
-        let raw = whole.as_str();
-        let first_off = IDENT.find(raw).map(|x| x.start()).unwrap_or(0);
-        let from = whole.start() + first_off;
-        let to = match second {
-            Some(s) => {
-                let rest = &raw[first_off + first.len()..];
-                from + first.len() + IDENT.find(rest).map(|x| x.start()).unwrap_or(0) + s.len()
+/// Any word that can name a table. Plenty of real table names (`quote`,
+/// `user`, `order`) are keywords or builtins to the tokenizer.
+fn is_name(t: &Token) -> bool {
+    matches!(t.kind, Tok::Identifier | Tok::QuotedIdentifier | Tok::Keyword | Tok::Builtin | Tok::Type)
+}
+
+/// Names a `WITH` clause defines: `name [(columns)] AS [NOT] [MATERIALIZED] (`
+/// after `WITH`, `RECURSIVE` or a comma. They are tables as far as the rest of
+/// the statement is concerned, but they are not in the database schema.
+fn cte_names(sql: &str, sig: &[&Token]) -> HashSet<String> {
+    let word = |t: &Token| sql[t.from..t.to].to_ascii_lowercase();
+    let mut names = HashSet::new();
+    for k in 1..sig.len() {
+        if !is_name(sig[k]) {
+            continue;
+        }
+        let prev = sig[k - 1];
+        let after_with = prev.kind == Tok::Keyword && matches!(word(prev).as_str(), "with" | "recursive");
+        let after_comma = prev.kind == Tok::Punctuation && &sql[prev.from..prev.to] == ",";
+        if !after_with && !after_comma {
+            continue;
+        }
+        let mut j = k + 1;
+        if sig.get(j).is_some_and(|t| t.kind == Tok::ParenL) {
+            // A column list: skip to its closing bracket.
+            let mut depth = 0i32;
+            while let Some(t) = sig.get(j) {
+                match t.kind {
+                    Tok::ParenL => depth += 1,
+                    Tok::ParenR => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+                if depth == 0 {
+                    break;
+                }
             }
-            None => from + first.len(),
-        };
+        }
+        if !sig.get(j).is_some_and(|t| word(t) == "as") {
+            continue;
+        }
+        j += 1;
+        if sig.get(j).is_some_and(|t| word(t) == "not") {
+            j += 1;
+        }
+        if sig.get(j).is_some_and(|t| word(t) == "materialized") {
+            j += 1;
+        }
+        if sig.get(j).is_some_and(|t| t.kind == Tok::ParenL) {
+            names.insert(normalize_ident(&sql[sig[k].from..sig[k].to]));
+        }
+    }
+    names
+}
+
+/// The tables a statement reads, from the word after each `FROM` and `JOIN`,
+/// reporting the ones the schema doesn't have.
+///
+/// This works on tokens rather than raw text, so words in strings and comments
+/// are never taken for tables, and it skips the places where `FROM` or the word
+/// after it isn't a table at all: `JOIN LATERAL`/`FROM ONLY`, `IS DISTINCT
+/// FROM`, the `FROM` inside `EXTRACT(… FROM …)`, `TRIM`, `SUBSTRING` and the
+/// like, CTE names, and set-returning functions such as `generate_series(…)`
+/// or `jsonb_array_elements(…)`, whose columns no schema lists.
+fn resolve_table_refs(sql: &str, db: &DbSchema, out: &mut Vec<Diagnostic>) -> Vec<TableRef> {
+    let (schemas, schema_tables, table_columns) = flatten(db);
+    let tokens = super::tokenize(sql, Dialect::for_driver(&db.driver));
+    let sig: Vec<&Token> = super::tokenizer::significant(&tokens).collect();
+    let ctes = cte_names(sql, &sig);
+    let word = |t: &Token| sql[t.from..t.to].to_ascii_lowercase();
+    // One entry per open bracket: whether a query started inside it. A `FROM`
+    // in a bracket with no query of its own is a function argument.
+    let mut brackets: Vec<bool> = Vec::new();
+    let mut refs = Vec::new();
+    for (k, t) in sig.iter().enumerate() {
+        match t.kind {
+            Tok::ParenL => {
+                brackets.push(false);
+                continue;
+            }
+            Tok::ParenR => {
+                brackets.pop();
+                continue;
+            }
+            Tok::Semi => {
+                brackets.clear();
+                continue;
+            }
+            Tok::Keyword => {}
+            _ => continue,
+        }
+        let w = word(t);
+        if matches!(w.as_str(), "select" | "delete" | "update" | "insert" | "with" | "values") {
+            if let Some(query) = brackets.last_mut() {
+                *query = true;
+            }
+            continue;
+        }
+        if w != "from" && w != "join" {
+            continue;
+        }
+        if w == "from" {
+            if brackets.last() == Some(&false) {
+                continue;
+            }
+            if k > 0 && word(sig[k - 1]) == "distinct" {
+                continue;
+            }
+        }
+        let mut j = k + 1;
+        while sig.get(j).is_some_and(|n| n.kind == Tok::Keyword && matches!(word(n).as_str(), "lateral" | "only")) {
+            j += 1;
+        }
+        // A bracket here is a subquery or a VALUES list; not a table name.
+        let Some(first) = sig.get(j).copied().filter(|n| is_name(n)) else { continue };
+        let mut second = None;
+        let mut end = j + 1;
+        if sig.get(end).is_some_and(|n| n.kind == Tok::Dot) {
+            if let Some(n) = sig.get(end + 1).copied().filter(|n| is_name(n)) {
+                second = Some(n);
+                end += 2;
+            }
+        }
+        let last = second.unwrap_or(first);
+        if sig.get(end).is_some_and(|n| n.kind == Tok::ParenL) {
+            refs.push(TableRef { table: normalize_ident(&sql[last.from..last.to]), columns: None });
+            continue;
+        }
+        let first_text = &sql[first.from..first.to];
+        let first_lower = normalize_ident(first_text);
+        if second.is_none() && ctes.contains(&first_lower) {
+            refs.push(TableRef { table: first_lower, columns: None });
+            continue;
+        }
+        let (from, to) = (first.from, last.to);
         if let Some(second) = second {
-            let second_lower = normalize_ident(second);
+            let second_text = &sql[second.from..second.to];
+            let second_lower = normalize_ident(second_text);
             let has_schema = schemas.contains(&first_lower);
             let has_table = schema_tables.get(&first_lower).is_some_and(|t| t.contains(&second_lower));
             if !has_schema || !has_table {
@@ -335,7 +449,7 @@ fn resolve_table_refs(sql: &str, db: &DbSchema, out: &mut Vec<Diagnostic>) -> Ve
                     });
                     continue;
                 }
-                out.push(diag(from, to, format!("Unknown table {first}.{second}")));
+                out.push(diag(from, to, format!("Unknown table {first_text}.{second_text}")));
                 continue;
             }
             let cols = table_columns.get(&second_lower).cloned().unwrap_or_default();
@@ -344,7 +458,7 @@ fn resolve_table_refs(sql: &str, db: &DbSchema, out: &mut Vec<Diagnostic>) -> Ve
         }
         match table_columns.get(&first_lower) {
             Some(cols) => refs.push(TableRef { table: first_lower, columns: Some(cols.clone()) }),
-            None => out.push(diag(from, to, format!("Unknown table {first}"))),
+            None => out.push(diag(from, to, format!("Unknown table {first_text}"))),
         }
     }
     refs
@@ -571,5 +685,94 @@ GROUP BY 1, 2;";
         let found = lint(sql, Dialect::MySql, Some(&db()));
         let from = sql.find("nope").unwrap();
         assert_eq!(found, vec![diag(from, from + 4, "Unknown column nope")]);
+    }
+
+    fn pg() -> DbSchema {
+        let t = |name: &str, cols: &[&str]| TableInfo {
+            name: name.into(),
+            columns: cols.iter().map(|c| ColInfo { name: (*c).into(), col_type: String::new(), key: String::new() }).collect(),
+            is_view: false,
+        };
+        DbSchema {
+            driver: "postgres".into(),
+            schemas: Some(vec![crate::ui::sql::schema::SchemaInfo {
+                name: "public".into(),
+                tables: vec![
+                    t("quote", &["quote_id", "parameters", "pet_id"]),
+                    t("vat_config", &["vat_config_id", "store_slug", "vat_rate_type", "vat_rate", "start_date"]),
+                ],
+            }]),
+            default_schema: Some("public".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lateral_function_with_ordinality_has_no_diagnostics() {
+        let sql = "SELECT q.quote_id, q.parameters->>'tier' AS tier, q.parameters->> 'Strategy_id' AS strategy_id, k.ordinality AS annual_point_number, k.value::numeric AS daily_kcal
+FROM quote q
+CROSS JOIN LATERAL Jsonb_array_elements_text (q.parameters-> 'kcals')
+WITH ORDINALITY AS k(value, ordinality)
+WHERE q.pet_id = 12345
+ORDER BY q.quote_id, k.ordinality;";
+        for db in [None, Some(&pg())] {
+            let found = lint(sql, Dialect::PostgreSql, db);
+            assert!(found.is_empty(), "{found:?}");
+        }
+    }
+
+    #[test]
+    fn cte_names_are_tables() {
+        let sql = "WITH effective AS (
+SELECT *, ROW_NUMBER() OVER (
+PARTITION BY store_slug, vat_rate_type ORDER BY start_date DESC, vat_config_id DESC
+) as rn
+ FROM vat_config WHERE start_date <= CURRENT_DATE ), preferred AS (
+SELECT *, ROW_NUMBER() OVER (
+PARTITION BY store_slug
+ORDER BY CASE vat_rate_type WHEN 'reduced' THEN 0 ELSE 1 END
+) AS priority
+FROM effective WHERE rn=1 AND vat_rate_type IN ('reduced', 'standard')
+)
+SELECT store_slug, vat_rate FROM preferred WHERE priority=1;";
+        for db in [None, Some(&pg())] {
+            let found = lint(sql, Dialect::PostgreSql, db);
+            assert!(found.is_empty(), "{found:?}");
+        }
+        // Column lists and MATERIALIZED are part of the CTE syntax too.
+        let sql = "WITH RECURSIVE t(n) AS MATERIALIZED (SELECT 1) SELECT n FROM t;";
+        assert!(semantic(sql, &pg()).is_empty());
+    }
+
+    #[test]
+    fn from_that_is_not_a_table_is_ignored() {
+        for sql in [
+            "SELECT EXTRACT(YEAR FROM start_date) FROM vat_config;",
+            "SELECT TRIM(BOTH ' ' FROM store_slug) FROM vat_config;",
+            "SELECT SUBSTRING(store_slug FROM 2 FOR 3) FROM vat_config;",
+            "SELECT 1 FROM vat_config WHERE store_slug IS DISTINCT FROM vat_rate_type;",
+            "SELECT 'copied from elsewhere' FROM vat_config; -- join nowhere",
+            "SELECT * FROM ONLY vat_config;",
+            "SELECT n FROM generate_series(1, 10) AS n;",
+            "SELECT x FROM (SELECT 1 AS x) AS s;",
+        ] {
+            let found = semantic(sql, &pg());
+            assert!(found.is_empty(), "{sql}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_tables_are_still_reported_on_the_name() {
+        let sql = "SELECT * FROM vat_config v JOIN missing m ON m.id = v.vat_config_id;";
+        let found = semantic(sql, &pg());
+        let from = sql.find("missing").unwrap();
+        assert_eq!(found, vec![diag(from, from + 7, "Unknown table missing")]);
+        let sql = "SELECT * FROM public.nope;";
+        let found = semantic(sql, &pg());
+        let from = sql.find("public").unwrap();
+        assert_eq!(found, vec![diag(from, from + "public.nope".len(), "Unknown table public.nope")]);
+        // A subquery's own FROM still counts.
+        let sql = "SELECT * FROM vat_config WHERE store_slug IN (SELECT slug FROM missing);";
+        assert_eq!(semantic(sql, &pg())[0].message, "Unknown table missing");
     }
 }

@@ -49,6 +49,7 @@ icons! {
     Run => "run",
     Stop => "stop",
     Save => "save",
+    Format => "format",
     Check => "check",
     ChevronRight => "chevron-right",
     ChevronDown => "chevron-down",

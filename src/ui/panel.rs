@@ -113,6 +113,40 @@ impl Workspace {
                         .on_click(cx.listener(move |this, _, _, cx| this.run_query(&t2, cx))),
                 )
                 .child({
+                    // A secondary action: Run's indigo as an outline rather
+                    // than a fill, so Run and Save stay the primary buttons.
+                    let text = theme::hex(0xa5b4fc);
+                    let text_hover = theme::hex(0xc7d2fe);
+                    let b = div()
+                        .id("btn-format")
+                        .group("btn-format")
+                        .px(px(14.))
+                        .py(px(5.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(theme::with_alpha(theme::ACCENT, 0.55))
+                        .text_color(text)
+                        .t(s, 12.0)
+                        .font_weight(FontWeight::MEDIUM)
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(icon(Icon::Format, s.fs(12.0), text).group_hover("btn-format", move |st| st.text_color(text_hover)))
+                        .child("Format");
+                    if empty {
+                        b.opacity(0.5).cursor(CursorStyle::OperationNotAllowed)
+                    } else {
+                        b.cursor_pointer()
+                            .hover(move |st| {
+                                st.bg(theme::with_alpha(theme::ACCENT, 0.12))
+                                    .border_color(theme::ACCENT_HOVER)
+                                    .text_color(text_hover)
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| this.format_tab_sql(&t4, window, cx)))
+                    }
+                })
+                .child({
                     let b = btn("btn-save", Icon::Save, "Save", theme::SAVE_BLUE, theme::TRANSPARENT);
                     if empty {
                         b.opacity(0.5).cursor(CursorStyle::OperationNotAllowed)
@@ -123,7 +157,6 @@ impl Workspace {
                     }
                 });
         }
-        let _ = t4;
         div()
             .flex()
             .flex_col()

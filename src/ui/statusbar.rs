@@ -67,9 +67,9 @@ impl StatusBar {
 impl Render for StatusBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(ws) = self.ws.upgrade() else { return div().into_any_element() };
-        let (status, store, scale) = {
+        let (status, export_status, store, scale) = {
             let w = ws.read(cx);
-            (w.status.clone(), w.active_store(), w.scale())
+            (w.status.clone(), w.export_status.clone(), w.active_store(), w.scale())
         };
         self.follow(store, cx);
         self.update_timer(cx);
@@ -83,7 +83,10 @@ impl Render for StatusBar {
             ),
             None => (None, 0, None, String::new()),
         };
-        let text: SharedString = if let Some(progress) = &progress {
+        // An export in progress (or its outcome) outranks the query status.
+        let text: SharedString = if let Some(export) = export_status {
+            export
+        } else if let Some(progress) = &progress {
             let detail = if error.is_empty() { String::new() } else { format!(": {error}") };
             format!("{} · {}{detail}", progress.phase.label(), format_elapsed(progress.elapsed())).into()
         } else {

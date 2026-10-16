@@ -30,6 +30,7 @@ pub use element::EditorLayout;
 actions!(
     sql_editor,
     [
+        FormatSql,
         MoveLeft,
         MoveRight,
         MoveUp,
@@ -132,6 +133,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-pageup", SelectPageUp, c),
         KeyBinding::new("shift-pagedown", SelectPageDown, c),
         KeyBinding::new("cmd-a", SelectAll, c),
+        // VS Code's "Format Document".
+        KeyBinding::new("alt-shift-f", FormatSql, c),
         KeyBinding::new("ctrl-l", SelectLine, c),
         KeyBinding::new("backspace", Backspace, c),
         KeyBinding::new("shift-backspace", Backspace, c),
@@ -925,6 +928,41 @@ impl SqlEditor {
     fn a_sel_page_down(&mut self, _: &SelectPageDown, _: &mut Window, cx: &mut Context<Self>) {
         self.vertical(self.page_lines(), true, cx);
     }
+    fn a_format(&mut self, _: &FormatSql, _: &mut Window, cx: &mut Context<Self>) {
+        self.format_sql(cx);
+    }
+
+    /// Lay out the selection, or the whole text when nothing is selected, in
+    /// the Mozilla SQL style. One undo step puts it back.
+    pub fn format_sql(&mut self, cx: &mut Context<Self>) {
+        let sel = self.buffer.selection;
+        // A selection is widened to whole tokens: formatting a fragment cut
+        // from inside a string or comment would change its contents.
+        let range = if sel.is_empty() {
+            0..self.buffer.len()
+        } else {
+            crate::ui::sql::format::token_aligned_range(self.buffer.text(), sel.range(), self.dialect)
+        };
+        let text = &self.buffer.text()[range.clone()];
+        let formatted = crate::ui::sql::format::format_sql(text, self.dialect);
+        if formatted == text {
+            return;
+        }
+        self.buffer.edit(range.clone(), &formatted, EditKind::Other);
+        self.buffer.selection = if sel.is_empty() {
+            // Keep the caret roughly where it was rather than at the end.
+            Selection::cursor(sel.head.min(self.buffer.len()))
+        } else {
+            Selection { anchor: range.start, head: range.start + formatted.len() }
+        };
+        self.completion = None;
+        self.after_change(false, cx);
+    }
+
+    pub fn focus(&self, window: &mut Window) {
+        window.focus(&self.focus_handle);
+    }
+
     fn a_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.buffer.selection = Selection { anchor: 0, head: self.buffer.len() };
         self.completion = None;
@@ -1970,6 +2008,7 @@ impl Render for SqlEditor {
             .on_action(cx.listener(Self::a_sel_page_up))
             .on_action(cx.listener(Self::a_sel_page_down))
             .on_action(cx.listener(Self::a_select_all))
+            .on_action(cx.listener(Self::a_format))
             .on_action(cx.listener(Self::a_select_line))
             .on_action(cx.listener(Self::a_backspace))
             .on_action(cx.listener(Self::a_delete))
