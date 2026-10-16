@@ -143,13 +143,18 @@ impl TabBar {
         };
         let input = cx.new(|cx| {
             let mut t = TextInput::new(cx, look);
+            t.blur_on_click_outside = true;
             t.set_text(title, cx);
             t.select_all_text(cx);
             t
         });
         let id = tab_id.to_string();
-        cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, _w, cx| match ev {
+        cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, window, cx| match ev {
             InputEvent::Submit | InputEvent::Blur => {
+                if matches!(ev, InputEvent::Submit) {
+                    // Enter leaves the box too, not just Escape and clicking away.
+                    window.blur();
+                }
                 if this.edit.as_ref().is_some_and(|(t, _)| *t == id) {
                     let text = input.read(cx).text().trim().to_string();
                     this.edit = None;

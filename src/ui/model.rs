@@ -82,10 +82,6 @@ impl Rows {
     pub fn iter(&self) -> impl Iterator<Item = &Vec<Value>> {
         self.chunks.iter().flat_map(|c| c.iter())
     }
-
-    pub fn to_vec(&self) -> Vec<Vec<Value>> {
-        self.iter().cloned().collect()
-    }
 }
 
 #[derive(Clone, Default)]

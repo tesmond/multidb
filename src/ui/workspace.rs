@@ -499,9 +499,45 @@ impl Workspace {
     }
 
     pub fn remove_tab(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.tabs.retain(|t| t.id != id);
+        self.close_tabs_where(|_, t| t.id == id, cx);
         self.ensure_active_valid(cx);
         cx.notify();
+    }
+
+    /// Take every tab matching `close` (given its index and the tab) out of
+    /// the list and release what it holds.
+    fn close_tabs_where(&mut self, mut close: impl FnMut(usize, &Tab) -> bool, cx: &mut Context<Self>) {
+        let (closed, kept): (Vec<(usize, Tab)>, Vec<(usize, Tab)>) =
+            std::mem::take(&mut self.tabs).into_iter().enumerate().partition(|(i, t)| close(*i, t));
+        self.tabs = kept.into_iter().map(|(_, t)| t).collect();
+        for (_, tab) in closed {
+            self.release_tab(tab, cx);
+        }
+    }
+
+    /// Free a closed tab's resources now rather than whenever the last stray
+    /// handle to them goes away: stop its query on the server (otherwise the
+    /// database keeps streaming rows nobody will see) and empty its result
+    /// store, so the rows are dropped even if an in-flight task still holds
+    /// the store. Everything else the tab owns (editor, subscriptions, poll
+    /// tasks) is dropped with it.
+    fn release_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        if self.conn_select_open.as_ref().is_some_and(|(id, _)| *id == tab.id) {
+            self.conn_select_open = None;
+        }
+        if let TabKind::Sql(sql) = &tab.kind {
+            if sql.running && !sql.query_id.is_empty() {
+                let state = runtime::state();
+                let qid = sql.query_id.clone();
+                // Spawned on the runtime, so it runs without being awaited.
+                drop(runtime::spawn(async move { commands::cancel_query(state, qid).await }));
+            }
+            sql.store.update(cx, |st, cx| {
+                *st = ResultStore::default();
+                cx.notify();
+            });
+        }
+        drop(tab);
     }
 
     pub fn rename_tab(&mut self, id: &str, title: String) {
@@ -537,20 +573,20 @@ impl Workspace {
     }
 
     pub fn close_other_tabs(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.tabs.retain(|t| t.id == id);
+        self.close_tabs_where(|_, t| t.id != id, cx);
         self.ensure_active_valid(cx);
     }
 
     pub fn close_tabs_right(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
-            self.tabs.truncate(i + 1);
+            self.close_tabs_where(|j, _| j > i, cx);
         }
         self.ensure_active_valid(cx);
     }
 
     pub fn close_tabs_left(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
-            self.tabs.drain(..i);
+            self.close_tabs_where(|j, _| j < i, cx);
         }
         self.ensure_active_valid(cx);
     }
@@ -564,7 +600,7 @@ impl Workspace {
     }
 
     pub fn close_tabs_for_conn(&mut self, conn_id: &str, cx: &mut Context<Self>) {
-        self.tabs.retain(|t| t.conn_id != conn_id);
+        self.close_tabs_where(|_, t| t.conn_id == conn_id, cx);
         self.ensure_active_valid(cx);
     }
 
@@ -1463,7 +1499,7 @@ impl Workspace {
         let st = s.store.read(cx);
         let (Some(info), Some(result)) = (&st.edit_info, &st.result) else { return };
         let driver = self.connection(&tab.conn_id).map(|c| c.config.driver.clone()).unwrap_or_else(|| "postgres".into());
-        let rows = result.rows.to_vec();
+        // Only the edited rows are read, straight from the result; no copy.
         let sql = sql_text::generate_update_sql(
             &sql_text::EditTarget {
                 driver: &driver,
@@ -1472,7 +1508,7 @@ impl Workspace {
                 primary_key_cols: &info.primary_key_cols,
             },
             &result.columns,
-            &rows,
+            |i| result.rows.get(i),
             &st.pending_edits,
         );
         if sql.is_empty() {
@@ -1494,15 +1530,22 @@ impl Workspace {
     pub fn export_csv(&mut self, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else { return };
         let filename = crate::ui::textfmt::csv_export_filename(&tab.title);
+        // Cloning the result only bumps the `Arc`s on its row chunks; no row
+        // is copied. The rows are written straight to the file as they are
+        // formatted, so the export never holds a second copy of the result or
+        // the whole CSV text in memory, and nothing is built at all until a
+        // file has been chosen. The snapshot is dropped when the write ends.
         let Some(result) = self.active_store().and_then(|s| s.read(cx).result.clone()) else { return };
-        let rows = result.rows.to_vec();
-        let columns = result.columns.clone();
+        if result.columns.is_empty() {
+            return;
+        }
         let fut = runtime::spawn_blocking(move || {
-            let csv = crate::ui::textfmt::build_csv(&columns, &rows, None);
-            if csv.is_empty() {
-                return Ok(());
-            }
-            commands::save_csv(csv, filename)
+            let Some(path) = commands::pick_csv_path(filename) else { return Ok(()) };
+            let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+            let mut out = std::io::BufWriter::with_capacity(256 * 1024, file);
+            crate::ui::textfmt::write_csv(&mut out, &result.columns, result.rows.iter())
+                .and_then(|_| std::io::Write::flush(&mut out))
+                .map_err(|e| e.to_string())
         });
         cx.spawn(async move |this, cx| {
             if let Err(e) = fut.await {

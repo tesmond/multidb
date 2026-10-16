@@ -115,39 +115,46 @@ fn escape_csv(value: &Value) -> String {
     }
 }
 
+/// The whole CSV as one string; [`write_csv`] is what exports use.
+#[cfg(test)]
 pub fn build_csv(columns: &[String], rows: &[Vec<Value>], sort_index: Option<&[usize]>) -> String {
-    if columns.is_empty() {
-        return String::new();
-    }
-    let mut lines = Vec::with_capacity(rows.len() + 1);
-    lines.push(
-        columns
-            .iter()
-            .map(|c| csv_safe_string(c))
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    let row_to_csv = |row: &Vec<Value>| -> String {
-        (0..columns.len())
-            .map(|c| escape_csv(row.get(c).unwrap_or(&Value::Null)))
-            .collect::<Vec<_>>()
-            .join(",")
+    let mut out = Vec::new();
+    let ok = match sort_index {
+        Some(index) if !index.is_empty() => write_csv(&mut out, columns, index.iter().filter_map(|&i| rows.get(i))),
+        _ => write_csv(&mut out, columns, rows.iter()),
     };
-    match sort_index {
-        Some(index) if !index.is_empty() => {
-            for &idx in index {
-                if let Some(row) = rows.get(idx) {
-                    lines.push(row_to_csv(row));
-                }
-            }
+    debug_assert!(ok.is_ok(), "writing to a Vec cannot fail");
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Write `rows` as CSV to `out` one row at a time, so exporting a large
+/// result needs no more memory than the writer's buffer. Lines are separated
+/// by `\n` with no trailing newline; nothing is written when there are no
+/// columns.
+pub fn write_csv<'a, W: std::io::Write>(
+    out: &mut W,
+    columns: &[String],
+    rows: impl Iterator<Item = &'a Vec<Value>>,
+) -> std::io::Result<()> {
+    if columns.is_empty() {
+        return Ok(());
+    }
+    for (i, c) in columns.iter().enumerate() {
+        if i > 0 {
+            out.write_all(b",")?;
         }
-        _ => {
-            for row in rows {
-                lines.push(row_to_csv(row));
+        out.write_all(csv_safe_string(c).as_bytes())?;
+    }
+    for row in rows {
+        out.write_all(b"\n")?;
+        for c in 0..columns.len() {
+            if c > 0 {
+                out.write_all(b",")?;
             }
+            out.write_all(escape_csv(row.get(c).unwrap_or(&Value::Null)).as_bytes())?;
         }
     }
-    lines.join("\n")
+    Ok(())
 }
 
 /// Suggested filename for the tab being exported.

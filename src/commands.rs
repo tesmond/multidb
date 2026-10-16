@@ -1254,21 +1254,18 @@ pub async fn import_table(
         .map_err(command_err)
 }
 
-pub fn save_csv(csv_content: String, default_filename: String) -> CommandResult<()> {
+/// Ask where to save a CSV export; `None` if the dialog was cancelled.
+pub fn pick_csv_path(default_filename: String) -> Option<std::path::PathBuf> {
     let filename = if default_filename.is_empty() {
         "query_results.csv".to_string()
     } else {
         default_filename
     };
-    let Some(path) = rfd::FileDialog::new()
+    rfd::FileDialog::new()
         .set_title("Export CSV")
         .set_file_name(filename)
         .add_filter("CSV File", &["csv"])
         .save_file()
-    else {
-        return Ok(());
-    };
-    std::fs::write(&path, csv_content).map_err(command_err)
 }
 
 

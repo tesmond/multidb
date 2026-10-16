@@ -157,10 +157,12 @@ pub struct EditTarget<'a> {
 
 /// `generateUpdateSQL` from OutputPanel.svelte. `edits` is (row index, [(col index, new value)])
 /// in insertion order.
-pub fn generate_update_sql(
+/// `row_at` looks up a row of the result by index, so callers can pass the
+/// result's own storage instead of copying every row into a slice first.
+pub fn generate_update_sql<'a>(
     target: &EditTarget,
     columns: &[String],
-    rows: &[Vec<Value>],
+    row_at: impl Fn(usize) -> Option<&'a Vec<Value>>,
     edits: &[(usize, Vec<(usize, String)>)],
 ) -> String {
     let qi = |n: &str| quote_identifier(n, target.driver);
@@ -171,7 +173,7 @@ pub fn generate_update_sql(
     };
     let mut lines = Vec::new();
     for (row_idx, col_edits) in edits {
-        let Some(row) = rows.get(*row_idx) else { continue };
+        let Some(row) = row_at(*row_idx) else { continue };
         let set_clauses: Vec<String> = col_edits
             .iter()
             .map(|(col_idx, value)| {
@@ -265,10 +267,11 @@ mod tests {
 
     #[test]
     fn generates_update_sql() {
+        let rows = [vec![json!(7), json!("Ann")]];
         let sql = generate_update_sql(
             &EditTarget { driver: "postgres", table_name: "users", schema_name: "public", primary_key_cols: &["id".into()] },
             &["id".into(), "name".into()],
-            &[vec![json!(7), json!("Ann")]],
+            |i| rows.get(i),
             &[(0, vec![(1, "O'Neil".into())])],
         );
         assert_eq!(sql, "UPDATE \"public\".\"users\"\nSET \"name\" = 'O''Neil'\nWHERE \"id\" = 7;");

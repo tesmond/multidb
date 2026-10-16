@@ -161,6 +161,14 @@ pub struct TextInput {
     pub number: Option<(f64, f64, f64)>,
     /// Position in the Tab order, for dialogs. `None` keeps it out of it.
     pub tab_index: Option<isize>,
+    /// A double click selects the whole value instead of one word, for
+    /// fields holding a single value (a grid cell) rather than prose.
+    pub double_click_selects_all: bool,
+    /// A click anywhere outside the field takes focus away from it (and
+    /// emits [`InputEvent::Blur`]), even when what was clicked doesn't take
+    /// focus itself. For inline editors that should close when you click
+    /// away; off by default so dialog fields keep focus as before.
+    pub blur_on_click_outside: bool,
     undo: Vec<(String, Range<usize>)>,
     redo: Vec<(String, Range<usize>)>,
     cursor_visible: bool,
@@ -193,6 +201,8 @@ impl TextInput {
             readonly: false,
             number: None,
             tab_index: None,
+            double_click_selects_all: false,
+            blur_on_click_outside: false,
             undo: Vec::new(),
             redo: Vec::new(),
             cursor_visible: true,
@@ -485,8 +495,28 @@ impl TextInput {
         cx.emit(InputEvent::Submit);
     }
 
-    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         cx.emit(InputEvent::Cancel);
+        // Escape leaves the field. Whoever handles Cancel runs after this and
+        // may move focus somewhere better (back to the grid, the editor); if
+        // not, focus at least no longer sits in a field that is going away.
+        if self.focus_handle.is_focused(window) {
+            window.blur();
+        }
+    }
+
+    fn on_mouse_down_out(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
+        window.blur();
+        // Report it now rather than on the next render, and mark it seen so
+        // that render doesn't report it a second time.
+        self.was_focused = false;
+        self.blink_task = None;
+        self.is_selecting = false;
+        cx.emit(InputEvent::Blur);
+        cx.notify();
     }
 
     fn step(&mut self, delta: f64, cx: &mut Context<Self>) {
@@ -513,7 +543,7 @@ impl TextInput {
         window.focus(&self.focus_handle);
         self.is_selecting = true;
         let idx = self.index_for_mouse_position(event.position);
-        if event.click_count >= 3 {
+        if event.click_count >= 3 || (event.click_count == 2 && self.double_click_selects_all) {
             self.selected_range = 0..self.content.len();
             self.selection_reversed = false;
             cx.notify();
@@ -1010,6 +1040,9 @@ impl Render for TextInput {
                 blur_radius: px(0.),
                 spread_radius: px(w),
             }]);
+        }
+        if self.blur_on_click_outside {
+            outer = outer.on_mouse_down_out(cx.listener(Self::on_mouse_down_out));
         }
         let stepper = self.number.is_some().then(|| spin_button(self.look.font_size));
         outer.child(TextElement { input: cx.entity() }).children(stepper)

@@ -827,7 +827,20 @@ impl OutputPanel {
         if let Some(edit) = &self.grid.edit {
             let rh = grid::row_height(s.0);
             wrap = wrap.child(deferred(
-                gpui::anchored().position(edit.origin).child(div().w(px(edit.width)).h(px(rh)).child(edit.input.clone())),
+                gpui::anchored().position(edit.origin).child(
+                    div()
+                        .id("cell-editor")
+                        // The editor floats over the grid; without this a click
+                        // in it also lands on the cell underneath, which takes
+                        // focus (committing and closing the editor) or, on a
+                        // double click, reopens it with the selection lost.
+                        .occlude()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .w(px(edit.width))
+                        .h(px(rh))
+                        .child(edit.input.clone()),
+                ),
             ).with_priority(3));
         }
         wrap.into_any_element()
@@ -1100,21 +1113,45 @@ impl OutputPanel {
                 focus_border: theme::AMBER,
                 ..InputLook::dialog(s)
             };
+            // The value opens fully selected, so Cmd+C copies it straight
+            // away and typing replaces it. After a stray click collapses the
+            // selection, a double click or Cmd+A selects it all again.
             let input = cx.new(|cx| {
                 let mut t = TextInput::new(cx, look);
+                t.double_click_selects_all = true;
+                t.blur_on_click_outside = true;
                 t.set_text(current, cx);
+                t.select_all_text(cx);
                 t
             });
-            cx.subscribe_in(&input, window, |this, _i, ev: &InputEvent, _w, cx| match ev {
-                InputEvent::Submit | InputEvent::Blur => this.commit_cell_edit(cx),
+            cx.subscribe_in(&input, window, |this, _i, ev: &InputEvent, window, cx| match ev {
+                // Enter and Escape hand the keyboard back to the grid, so the
+                // arrows, Cmd+C and a double click carry on from the cell.
+                // A click elsewhere (Blur) leaves focus wherever it went.
+                InputEvent::Submit => {
+                    this.commit_cell_edit(cx);
+                    if let Some(f) = &this.grid.focus {
+                        window.focus(f);
+                    }
+                }
+                InputEvent::Blur => this.commit_cell_edit(cx),
                 InputEvent::Cancel => {
                     this.grid.edit = None;
+                    if let Some(f) = &this.grid.focus {
+                        window.focus(f);
+                    }
                     cx.notify();
                 }
                 _ => {}
             })
             .detach();
             input.update(cx, |i, _| i.focus(window));
+            // This runs on mouse-down, which then bubbles up to the grid
+            // container. gpui focuses any `track_focus` element it bubbles
+            // through unless the default is prevented, so without this the
+            // grid takes focus straight back: the editor looks active but the
+            // keyboard (Escape, Cmd+C, Cmd+A, typing) still goes to the grid.
+            window.prevent_default();
             self.grid.edit = Some(EditOverlay {
                 row: hit.0,
                 col: hit.1,
