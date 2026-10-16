@@ -181,6 +181,8 @@ pub async fn terminate_database_connection(
     }
 }
 
+/// Runs `query` and streams its rows. `max_rows` caps the rows read; zero or
+/// less means no cap.
 pub async fn execute_query_streamed(
     emitter: EventEmitter,
     state: Arc<AppState>,
@@ -212,7 +214,7 @@ pub async fn execute_query_streamed(
     };
 
     let max_rows = if max_rows <= 0 {
-        10_000_000
+        usize::MAX
     } else {
         max_rows as usize
     };

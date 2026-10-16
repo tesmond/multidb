@@ -710,7 +710,7 @@ impl OutputPanel {
             .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
                 let d = e.delta.pixel_delta(px(20.));
                 this.grid.scroll_x -= f32::from(d.x);
-                this.grid.scroll_y -= f32::from(d.y);
+                this.grid.scroll_y -= f64::from(f32::from(d.y));
                 this.clamp_grid_scroll(cx);
                 cx.notify();
             }))
@@ -719,7 +719,7 @@ impl OutputPanel {
                 let total = this.total_rows(cx);
                 let local = point(e.position.x - b.left(), e.position.y - b.top());
                 let rh = grid::row_height(this.grid.font_scale);
-                let row = ((f32::from(local.y) + this.grid.scroll_y) / rh).floor();
+                let row = ((f64::from(f32::from(local.y)) + this.grid.scroll_y) / f64::from(rh)).floor();
                 let next = (row >= 0.0 && (row as usize) < total && b.contains(&e.position)).then_some(row as usize);
                 if next != this.grid.hovered_row {
                     this.grid.hovered_row = next;
@@ -1044,12 +1044,12 @@ impl OutputPanel {
         let pos = geom.pos_on(bar, local);
         let (start, len, scroll, page) = match bar {
             Bar::Vertical => {
-                let (s, l) = geom.v_thumb(self.grid.scroll_y);
-                (s, l, self.grid.scroll_y, geom.view_h)
+                let (s, l) = geom.v_thumb(self.grid.scroll_y as f32);
+                (s, l, self.grid.scroll_y, f64::from(geom.view_h))
             }
             Bar::Horizontal => {
                 let (s, l) = geom.h_thumb(self.grid.scroll_x);
-                (s, l, self.grid.scroll_x, geom.view_w)
+                (s, l, f64::from(self.grid.scroll_x), f64::from(geom.view_w))
             }
         };
         if pos >= start && pos < start + len {
@@ -1059,7 +1059,7 @@ impl OutputPanel {
             let delta = if pos < start { -page } else { page };
             match bar {
                 Bar::Vertical => self.grid.scroll_y = scroll + delta,
-                Bar::Horizontal => self.grid.scroll_x = scroll + delta,
+                Bar::Horizontal => self.grid.scroll_x = (scroll + delta) as f32,
             }
             self.clamp_grid_scroll(cx);
         }
@@ -1085,7 +1085,7 @@ impl OutputPanel {
             let rnw = grid::row_num_width(total, s);
             let b = self.grid.body_bounds.unwrap();
             let x: f32 = rnw - self.grid.scroll_x + self.grid.col_widths[..hit.1].iter().sum::<f32>();
-            let y: f32 = hit.0 as f32 * rh - self.grid.scroll_y;
+            let y: f32 = (hit.0 as f64 * f64::from(rh) - self.grid.scroll_y) as f32;
             let w = self.grid.col_widths.get(hit.1).copied().unwrap_or(100.0);
             let look = InputLook {
                 font_size: 12.0 * s,
@@ -1185,7 +1185,7 @@ impl OutputPanel {
             let local = point(e.position.x - b.left(), e.position.y - b.top());
             let pos = geom.pos_on(drag.bar, local) - drag.grab;
             match drag.bar {
-                Bar::Vertical => self.grid.scroll_y = geom.scroll_for_v_thumb(pos),
+                Bar::Vertical => self.grid.scroll_y = f64::from(geom.scroll_for_v_thumb(pos)),
                 Bar::Horizontal => self.grid.scroll_x = geom.scroll_for_h_thumb(pos),
             }
             self.clamp_grid_scroll(cx);
@@ -1238,7 +1238,7 @@ impl OutputPanel {
         let vy = speed(local.y.into(), b.size.height.into());
         if vx != 0.0 || vy != 0.0 {
             self.grid.scroll_x += vx;
-            self.grid.scroll_y += vy;
+            self.grid.scroll_y += f64::from(vy);
             self.clamp_grid_scroll(cx);
         }
         if let (Some(hit), Some(anchor)) = (self.grid.cell_at(local, total), self.grid.sel_anchor) {

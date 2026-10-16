@@ -125,7 +125,9 @@ pub struct GridState {
     pub loading: bool,
     pub font_scale: f32,
     pub scroll_x: f32,
-    pub scroll_y: f32,
+    /// Vertical offset in pixels. f64 because results are unlimited: an f32
+    /// stops resolving single pixels past about a million rows.
+    pub scroll_y: f64,
     pub sel: Option<CellSel>,
     pub selecting: bool,
     pub sel_anchor: Option<(usize, usize)>,
@@ -449,8 +451,8 @@ impl GridState {
     }
 
     pub fn clamp_scroll(&mut self, total_rows: usize, view_w: f32, view_h: f32) {
-        let rh = row_height(self.font_scale);
-        let max_y = (total_rows as f32 * rh - view_h).max(0.0);
+        let rh = f64::from(row_height(self.font_scale));
+        let max_y = (total_rows as f64 * rh - f64::from(view_h)).max(0.0);
         let max_x = (self.total_width(total_rows) - view_w).max(0.0);
         self.scroll_y = self.scroll_y.clamp(0.0, max_y);
         self.scroll_x = self.scroll_x.clamp(0.0, max_x);
@@ -465,7 +467,7 @@ impl GridState {
         if mx < rnw {
             return None;
         }
-        let row = ((my + self.scroll_y) / rh).floor();
+        let row = ((f64::from(my) + self.scroll_y) / f64::from(rh)).floor();
         if row < 0.0 || row as usize >= total_rows {
             return None;
         }
@@ -493,7 +495,7 @@ impl GridState {
         let left: f32 = self.col_widths[..col.min(self.col_widths.len())].iter().sum();
         let x = row_num_width(total_rows, s) + left - self.scroll_x;
         let cw = self.col_widths.get(col).copied().unwrap_or(0.0);
-        let y = row as f32 * rh - self.scroll_y;
+        let y = (row as f64 * f64::from(rh) - self.scroll_y) as f32;
         Bounds::new(
             point(px(x + cw - pad - size), px(y + (rh - size) / 2.0)),
             gpui::size(px(size), px(size)),
@@ -506,7 +508,7 @@ impl GridState {
         if f32::from(local.x) >= rnw {
             return None;
         }
-        let row = ((f32::from(local.y) + self.scroll_y) / rh).floor();
+        let row = ((f64::from(f32::from(local.y)) + self.scroll_y) / f64::from(rh)).floor();
         (row >= 0.0 && (row as usize) < total_rows).then_some(row as usize)
     }
 
@@ -624,11 +626,11 @@ impl GridState {
         let rh = row_height(self.font_scale);
         let (w, h) = view;
         let visible_rows = (h / rh).floor().max(1.0) as usize;
-        let start = (self.scroll_y / rh).floor() as usize;
+        let start = (self.scroll_y / f64::from(rh)).floor() as usize;
         if row < start {
-            self.scroll_y = row as f32 * rh;
+            self.scroll_y = row as f64 * f64::from(rh);
         } else if row > start + visible_rows - 1 {
-            self.scroll_y = (row + 1 - visible_rows) as f32 * rh;
+            self.scroll_y = (row + 1 - visible_rows) as f64 * f64::from(rh);
         }
         self.clamp_scroll(total_rows, w, h);
     }
@@ -656,7 +658,8 @@ pub struct GridBody {
     pub sort_index: Option<Arc<Vec<usize>>>,
     pub col_widths: Vec<f32>,
     pub scale: f32,
-    pub scroll: (f32, f32),
+    /// `(x, y)`; y is f64 like [`GridState::scroll_y`].
+    pub scroll: (f32, f64),
     pub sel: Option<CellSel>,
     pub selected_rows: BTreeSet<usize>,
     pub hovered_row: Option<usize>,
@@ -724,8 +727,9 @@ impl Element for GridBody {
         let origin = outer.origin;
         let bounds = Bounds::new(origin, size(px(w), px(h)));
         let (sl, st) = self.scroll;
-        let start_row = (st / rh).floor() as usize;
-        let y_off = -(st % rh);
+        // Only the offset within the first row needs to be an f32.
+        let start_row = (st / f64::from(rh)).floor() as usize;
+        let y_off = -((st % f64::from(rh)) as f32);
         let visible = (h / rh).ceil() as usize + 2;
 
         let mut col_x = Vec::with_capacity(self.col_widths.len());
@@ -925,7 +929,7 @@ impl Element for GridBody {
         });
 
         // Custom scrollbars (see widgets::scroll for the geometry and look).
-        scroll::paint_bars(window, origin, geom, (sl, st), self.active_bar);
+        scroll::paint_bars(window, origin, geom, (sl, st as f32), self.active_bar);
     }
 }
 
@@ -994,7 +998,7 @@ mod tests {
         assert_eq!((sel.r0, sel.r1), (99, 99), "a plain jump moves the whole selection");
         assert_eq!(sel.c1, 0, "the column is left alone");
         // The last row is scrolled into view, at the bottom of the body.
-        assert_eq!(g.scroll_y, 90.0 * BASE_ROW_HEIGHT);
+        assert_eq!(g.scroll_y, f64::from(90.0 * BASE_ROW_HEIGHT));
     }
 
     #[test]
@@ -1005,7 +1009,7 @@ mod tests {
         g.jump_selection(Some(Jump::Last), None, true, 100, 3, view);
         let sel = g.sel.unwrap();
         assert_eq!(sel.norm(), (3, 99, 0, 0), "row 3 through the last row stays selected");
-        assert_eq!(g.scroll_y, 90.0 * BASE_ROW_HEIGHT, "and the view follows the moving end");
+        assert_eq!(g.scroll_y, f64::from(90.0 * BASE_ROW_HEIGHT), "and the view follows the moving end");
     }
 
     #[test]
@@ -1015,6 +1019,19 @@ mod tests {
         g.jump_selection(Some(Jump::First), None, false, 100, 3, view);
         assert_eq!(g.sel.unwrap().norm(), (0, 0, 0, 0));
         assert_eq!(g.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn a_one_pixel_scroll_still_moves_deep_in_a_huge_result() {
+        let total = 50_000_000;
+        let (mut g, view) = grid(total);
+        g.ensure_row_visible(total - 1, total, view);
+        let bottom = g.scroll_y;
+        assert_eq!(bottom, (total - 10) as f64 * f64::from(BASE_ROW_HEIGHT));
+        g.scroll_y -= 1.0;
+        g.clamp_scroll(total, view.0, view.1);
+        assert_eq!(bottom - g.scroll_y, 1.0);
+        assert_eq!(g.row_at(point(px(0.0), px(0.0)), total), Some(total - 11));
     }
 
     #[test]

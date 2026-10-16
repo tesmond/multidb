@@ -1271,7 +1271,8 @@ impl Workspace {
         let state = runtime::state();
         let (c2, q2, s2, d2) = (conn_id.clone(), query_id.clone(), sql.clone(), database.clone());
         let call = runtime::spawn(async move {
-            commands::execute_query_streamed(emitter, state, c2, d2, default_schema, q2, s2, 1_000_000).await
+            // No row cap: stream every row the query returns.
+            commands::execute_query_streamed(emitter, state, c2, d2, default_schema, q2, s2, 0).await
         });
         let tab_id = tab_id.to_string();
         cx.spawn(async move |this, cx| {
