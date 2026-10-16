@@ -164,9 +164,13 @@ impl TabBar {
                 }
             }
             InputEvent::Cancel => {
+                // The tab's title was never touched, so dropping the editor
+                // puts the last committed name back.
                 this.edit = None;
                 cx.notify();
             }
+            // Re-render so the tab resizes to the text as it is typed.
+            InputEvent::Changed => cx.notify(),
             _ => {}
         })
         .detach();
@@ -304,7 +308,33 @@ impl TabBar {
                 }),
             );
         el = match editing {
-            Some(input) => el.child(div().flex_1().min_w(px(0.)).text_color(fg).child(input)),
+            Some(input) => {
+                // The field fills its parent and has no width of its own, so
+                // size the tab from an invisible copy of the text being typed
+                // and lay the field over it: the tab grows and shrinks live.
+                let (live, look) = {
+                    let i = input.read(cx);
+                    (i.text().to_string(), i.look.clone())
+                };
+                let pad = look.pad_x.0 + look.pad_x.1 + 2.0 * look.border_width + 2.0;
+                el.child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_w(px(40.))
+                        .text_color(fg)
+                        .child(
+                            div()
+                                .h(px(look.height))
+                                .pl(px(pad))
+                                .flex()
+                                .items_center()
+                                .text_color(theme::TRANSPARENT)
+                                .child(if live.is_empty() { " ".to_string() } else { live }),
+                        )
+                        .child(div().absolute().top_0().left_0().size_full().child(input)),
+                )
+            }
             None => el.child(div().flex_1().child(title)),
         };
         if running {

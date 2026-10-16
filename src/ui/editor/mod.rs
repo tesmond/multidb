@@ -17,8 +17,8 @@ use crate::ui::sql::schema::DbSchema;
 use crate::ui::sql::{tokenize, Dialect, Tok, Token};
 use buffer::{Buffer, EditKind, Selection};
 use gpui::{
-    actions, div, point, prelude::*, px, App, Bounds, ClipboardItem, Context, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent,
+    actions, anchored, deferred, div, point, prelude::*, px, AnyElement, App, Bounds, ClipboardItem, Context, Corner,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent,
     SharedString, Task, UTF16Selection, Window,
 };
 use std::ops::Range;
@@ -238,6 +238,17 @@ pub struct SqlEditor {
     /// Scrollbar thumb being dragged, and the bar under the pointer.
     pub scroll_drag: Option<scroll::ScrollDrag>,
     pub hovered_bar: Option<scroll::Bar>,
+    /// Right-click menu (Cut / Copy / Paste / Select All), where it opened.
+    context_menu: Option<ContextMenu>,
+}
+
+/// State captured when the right-click menu opens, so rendering it doesn't
+/// have to query the clipboard every frame.
+#[derive(Clone, Copy)]
+struct ContextMenu {
+    pos: Point<Pixels>,
+    has_selection: bool,
+    can_paste: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -285,6 +296,7 @@ impl SqlEditor {
             was_focused: false,
             scroll_drag: None,
             hovered_bar: None,
+            context_menu: None,
         };
         editor.retokenize();
         editor.schedule_lint(cx);
@@ -1220,6 +1232,10 @@ impl SqlEditor {
         self.start_completion(true, false, cx);
     }
     fn a_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.goto.is_some() || self.search.is_some() {
             self.close_search(window, cx);
         } else if self.completion.take().is_some() {
@@ -1581,6 +1597,104 @@ impl SqlEditor {
         cx.notify();
     }
 
+    /// Right click: move the caret to the click unless it lands inside the
+    /// selection (so the selection can be copied/cut), then open the menu.
+    fn on_right_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        window.focus(&self.focus_handle);
+        if self.bar_local(event.position).and_then(|l| self.geom().bar_at(l)).is_some() {
+            return;
+        }
+        self.completion = None;
+        if let Some(layout) = &self.layout {
+            let pos = layout.offset_for_point(&self.buffer, event.position, self.scroll);
+            let r = self.buffer.selection.range();
+            if r.is_empty() || pos < r.start || pos > r.end {
+                self.buffer.selection = Selection::cursor(pos);
+                self.buffer.goal_column = None;
+            }
+        }
+        let can_paste = cx.read_from_clipboard().and_then(|i| i.text()).is_some_and(|t| !t.is_empty());
+        self.context_menu = Some(ContextMenu {
+            pos: event.position,
+            has_selection: !self.buffer.selection.is_empty(),
+            can_paste,
+        });
+        self.reset_blink(cx);
+        cx.notify();
+    }
+
+    fn render_context_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::ui::theme;
+        use crate::ui::widgets::{separator, shadow, Scale, TextExt};
+        let menu = self.context_menu?;
+        let s = Scale(self.font_scale);
+        let mac = cfg!(target_os = "macos");
+        let key = move |k: &str| if mac { format!("\u{2318}{k}") } else { format!("Ctrl+{k}") };
+        let item = |id: &'static str, label: &'static str, shortcut: String, enabled: bool| {
+            div()
+                .id(id)
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(24.))
+                .px(px(14.))
+                .py(px(6.))
+                .t(s, 12.0)
+                .text_color(if enabled { theme::TEXT } else { theme::TEXT_MUTED })
+                .when(enabled, |d| d.cursor_pointer().hover(|st| st.bg(theme::BG_HOVER)))
+                .child(label)
+                .child(div().text_color(theme::TEXT_MUTED).child(shortcut))
+        };
+        let el = div()
+            .id("sql-editor-menu")
+            .occlude()
+            .min_w(px(180.))
+            .py(px(4.))
+            .bg(theme::BG_PANEL)
+            .border_1()
+            .border_color(theme::BORDER)
+            .rounded(px(4.))
+            .shadow(vec![shadow(0.0, 4.0, 12.0, 0.0, theme::rgba8(0, 0, 0, 0.3))])
+            .cursor(gpui::CursorStyle::Arrow)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.context_menu.take().is_some() {
+                    cx.notify();
+                }
+            }))
+            .child(item("sem-cut", "Cut", key("X"), menu.has_selection).when(menu.has_selection, |d| {
+                d.on_click(cx.listener(|this, _, window, cx| {
+                    this.context_menu = None;
+                    this.a_cut(&Cut, window, cx);
+                    cx.notify();
+                }))
+            }))
+            .child(item("sem-copy", "Copy", key("C"), menu.has_selection).when(menu.has_selection, |d| {
+                d.on_click(cx.listener(|this, _, window, cx| {
+                    this.context_menu = None;
+                    this.a_copy(&Copy, window, cx);
+                    cx.notify();
+                }))
+            }))
+            .child(item("sem-paste", "Paste", key("V"), menu.can_paste).when(menu.can_paste, |d| {
+                d.on_click(cx.listener(|this, _, window, cx| {
+                    this.context_menu = None;
+                    this.a_paste(&Paste, window, cx);
+                    cx.notify();
+                }))
+            }))
+            .child(separator(4.0))
+            .child(item("sem-all", "Select All", key("A"), true).on_click(cx.listener(|this, _, window, cx| {
+                this.context_menu = None;
+                this.a_select_all(&SelectAll, window, cx);
+                cx.notify();
+            })));
+        Some(deferred(anchored().position(menu.pos).anchor(Corner::TopLeft).child(el)).with_priority(3).into_any_element())
+    }
+
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         // Dragging a scrollbar thumb, or just moving over one.
         if let Some(drag) = self.scroll_drag {
@@ -1889,6 +2003,7 @@ impl Render for SqlEditor {
             .on_action(cx.listener(Self::a_select_selection_matches))
             .on_action(cx.listener(Self::a_goto_line))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -1908,5 +2023,6 @@ impl Render for SqlEditor {
             .children(self.hover_tooltip_data().map(|(messages, anchor, above)| {
                 popup::lint_tooltip(&messages, anchor, above, self.font_scale, window, cx)
             }))
+            .children(self.render_context_menu(cx))
     }
 }
