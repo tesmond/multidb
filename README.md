@@ -6,9 +6,60 @@
 
 I used pgAdmin and MySQL Workbench for years, and both could be slow to load or fragile after VPN resets. `multidb` is intentionally much smaller than tools like pgAdmin, DBeaver, or MySQL Workbench: it focuses on fast startup, low memory use, quick SQL execution, exporting data, and browsing schemas without a lot of surrounding weight.
 
+## Quick Mac OS install
+
+The macOS download is not currently signed as I do not have an Apple developer account. So here are some quick instructions:
+
+1. Download the latest Mac OS release zip file.
+2. Unzip the download inside the `Downloads` folder.
+3. At the terminal run `sudo xattr -cr ~/Downloads/MultiDB.app` and enter your password.
+4. Now run `mv ~/Downloads/MultiDB.app /Applications/MultiDB.app`
+
+MultiDB should be accessible.
+
+## Updating
+
+On macOS, **Help > Check for Updates…** looks up the latest release on GitHub and, after you confirm, downloads it, verifies its SHA-256 against the release's `.sha256` file, swaps it in for the running `.app` and restarts. If the app lives in a folder you can't write to, macOS asks for your administrator password. Development builds (`cargo run`) and non-macOS builds don't self-update.
+
+Because the bundle is only ad-hoc signed, macOS may ask again for Keychain access after an update.
+
 ## Screenshot
 
-![image](screenshot.png)
+![MultiDB: connections, query tabs, the SQL editor and the results grid](docs/screenshots/01-overview.png)
+
+## A quick tour
+
+### One-click formatting
+
+**Format** (or `⌥⇧F`) lays a query out in the [Mozilla SQL style](https://docs.telemetry.mozilla.org/concepts/sql_style): upper-case keywords, one column per line, readable joins. It only changes whitespace and keyword case, never what the query does, and one undo puts it back. SQL the app writes for you (View Data, templates, saved edits) comes out formatted too.
+
+![Formatting a one-line query](docs/screenshots/02-format.png)
+
+### Work with a table
+
+Right-click a table in the sidebar to view its data, open a CREATE TABLE, INSERT or UPDATE template, copy its name, back it up or drop it.
+
+![The table context menu](docs/screenshots/03-table-menu.png)
+
+### Edit results in place
+
+Double-click a cell of a single-table `SELECT` that has a primary key. The value opens selected, ready to copy or replace; changes are marked in amber, and **Save Changes** writes the `UPDATE` statements into a new tab for you to review and run.
+
+![Editing a cell in the results grid](docs/screenshots/05-edit-cells.png)
+
+### Mistakes flagged as you type
+
+Misspelled keywords, unbalanced brackets and unknown tables or columns are underlined once the caret moves on, with a suggestion on hover.
+
+![A misspelled keyword flagged in the editor](docs/screenshots/07-lint.png)
+
+### Tabs and the editor menu
+
+Right-click a tab to rename, duplicate or close tabs in bulk; renaming updates the tab as you type. The editor has the usual cut, copy, paste and select-all menu.
+
+![The tab menu and renaming a tab](docs/screenshots/06-tabs.png)
+
+![The editor's right-click menu](docs/screenshots/04-editor-menu.png)
 
 ## Features
 
@@ -26,12 +77,16 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
   - Connection-aware SQL dialect switching
   - Schema-driven SQL autocomplete
   - Find/replace panel and go-to-line (`⌘F`, `⌘G`, `⌥⌘G`)
+  - One-click formatting in the Mozilla SQL style (`⌥⇧F`)
+  - Live syntax and schema checking with suggestions
+  - Right-click menu for cut, copy, paste and select all
   - Query cancellation support
 - Query execution:
   - Streamed query results for large datasets
   - Virtualized results grid for performance
   - Column sorting and copy/select behavior
-  - CSV export support
+  - Edit cells in place and review the generated `UPDATE` before running
+  - CSV export streamed to disk, with progress in the status bar
 - Schema explorer:
   - Expandable navigation tree for schemas, tables, views, indexes, and columns
   - Context menu actions for viewing tables, refreshing schema, backups, drops, and imports
@@ -44,6 +99,26 @@ I used pgAdmin and MySQL Workbench for years, and both could be slow to load or 
   - Quick re-open of saved/history queries into new tabs
 - Persistence:
   - Local SQLite metadata store for saved connections, history, saved queries, and schema cache
+
+## Data Storage
+
+Application metadata is stored in a local SQLite database (`history.db`) under the user config directory in `multidb/`.
+
+Stored data includes:
+
+- Saved connections
+- Query history
+- Saved queries
+- Cached schema snapshots
+
+UI preferences (font scale, server groups, connection order, saved diagram
+layouts) live beside it in `ui-settings.json`. To run against a throwaway
+profile, start the app with a different `HOME`:
+
+```bash
+HOME=/tmp/multidb-demo CFFIXED_USER_HOME=/tmp/multidb-demo \
+    cargo run
+```
 
 ## Tech Stack
 
@@ -126,49 +201,12 @@ different family:
 MULTIDB_MONO_FONT="SF Mono" make dev
 ```
 
-## Quick Mac OS install
-
-The macOS download is not currently signed as I do not have an Apple developer account. So here are some quick instructions:
-
-1. Download the latest Mac OS release zip file.
-2. Unzip the download inside the `Downloads` folder.
-3. At the terminal run `sudo xattr -cr ~/Download/MultiDB.app` and enter your password.
-4. Now run `mv ~/Download/MultiDB.app /Applications/MultiDB.app`
-
-MultiDB should be accessible.
-
-## Updating
-
-On macOS, **Help > Check for Updates…** looks up the latest release on GitHub and, after you confirm, downloads it, verifies its SHA-256 against the release's `.sha256` file, swaps it in for the running `.app` and restarts. If the app lives in a folder you can't write to, macOS asks for your administrator password. Development builds (`cargo run`) and non-macOS builds don't self-update.
-
-Because the bundle is only ad-hoc signed, macOS may ask again for Keychain access after an update.
-
 ## Testing And Checks
 
 ```bash
 make check   # cargo check
 make test    # unit tests (SQL tokenizer, completion, lint, value formatting,
              # column sizing, diagram layout, connection helpers)
-```
-
-## Data Storage
-
-Application metadata is stored in a local SQLite database (`history.db`) under the user config directory in `multidb/`.
-
-Stored data includes:
-
-- Saved connections
-- Query history
-- Saved queries
-- Cached schema snapshots
-
-UI preferences (font scale, server groups, connection order, saved diagram
-layouts) live beside it in `ui-settings.json`. To run against a throwaway
-profile, start the app with a different `HOME`:
-
-```bash
-HOME=/tmp/multidb-demo CFFIXED_USER_HOME=/tmp/multidb-demo \
-    cargo run
 ```
 
 ## App Icons

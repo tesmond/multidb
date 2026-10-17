@@ -69,7 +69,7 @@ impl Render for StatusBar {
         let Some(ws) = self.ws.upgrade() else { return div().into_any_element() };
         let (status, export_status, store, scale) = {
             let w = ws.read(cx);
-            (w.status.clone(), w.export_status.clone(), w.active_store(), w.scale())
+            (w.visible_status(), w.export_status.clone(), w.active_store(), w.scale())
         };
         self.follow(store, cx);
         self.update_timer(cx);

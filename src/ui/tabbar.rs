@@ -322,11 +322,16 @@ impl TabBar {
                     (i.text().to_string(), i.look.clone())
                 };
                 let pad = look.pad_x.0 + look.pad_x.1 + 2.0 * look.border_width + 2.0;
+                // The box is taller than a tab's text line; pulling it into
+                // the tab's padding keeps the tab bar from growing while you
+                // rename.
+                let overhang = ((look.height - look.line_height) / 2.0).max(0.0);
                 el.child(
                     div()
                         .relative()
                         .flex_1()
                         .min_w(px(40.))
+                        .my(px(-overhang))
                         .text_color(fg)
                         .child(
                             div()

@@ -166,6 +166,11 @@ pub struct Workspace {
     pub output: Entity<OutputPanel>,
     pub statusbar: Entity<StatusBar>,
     pub status: SharedString,
+    /// The tab a query status belongs to, and the text it set. While
+    /// `status` still holds that text, other tabs don't show it: a new tab
+    /// shouldn't report the row count of a query run somewhere else. Any
+    /// other status replaces the text and so applies everywhere again.
+    pub status_scope: Option<(TabId, SharedString)>,
     /// A CSV export's progress or outcome. The status bar shows this in
     /// preference to everything else while it is set.
     pub export_status: Option<SharedString>,
@@ -303,6 +308,7 @@ impl Workspace {
             output,
             statusbar,
             status: "Ready".into(),
+            status_scope: None,
             export_status: None,
             export_running: false,
             export_seq: 0,
@@ -1346,7 +1352,7 @@ impl Workspace {
             st.start();
             cx.notify();
         });
-        self.status = "Running query…".into();
+        self.set_tab_status(tab_id, "Running query…");
         self.output_tab = OutputTab::Results;
         cx.notify();
 
@@ -1365,6 +1371,21 @@ impl Workspace {
             stream_query(this, cx, tab_id, query_id, conn_id, sql, store, rx, call).await;
         })
         .detach();
+    }
+
+    /// A status line about one tab's query (see `status_scope`).
+    pub fn set_tab_status(&mut self, tab_id: &str, text: impl Into<SharedString>) {
+        let text = text.into();
+        self.status = text.clone();
+        self.status_scope = Some((tab_id.to_string(), text));
+    }
+
+    /// The status line as the active tab should see it.
+    pub fn visible_status(&self) -> SharedString {
+        match &self.status_scope {
+            Some((tab, text)) if *text == self.status && *tab != self.active_tab_id => "Ready".into(),
+            _ => self.status.clone(),
+        }
     }
 
     pub fn cancel_query(&mut self, tab_id: &str, cx: &mut Context<Self>) {
@@ -1391,7 +1412,7 @@ impl Workspace {
                         cx.notify();
                     });
                 }
-                this.status = "Query cancelled".into();
+                this.set_tab_status(&tab_id, "Query cancelled");
                 cx.notify();
             })
             .ok();
@@ -1782,7 +1803,7 @@ async fn stream_query(
                                 s.running = false;
                                 s.query_id.clear();
                             }
-                            this.status = format!("Error: {e}").into();
+                            this.set_tab_status(&tab_id, format!("Error: {e}"));
                             this.output_tab = OutputTab::Messages;
                             cx.notify();
                         }).ok();
@@ -1857,14 +1878,15 @@ async fn stream_query(
                 s.query_id.clear();
             }
             if !error.is_empty() {
-                this.status = format!("Error: {error}").into();
+                this.set_tab_status(&tab_id, format!("Error: {error}"));
                 this.output_tab = OutputTab::Messages;
             } else {
-                this.status = if columns_empty {
-                    format!("{} row(s) affected · {}ms", done.rows_affected, done.duration).into()
+                let text = if columns_empty {
+                    format!("{} row(s) affected · {}ms", done.rows_affected, done.duration)
                 } else {
-                    format!("{n} rows · {}ms", done.duration).into()
+                    format!("{n} rows · {}ms", done.duration)
                 };
+                this.set_tab_status(&tab_id, text);
                 if sql_text::is_ddl(&sql) {
                     this.request_schema_refresh(&conn_id, cx);
                 }
