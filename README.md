@@ -53,13 +53,17 @@ Misspelled keywords, unbalanced brackets and unknown tables or columns are under
 
 ![A misspelled keyword flagged in the editor](docs/screenshots/07-lint.png)
 
-### Tabs and the editor menu
+### Tabs
 
-Right-click a tab to rename, duplicate or close tabs in bulk; renaming updates the tab as you type. The editor has the usual cut, copy, paste and select-all menu.
+Right-click a tab to rename, duplicate or close tabs in bulk; renaming updates the tab as you type.
 
 ![The tab menu and renaming a tab](docs/screenshots/06-tabs.png)
 
-![The editor's right-click menu](docs/screenshots/04-editor-menu.png)
+### Know which server you're on
+
+Give a connection (or its server group) a tab colour in Edit Connection, and every tab using it is tinted to match, as is its icon in the sidebar. A quick glance at the tab tells you which server a query will run on — handy for keeping production and test apart.
+
+![Tabs coloured by connection, and the Tab Colour setting](docs/screenshots/04-tab-colours.png)
 
 ## Features
 
@@ -72,8 +76,9 @@ Right-click a tab to rename, duplicate or close tabs in bulk; renaming updates t
   - Optional Kubernetes port-forward support for database access
   - Per-connection tab color with automatic contrasting tab text
   - Connection color swatch shown in the left navigator
-- SQL editor experience:
-  - Native GPU-rendered SQL editor
+  - AIM AWS authentication
+- SQL editor:
+  - GPU-rendered SQL editor
   - Connection-aware SQL dialect switching
   - Schema-driven SQL autocomplete
   - Find/replace panel and go-to-line (`⌘F`, `⌘G`, `⌥⌘G`)
@@ -86,7 +91,7 @@ Right-click a tab to rename, duplicate or close tabs in bulk; renaming updates t
   - Virtualized results grid for performance
   - Column sorting and copy/select behavior
   - Edit cells in place and review the generated `UPDATE` before running
-  - CSV export streamed to disk, with progress in the status bar
+  - Fast CSV export streamed to disk, with progress in the status bar
 - Schema explorer:
   - Expandable navigation tree for schemas, tables, views, indexes, and columns
   - Context menu actions for viewing tables, refreshing schema, backups, drops, and imports
