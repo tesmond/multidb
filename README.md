@@ -4,11 +4,11 @@
 
 `multidb` is a desktop SQL client for working across multiple database engines with one UI for querying, schema browsing, table backup/import workflows, and query history.
 
-I used pgAdmin and MySQL Workbench for years, and both could be slow to load or fragile after VPN resets. `multidb` is intentionally much smaller than tools like pgAdmin, DBeaver, or MySQL Workbench: it focuses on fast startup, low memory use, quick SQL execution, exporting data, and browsing schemas without a lot of surrounding weight.
+I used pgAdmin and MySQL Workbench for years, and both could be slow to load or fragile after VPN resets. `multidb` is intentionally more focussed than tools like pgAdmin, DBeaver, or MySQL Workbench. Much faster startup, low memory use, quick SQL execution, exporting data, and browsing schemas without a lot of surrounding distraction.
 
 ## Quick Mac OS install
 
-The macOS download is not currently signed as I do not have an Apple developer account. So here are some quick instructions:
+The macOS download is not signed as I do not have an Apple developer account. So here are some quick instructions:
 
 1. Download the latest Mac OS release zip file.
 2. Unzip the download inside the `Downloads` folder.
