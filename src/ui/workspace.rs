@@ -230,6 +230,26 @@ pub struct Workspace {
     pub cell_popup: Option<crate::ui::grid::CellPopup>,
     /// Scroll handle for the cell popup's text.
     pub cell_popup_scroll: ScrollHandle,
+    /// A long error opened in full from its info button: (title, text).
+    pub error_popup: Option<(String, String)>,
+    /// Scroll handle for the error popup's text.
+    pub error_popup_scroll: ScrollHandle,
+    /// The full text behind a shortened status line, paired with the status
+    /// it belongs to. The status bar offers it only while `status` still
+    /// holds that line, so any later status retires it without bookkeeping.
+    pub status_detail: Option<(SharedString, String)>,
+    /// When the background schema refresh last tried each connection, so a
+    /// connection whose refresh fails is not retried on every tick.
+    pub schema_refresh_attempts: std::collections::HashMap<String, std::time::Instant>,
+    /// Schema refreshes in flight, by connection: (refresh number, handle that
+    /// stops it). Clicking the connection's spinner aborts it.
+    schema_refresh_tasks: std::collections::HashMap<String, (u64, tokio::task::AbortHandle)>,
+    schema_refresh_seq: u64,
+    /// The connection whose refresh spinner the pointer is over; it shows
+    /// as a stop button then.
+    pub hover_schema_spinner: Option<String>,
+    /// A busy tab the person asked to close, waiting on "are you sure?".
+    pub close_tab_confirm: Option<TabId>,
     /// Scroll handle for the connection dialog's fields, which do not fit on a
     /// short screen.
     pub conn_dialog_scroll: ScrollHandle,
@@ -346,6 +366,14 @@ impl Workspace {
             terminate_confirm: None,
             cell_popup: None,
             cell_popup_scroll: ScrollHandle::new(),
+            error_popup: None,
+            error_popup_scroll: ScrollHandle::new(),
+            status_detail: None,
+            schema_refresh_attempts: std::collections::HashMap::new(),
+            schema_refresh_tasks: std::collections::HashMap::new(),
+            schema_refresh_seq: 0,
+            hover_schema_spinner: None,
+            close_tab_confirm: None,
             conn_dialog_scroll: ScrollHandle::new(),
             nav_indexes: std::collections::HashMap::new(),
             nav_matches: None,
@@ -369,6 +397,7 @@ impl Workspace {
         ws.output.update(cx, |o, cx| o.set_ctx(ctx, cx));
         ws.sync_font_scale_input(cx);
         ws.load_saved_connections(cx);
+        ws.start_background_schema_refresh(cx);
         // Trackpad pinch, which gpui does not deliver itself (see `ui::pinch`).
         // Steps that arrive together are combined into one zoom, so a fast
         // pinch costs one frame rather than one per step.
@@ -543,6 +572,27 @@ impl Workspace {
     pub fn new_query_tab(&mut self, cx: &mut Context<Self>) {
         let id = self.add_tab(self.selected_conn_id.clone(), String::new(), cx);
         self.set_active_tab(id, cx);
+    }
+
+    /// Whether the tab is in the middle of something closing it would stop:
+    /// a query (fetching rows, building an index, …) or a session being
+    /// terminated.
+    pub fn tab_busy(&self, id: &str) -> bool {
+        self.tab(id).is_some_and(|t| match &t.kind {
+            TabKind::Sql(s) => s.running,
+            TabKind::Sessions(s) => !s.terminating.is_empty(),
+            _ => false,
+        })
+    }
+
+    /// The tab's close button: a busy tab asks first.
+    pub fn request_close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.tab_busy(id) {
+            self.close_tab_confirm = Some(id.to_string());
+            cx.notify();
+        } else {
+            self.remove_tab(id, cx);
+        }
     }
 
     pub fn remove_tab(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -855,12 +905,14 @@ impl Workspace {
                 // UI thread froze the window once per connection when the
                 // filter pulled in every schema at once.
                 let json = entry.schema_json;
+                let refreshed_at = parse_sqlite_utc(&entry.last_refreshed_at);
                 let parsed = cx.background_spawn(async move { serde_json::from_str::<SchemaTree>(&json).ok() }).await;
                 if let Some(tree) = parsed {
                     this.update(cx, |this, cx| {
                         if let Some(c) = this.connection_mut(&conn_id) {
                             if c.schema_loading || c.schema.is_some() { return; }
                             c.schema = Some(Arc::new(tree));
+                            c.schema_refreshed_at = refreshed_at;
                         }
                         this.reindex_schema(&conn_id, cx);
                         this.configure_editors(cx);
@@ -873,6 +925,12 @@ impl Workspace {
     }
 
     pub fn refresh_schema(&mut self, conn_id: &str, cx: &mut Context<Self>) -> Task<()> {
+        self.refresh_schema_with(conn_id, false, cx)
+    }
+
+    /// `background`: a refresh nobody asked for. Its failure leaves the schema
+    /// on screen as it was, without an error line.
+    fn refresh_schema_with(&mut self, conn_id: &str, background: bool, cx: &mut Context<Self>) -> Task<()> {
         let Some(conn) = self.connection_mut(conn_id) else { return Task::ready(()) };
         if conn.schema_loading {
             return Task::ready(());
@@ -884,9 +942,12 @@ impl Workspace {
         let state = runtime::state();
         let id = conn_id.to_string();
         let (progress, mut previews) = futures::channel::mpsc::unbounded();
-        let fut = runtime::spawn(async move {
+        let (fut, abort) = runtime::spawn_abortable(async move {
             commands::get_schema_with_progress(state, id, progress).await.map(Arc::new)
         });
+        self.schema_refresh_seq += 1;
+        let seq = self.schema_refresh_seq;
+        self.schema_refresh_tasks.insert(conn_id.to_string(), (seq, abort));
         let conn_id = conn_id.to_string();
         cx.spawn(async move |this, cx| {
             use futures::StreamExt;
@@ -904,15 +965,29 @@ impl Workspace {
                 }
             }
             let res = fut.await;
-            let successful_schema = res.as_ref().ok().cloned();
+            let successful_schema = res.as_ref().and_then(|r| r.as_ref().ok()).cloned();
             this.update(cx, |this, cx| {
+                if this.schema_refresh_tasks.get(&conn_id).is_some_and(|(s, _)| *s == seq) {
+                    this.schema_refresh_tasks.remove(&conn_id);
+                }
+                if this.hover_schema_spinner.as_deref() == Some(conn_id.as_str()) {
+                    // The spinner is gone, so it will not report the pointer leaving.
+                    this.hover_schema_spinner = None;
+                }
                 if let Some(c) = this.connection_mut(&conn_id) {
                     c.schema_loading = false;
                     match res {
-                        Ok(tree) => c.schema = Some(tree),
-                        Err(e) => {
+                        // Stopped from the spinner: back to what was shown.
+                        None => c.schema = previous_schema,
+                        Some(Ok(tree)) => {
+                            c.schema = Some(tree);
+                            c.schema_refreshed_at = Some(std::time::SystemTime::now());
+                        }
+                        Some(Err(e)) => {
                             c.schema = previous_schema;
-                            c.schema_error = Some(e);
+                            if !background {
+                                c.schema_error = Some(e);
+                            }
                         },
                     }
                 }
@@ -930,6 +1005,71 @@ impl Workspace {
                 }).await;
             }
         })
+    }
+
+    /// Stop the connection's schema refresh (its spinner was clicked). The
+    /// refresh task resolves as cancelled and restores the previous schema.
+    pub fn stop_schema_refresh(&mut self, conn_id: &str, cx: &mut Context<Self>) {
+        if let Some((_, abort)) = self.schema_refresh_tasks.remove(conn_id) {
+            abort.abort();
+            // Not retried in the background straight away either.
+            self.schema_refresh_attempts.insert(conn_id.to_string(), std::time::Instant::now());
+            let name = self.connection(conn_id).map(|c| c.config.name.clone()).unwrap_or_default();
+            self.status = format!("Schema refresh for {name} stopped").into();
+        }
+        self.hover_schema_spinner = None;
+        cx.notify();
+    }
+
+    /// Refresh, in the background, schemas that have not been fetched for
+    /// `SCHEMA_MAX_AGE`. Only connected connections are refreshed, so this
+    /// never opens a connection (or an SSO sign-in) the person has not.
+    fn start_background_schema_refresh(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(SCHEMA_REFRESH_TICK).await;
+            let Ok(due) = this.update(cx, |this, _| this.stale_schema_ids()) else { break };
+            for id in due {
+                if this
+                    .update(cx, |this, _| this.schema_refresh_attempts.insert(id.clone(), std::time::Instant::now()))
+                    .is_err()
+                {
+                    return;
+                }
+                let state = runtime::state();
+                let check_id = id.clone();
+                let allowed =
+                    runtime::spawn(async move { commands::schema_background_refresh_allowed(state, check_id).await }).await;
+                if !allowed {
+                    continue;
+                }
+                let task = this.update(cx, |this, cx| this.refresh_schema_with(&id, true, cx)).ok();
+                // One at a time: no need to load several databases at once.
+                if let Some(task) = task {
+                    task.await;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Connections showing a schema older than `SCHEMA_MAX_AGE` that are not
+    /// already refreshing and were not tried recently.
+    fn stale_schema_ids(&self) -> Vec<String> {
+        let now = std::time::SystemTime::now();
+        self.connections
+            .iter()
+            .filter(|c| c.schema.is_some() && !c.schema_loading)
+            .filter(|c| {
+                c.schema_refreshed_at
+                    .is_none_or(|at| now.duration_since(at).is_ok_and(|age| age > SCHEMA_MAX_AGE))
+            })
+            .filter(|c| {
+                self.schema_refresh_attempts
+                    .get(&c.config.id)
+                    .is_none_or(|at| at.elapsed() > SCHEMA_RETRY_AFTER)
+            })
+            .map(|c| c.config.id.clone())
+            .collect()
     }
 
     /// Navigator expand: load cached schema, fetch fresh if none cached.
@@ -999,6 +1139,12 @@ impl Workspace {
                     Err(e) => {
                         if this.stop_requested {
                             "Connection test cancelled".into()
+                        } else if crate::ui::dialogs::is_long_error(&e) {
+                            // Too long for the status bar: say so, and keep
+                            // the whole message behind the info button.
+                            let short: SharedString = format!("Connection to {} failed: error", cfg.name).into();
+                            this.status_detail = Some((short.clone(), e));
+                            short
                         } else {
                             format!("Connection failed: {e}").into()
                         }
@@ -1380,6 +1526,19 @@ impl Workspace {
         self.status_scope = Some((tab_id.to_string(), text));
     }
 
+    /// Open the full text of a long error in a popup with a Copy button.
+    pub fn show_error_popup(&mut self, title: impl Into<String>, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.error_popup = Some((title.into(), text.into()));
+        self.error_popup_scroll = ScrollHandle::new();
+        cx.notify();
+    }
+
+    /// The full error behind the visible status line, when it was shortened.
+    pub fn visible_status_detail(&self) -> Option<String> {
+        let (status, detail) = self.status_detail.as_ref()?;
+        (*status == self.visible_status()).then(|| detail.clone())
+    }
+
     /// The status line as the active tab should see it.
     pub fn visible_status(&self) -> SharedString {
         match &self.status_scope {
@@ -1732,6 +1891,21 @@ impl Focusable for Workspace {
     }
 }
 
+/// A schema not refreshed for this long is refreshed in the background.
+const SCHEMA_MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+/// How often the background refresh looks for stale schemas.
+const SCHEMA_REFRESH_TICK: Duration = Duration::from_secs(5 * 60);
+/// A background refresh that failed (or was skipped as unsafe) waits this
+/// long before it is tried again.
+const SCHEMA_RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
+
+/// Parse SQLite's `datetime('now')` format (`YYYY-MM-DD HH:MM:SS`, UTC).
+fn parse_sqlite_utc(text: &str) -> Option<std::time::SystemTime> {
+    chrono::NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|t| t.and_utc().into())
+}
+
 /// `test_connection` with the 65s backend watchdog from the old IPC layer.
 pub fn run_test_connection(cfg: ConnectionConfig, test_id: String) -> impl std::future::Future<Output = Result<(), String>> {
     let state = runtime::state();
@@ -1744,7 +1918,7 @@ pub fn run_test_connection(cfg: ConnectionConfig, test_id: String) -> impl std::
         let abort = task.abort_handle();
         let out = tokio::select! {
             r = task => r.map_err(|e| format!("backend command task failed: {e}")).and_then(|r| r),
-            _ = tokio::time::sleep(Duration::from_secs(65)) => {
+            _ = test_watchdog(&test_id, Duration::from_secs(65)) => {
                 // Stop the test along with the wait for it, rather than leaving
                 // it running (and an `aws sso login` open) behind the error.
                 abort.abort();
@@ -1756,6 +1930,26 @@ pub fn run_test_connection(cfg: ConnectionConfig, test_id: String) -> impl std::
         crate::ipc_diagnostics::clear_test_connection_stage(&test_id);
         out
     })
+}
+
+/// Resolves once the test has spent `limit` working without an answer.
+///
+/// Time spent waiting on `aws sso login` does not count: that is a person
+/// approving a sign-in in their browser, which has its own (longer) timeout.
+/// Counting it let the watchdog abort the login — killing the `aws` process
+/// before it wrote the new token — whenever approving took more than about a
+/// minute, so a test never renewed an expired SSO session the way a connect does.
+async fn test_watchdog(test_id: &str, limit: Duration) {
+    const TICK: Duration = Duration::from_millis(250);
+    let mut counted = Duration::ZERO;
+    while counted < limit {
+        tokio::time::sleep(TICK).await;
+        let signing_in =
+            crate::ipc_diagnostics::get_test_connection_stage(test_id).as_deref() == Some("aws_sso_login");
+        if !signing_in {
+            counted += TICK;
+        }
+    }
 }
 
 /// How often a streaming result is redrawn at most. Rows that arrive between

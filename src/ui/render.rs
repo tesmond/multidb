@@ -296,6 +296,13 @@ impl Workspace {
         if let Some(el) = self.render_update_dialog(window, cx) {
             root = root.child(el);
         }
+        if let Some(el) = self.render_close_tab_confirm(window, cx) {
+            root = root.child(el);
+        }
+        // Opened from inside other dialogs (the connection test), so on top.
+        if let Some(el) = self.render_error_popup(window, cx) {
+            root = root.child(el);
+        }
         root.into_any_element()
     }
 
@@ -358,6 +365,117 @@ impl Workspace {
                 .id("cell-popup-overlay")
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.cell_popup = None;
+                    cx.notify();
+                }))
+                .child(modal)
+                .into_any_element(),
+        )
+    }
+
+    /// "Are you sure?" for closing a tab that is still busy.
+    pub fn render_close_tab_confirm(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tab_id = self.close_tab_confirm.clone()?;
+        let Some(tab) = self.tab(&tab_id) else {
+            // Closed some other way meanwhile.
+            self.close_tab_confirm = None;
+            return None;
+        };
+        let title = tab.title.clone();
+        let s = Scale(self.scale());
+        let modal = dialogs::modal_box(420.0)
+            .id("close-tab-confirm")
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(dialogs::modal_header(s, "Close Tab?", cx.listener(|this, _, _, cx| {
+                this.close_tab_confirm = None;
+                cx.notify();
+            })))
+            .child(div().px(px(20.)).py(px(16.)).t(s, 13.0).text_color(theme::TEXT_DIM).child(format!(
+                "\"{title}\" has ongoing activity. Closing it will cancel it. Are you sure you want to close it?"
+            )))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .px(px(20.))
+                    .py(px(14.))
+                    .border_t_1()
+                    .border_color(theme::BORDER)
+                    .child(dialogs::button("close-tab-no", s, "No", Btn::Secondary, false, cx.listener(|this, _, _, cx| {
+                        this.close_tab_confirm = None;
+                        cx.notify();
+                    })))
+                    .child(dialogs::button("close-tab-yes", s, "Yes", Btn::Stop, false, cx.listener(move |this, _, _, cx| {
+                        this.close_tab_confirm = None;
+                        // Closing cancels the tab's query (see `release_tab`).
+                        this.remove_tab(&tab_id, cx);
+                    }))),
+            );
+        Some(
+            overlay(0.6)
+                .id("close-tab-overlay")
+                .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.close_tab_confirm = None;
+                    cx.notify();
+                }))
+                .child(modal)
+                .into_any_element(),
+        )
+    }
+
+    pub fn render_error_popup(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (title, text) = self.error_popup.clone()?;
+        let s = Scale(self.scale());
+        let copy = text.clone();
+        let modal = dialogs::modal_box(640.0)
+            .id("error-popup")
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(dialogs::modal_header(s, &title, cx.listener(|this, _, _, cx| {
+                this.error_popup = None;
+                cx.notify();
+            })))
+            .child({
+                let scroll = self.error_popup_scroll.clone();
+                let body = div()
+                    .id("error-popup-text")
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .max_h(px(420.))
+                    .p(px(16.))
+                    .t(s, 12.0)
+                    .font_family(crate::ui::pick_mono_family(cx))
+                    .text_color(theme::ERROR)
+                    .child(text)
+                    .into_any_element();
+                self.scrollable("error-popup", &scroll, body, cx)
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.))
+                    .px(px(20.))
+                    .py(px(14.))
+                    .border_t_1()
+                    .border_color(theme::BORDER)
+                    .child(dialogs::button("error-popup-copy", s, "Copy", Btn::Secondary, false, cx.listener(move |this, _, _, cx| {
+                        this.copy_to_clipboard(copy.clone(), cx);
+                    })))
+                    .child(dialogs::button("error-popup-close", s, "Close", Btn::Primary, false, cx.listener(|this, _, _, cx| {
+                        this.error_popup = None;
+                        cx.notify();
+                    }))),
+            );
+        Some(
+            overlay(0.5)
+                .id("error-popup-overlay")
+                .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.error_popup = None;
                     cx.notify();
                 }))
                 .child(modal)

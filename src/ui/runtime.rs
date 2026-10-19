@@ -38,6 +38,26 @@ where
     }
 }
 
+/// `spawn` that can be stopped: aborting the handle drops the task (and with it
+/// any child process it started with `kill_on_drop`), and the future then
+/// resolves to `None`.
+pub fn spawn_abortable<F, T>(fut: F) -> (impl Future<Output = Option<T>> + Send + 'static, tokio::task::AbortHandle)
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = runtime().spawn(fut);
+    let abort = handle.abort_handle();
+    let done = async move {
+        match handle.await {
+            Ok(value) => Some(value),
+            Err(err) if err.is_cancelled() => None,
+            Err(err) => std::panic::resume_unwind(err.into_panic()),
+        }
+    };
+    (done, abort)
+}
+
 /// Run blocking work (native file dialogs) on tokio's blocking pool.
 pub fn spawn_blocking<F, T>(f: F) -> impl Future<Output = T> + Send + 'static
 where

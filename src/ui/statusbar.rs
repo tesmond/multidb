@@ -67,9 +67,9 @@ impl StatusBar {
 impl Render for StatusBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(ws) = self.ws.upgrade() else { return div().into_any_element() };
-        let (status, export_status, store, scale) = {
+        let (status, status_detail, export_status, store, scale) = {
             let w = ws.read(cx);
-            (w.visible_status(), w.export_status.clone(), w.active_store(), w.scale())
+            (w.visible_status(), w.visible_status_detail(), w.export_status.clone(), w.active_store(), w.scale())
         };
         self.follow(store, cx);
         self.update_timer(cx);
@@ -84,6 +84,7 @@ impl Render for StatusBar {
             None => (None, 0, None, String::new()),
         };
         // An export in progress (or its outcome) outranks the query status.
+        let showing_status = export_status.is_none() && progress.is_none();
         let text: SharedString = if let Some(export) = export_status {
             export
         } else if let Some(progress) = &progress {
@@ -104,7 +105,15 @@ impl Render for StatusBar {
             .t(s, 11.0)
             .text_color(theme::TEXT_MUTED)
             .flex_shrink_0()
-            .child(div().flex_1().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text));
+            .child(div().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text));
+        // A shortened error keeps its full text behind an info button.
+        if let Some(detail) = status_detail.filter(|_| showing_status) {
+            let ws = self.ws.clone();
+            bar = bar.child(crate::ui::dialogs::error_info_button(s, "status-error-info", move |_, _, cx| {
+                ws.update(cx, |ws, cx| ws.show_error_popup("Connection Error", detail.clone(), cx)).ok();
+            }));
+        }
+        bar = bar.child(div().flex_1());
         if let Some(n) = rows {
             let sep = || div().opacity(0.4).child("|");
             bar = bar

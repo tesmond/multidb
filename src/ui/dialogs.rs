@@ -918,6 +918,49 @@ pub fn button(
     b.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).into_any_element()
 }
 
+/// Errors longer than this, or spanning lines, are summarised as "Error" with
+/// a button that opens the full text rather than being printed inline.
+const LONG_ERROR_CHARS: usize = 120;
+
+pub fn is_long_error(text: &str) -> bool {
+    text.contains('\n') || text.chars().count() > LONG_ERROR_CHARS
+}
+
+/// A short error label followed by an info button that opens the full text.
+pub fn error_summary(
+    s: Scale,
+    id: &'static str,
+    label: &str,
+    on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .t(s, 12.0)
+        .text_color(theme::ERROR)
+        .child(label.to_string())
+        .child(error_info_button(s, id, on_open))
+        .into_any_element()
+}
+
+/// The info icon that opens a long error in full.
+pub fn error_info_button(
+    s: Scale,
+    id: &'static str,
+    on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .group(id)
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(on_open)
+        .child(icon(Icon::Info, s.fs(13.0), theme::ERROR).group_hover(id, |st| st.text_color(theme::TEXT)))
+}
+
 pub fn color_of(c: Rgba) -> gpui::Hsla {
     hsla(c)
 }
@@ -1147,7 +1190,14 @@ impl Workspace {
             body = body.child(div().t(s, 12.0).text_color(theme::SUCCESS).child(d.test_result.clone()));
         }
         if !d.test_error.is_empty() {
-            body = body.child(div().t(s, 12.0).text_color(theme::ERROR).child(d.test_error.clone()));
+            let text = d.test_error.clone();
+            body = body.child(if is_long_error(&text) {
+                error_summary(s, "conn-test-error-info", "Error", cx.listener(move |this, _, _, cx| {
+                    this.show_error_popup("Connection Error", text.clone(), cx);
+                }))
+            } else {
+                div().t(s, 12.0).text_color(theme::ERROR).child(text).into_any_element()
+            });
         }
         let (testing, stopping, saving) = (d.testing, d.stopping, d.saving);
         let footer = div()

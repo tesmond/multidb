@@ -59,6 +59,7 @@ icons! {
     SortDesc => "sort-desc",
     CaretUp => "caret-up",
     CaretDown => "caret-down",
+    Info => "info",
 }
 
 /// A square icon of `size`, painted in `color`. gpui's `svg()` does not

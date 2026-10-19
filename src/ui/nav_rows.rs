@@ -33,7 +33,6 @@ pub enum Leaf {
 /// What stands in for a connection's schema when there is none to show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Info {
-    Loading,
     Error,
     NotLoaded,
 }
@@ -318,9 +317,9 @@ impl Builder<'_> {
             return;
         }
         let base = STEP;
-        if conn.schema_loading {
-            self.push(RowKind::Info { conn: ci, info: Info::Loading }, base, 0.0, self.m.info());
-        } else if conn.schema_error.is_some() {
+        // A refresh in progress shows as a spinner on the connection row, not
+        // as a line of its own.
+        if !conn.schema_loading && conn.schema_error.is_some() {
             self.push(RowKind::Info { conn: ci, info: Info::Error }, base, 0.0, self.m.info());
         }
         if let Some(schema) = conn.schema.clone() {
@@ -870,7 +869,11 @@ mod tests {
             f.conns[0].schema_loading = loading;
             f.conns[0].schema_error = (!loading).then(|| "temporary connection failure".into());
             let rows = kinds(&f.rows(None));
-            assert!(rows.iter().any(|r| matches!(r, RowKind::Info { info, .. } if *info == if loading { Info::Loading } else { Info::Error })));
+            assert_eq!(
+                rows.iter().any(|r| matches!(r, RowKind::Info { info: Info::Error, .. })),
+                !loading
+            );
+            assert!(!loading || rows.iter().all(|r| !matches!(r, RowKind::Info { .. })), "loading adds no info line");
             for row in &baseline {
                 assert!(rows.contains(row), "refresh status hid schema row {row:?}");
             }
@@ -878,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn connections_without_a_schema_show_why() {
+    fn loading_without_a_schema_adds_no_line() {
         let mut c = ActiveConnection::new(ConnectionConfig { id: "a".into(), ..Default::default() });
         c.schema_loading = true;
         let mut f = Fixture::new(vec![c]);
@@ -887,7 +890,6 @@ mod tests {
             kinds(&f.rows(None)),
             vec![
                 RowKind::Conn { conn: 0, group: None, open: true },
-                RowKind::Info { conn: 0, info: Info::Loading },
                 RowKind::Gap,
             ]
         );

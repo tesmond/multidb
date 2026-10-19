@@ -21,11 +21,14 @@ pub struct ActiveConnection {
     pub schema: Option<Arc<SchemaTree>>,
     pub schema_loading: bool,
     pub schema_error: Option<String>,
+    /// When the schema shown was last fetched from the database (from the
+    /// schema cache, or a refresh this session); drives the background refresh.
+    pub schema_refreshed_at: Option<std::time::SystemTime>,
 }
 
 impl ActiveConnection {
     pub fn new(config: ConnectionConfig) -> Self {
-        ActiveConnection { config, schema: None, schema_loading: false, schema_error: None }
+        ActiveConnection { config, schema: None, schema_loading: false, schema_error: None, schema_refreshed_at: None }
     }
 }
 

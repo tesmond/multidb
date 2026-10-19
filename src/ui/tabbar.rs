@@ -379,7 +379,7 @@ impl TabBar {
                     move |this, _, _, cx| {
                         cx.stop_propagation();
                         let id = id.clone();
-                        this.with_ws(cx, |ws, cx| ws.remove_tab(&id, cx));
+                        this.with_ws(cx, |ws, cx| ws.request_close_tab(&id, cx));
                     }
                 }))
                 .child({

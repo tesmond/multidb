@@ -1134,6 +1134,16 @@ pub async fn load_schema(state: Arc<AppState>, conn_id: String) -> CommandResult
     store.load_schema(&conn_id).await.map_err(command_err)
 }
 
+/// Whether a schema refresh nobody asked for may run for this connection: it
+/// must be connected already, and must not need an AWS SSO sign-in, which
+/// would open a browser window out of nowhere.
+pub async fn schema_background_refresh_allowed(state: Arc<AppState>, conn_id: String) -> bool {
+    match state.connections.get_config(&conn_id).await {
+        Some(cfg) => !crate::aws_auth::sso_login_due(&cfg),
+        None => false,
+    }
+}
+
 pub async fn save_schema(
     state: Arc<AppState>,
     conn_id: String,

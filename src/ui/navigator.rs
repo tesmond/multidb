@@ -14,7 +14,7 @@ use crate::ui::widgets::spaced_text::spaced_text;
 use crate::ui::widgets::{overlay, separator, shadow, Scale, TextExt};
 use crate::ui::workspace::{DragKind, NavDrag, NavIndexTip, NavMenu, Workspace};
 use gpui::{
-    deferred, div, point, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, FontWeight, MouseButton,
+    deferred, div, point, prelude::*, px, AnimationExt, AnyElement, App, Context, CursorStyle, Div, FontWeight, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
 };
 
@@ -785,7 +785,6 @@ impl Workspace {
             RowKind::Info { conn, info } => {
                 let c = &self.connections[conn];
                 let (text, color) = match info {
-                    Info::Loading => ("Loading schema…".to_string(), theme::TEXT_MUTED),
                     Info::Error => (c.schema_error.clone().unwrap_or_default(), theme::ERROR),
                     Info::NotLoaded => ("Click to load schema".to_string(), theme::TEXT_MUTED),
                 };
@@ -997,6 +996,48 @@ impl Workspace {
                         d.child(div().flex_shrink_0().t(s, 11.0).font_weight(FontWeight::NORMAL).text_color(theme::TEXT_MUTED).opacity(0.72).child(size_label.clone()))
                     }),
             )
+            // Schema (re)loading: a spinner beside the name, which turns into
+            // a stop button under the pointer and stops the refresh.
+            .when(conn.schema_loading, |d| {
+                let spin_hovered = self.hover_schema_spinner.as_deref() == Some(id.as_str());
+                let (hover_id, stop_id) = (id.clone(), id.clone());
+                let size = 12.0 * s.0;
+                let button = div()
+                    .id(SharedString::from(format!("schema-stop-{id}")))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(size))
+                    .h(px(s.lh_f(12.0)))
+                    .flex_shrink_0()
+                    .cursor_pointer()
+                    .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                        if *hovered {
+                            this.hover_schema_spinner = Some(hover_id.clone());
+                        } else if this.hover_schema_spinner.as_deref() == Some(hover_id.as_str()) {
+                            this.hover_schema_spinner = None;
+                        }
+                        cx.notify();
+                    }))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.stop_schema_refresh(&stop_id, cx);
+                    }));
+                d.child(if spin_hovered {
+                    button.child(crate::ui::icons::icon(Icon::Stop, px(size), theme::ERROR)).into_any_element()
+                } else {
+                    button
+                        .child(
+                            crate::ui::widgets::spinner::spinner(size, s.lh_f(12.0), theme::TEXT_MUTED).with_animation(
+                                gpui::ElementId::Name(format!("schema-spin-{id}").into()),
+                                gpui::Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                                |spinner, delta| spinner.angle(delta),
+                            ),
+                        )
+                        .into_any_element()
+                })
+            })
             .child(
                 div()
                     .t(s, 10.0)
