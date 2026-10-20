@@ -6,7 +6,10 @@
 //! instead of everything that observes the workspace.
 
 use crate::commands::QueryPhase;
-use crate::ui::model::{EditInfo, PendingEdits, QueryResult, SortDirection};
+use crate::grid_edit::exec::{SaveControl, SaveReport};
+use crate::grid_edit::RowRef;
+use crate::ui::model::{EditInfo, QueryResult, ResultSource, SortDirection};
+use crate::ui::pending::{self, Pending, ViewRows};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -53,10 +56,21 @@ pub struct ResultStore {
     pub progress: Option<QueryProgress>,
     pub sort_col: Option<usize>,
     pub sort_dir: SortDirection,
-    /// Set when the statement is a simple SELECT on a table with a primary
+    /// Set when the statement is a plain read of one table with a primary
     /// key, which makes its cells editable.
     pub edit_info: Option<EditInfo>,
-    pub pending_edits: PendingEdits,
+    /// Why the result can't be edited, when that is known.
+    pub edit_blocked: Option<String>,
+    /// The result generation `edit_info` / `edit_blocked` were worked out for.
+    pub edit_checked: u64,
+    /// Where the result came from (set when the query runs).
+    pub source: Option<ResultSource>,
+    /// Edits, deletions and new rows waiting to be saved.
+    pub pending: Pending,
+    /// A save in progress.
+    pub saving: Option<Arc<SaveControl>>,
+    /// The last save failed: what went wrong, and the row it was on.
+    pub save_error: Option<(String, Option<RowRef>)>,
     /// Rows are still arriving.
     pub loading: bool,
 }
@@ -69,7 +83,12 @@ impl Default for ResultStore {
             sort_col: None,
             sort_dir: SortDirection::Asc,
             edit_info: None,
-            pending_edits: Vec::new(),
+            edit_blocked: None,
+            edit_checked: 0,
+            source: None,
+            pending: Pending::default(),
+            saving: None,
+            save_error: None,
             loading: false,
         }
     }
@@ -94,7 +113,8 @@ impl ResultStore {
     fn reset_view_state(&mut self) {
         self.sort_col = None;
         self.sort_dir = SortDirection::Asc;
-        self.pending_edits.clear();
+        self.pending.reset();
+        self.save_error = None;
     }
 
     /// Forget the result (a statement is about to run).
@@ -102,8 +122,51 @@ impl ResultStore {
         self.result = None;
         self.progress = None;
         self.edit_info = None;
+        self.edit_blocked = None;
+        self.edit_checked = 0;
         self.reset_view_state();
         self.loading = false;
+    }
+
+    /// There are changes waiting to be saved.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub fn is_saving(&self) -> bool {
+        self.saving.is_some()
+    }
+
+    /// The rows in the order the grid shows them, given the sorted order of
+    /// the data rows (if sorted).
+    pub fn view(&self, sorted: Option<Arc<Vec<usize>>>) -> ViewRows {
+        let n = self.row_count();
+        pending::build_view(n, sorted, &self.pending)
+    }
+
+    /// Fold a successful save into the result without running the query
+    /// again: updated rows take their stored values, deleted rows go, new
+    /// rows become ordinary rows where they were placed. `view` is the order
+    /// the grid showed when the save started.
+    pub fn apply_saved(&mut self, report: &SaveReport, view: &ViewRows) {
+        let Some(result) = &mut self.result else { return };
+        for (row, values) in &report.updated {
+            if let RowRef::Data(i) = row {
+                result.rows.set(*i, values.clone());
+            }
+        }
+        let deleted: std::collections::BTreeSet<usize> =
+            report.deleted.iter().filter_map(|r| if let RowRef::Data(i) = r { Some(*i) } else { None }).collect();
+        let inserted_ids: Vec<u64> = report.inserted.iter().filter_map(|(r, _)| if let RowRef::New(id) = r { Some(*id) } else { None }).collect();
+        let data_len = result.rows.len();
+        let pins = pending::pins_after_save(view, &self.pending, &deleted, &inserted_ids, data_len);
+        result.rows.remove(&deleted);
+        let new_rows: Vec<Vec<serde_json::Value>> = report.inserted.iter().map(|(_, v)| v.clone()).collect();
+        result.rows.push_chunk(new_rows);
+        result.rev = result.rev.wrapping_add(1);
+        self.pending.clear();
+        self.pending.pins = pins;
+        self.save_error = None;
     }
 
     pub fn start(&mut self) {
@@ -180,7 +243,14 @@ impl ResultStore {
             sort_col: self.sort_col,
             sort_dir: self.sort_dir,
             edit_info: self.edit_info.clone(),
-            pending_edits: self.pending_edits.clone(),
+            edit_blocked: self.edit_blocked.clone(),
+            edit_checked: self.edit_checked,
+            source: self.source.clone(),
+            // Unsaved changes stay with the tab they were made in; a copy
+            // that could save them a second time would only conflict.
+            pending: Pending::with_pins(self.pending.pins.clone()),
+            saving: None,
+            save_error: None,
             loading: false,
         }
     }

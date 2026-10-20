@@ -855,9 +855,9 @@ impl Element for TextElement {
             (display, look.text)
         };
         let font = gpui::Font {
-            family: look.font_family.clone(),
+            family: theme::resolve_family(&look.font_family),
             weight: look.font_weight,
-            ..gpui::font(look.font_family.clone())
+            ..gpui::font(theme::resolve_family(&look.font_family))
         };
         let run = TextRun { len: text.len(), font, color: hsla(color), background_color: None, underline: None, strikethrough: None };
         let runs = match (&input.marked_range, input.content.is_empty()) {

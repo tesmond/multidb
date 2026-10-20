@@ -425,7 +425,7 @@ pub fn lint_tooltip(
                 .pb(px(3.))
                 .pl(px(8.))
                 .pr(px(6.))
-                .font_family(theme::UI_FONT)
+                .font_family(theme::ui_font())
                 .text_size(px(fs))
                 .line_height(px(lh))
                 .text_color(hsla(theme::WHITE))

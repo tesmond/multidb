@@ -68,6 +68,11 @@ pub const GRID_ROWNUM_SEL: Rgba = rgba8(70, 130, 255, 0.45);
 pub const GRID_DIRTY: Rgba = rgba8(255, 200, 50, 0.15);
 pub const GRID_BORDER_SEL: Rgba = rgba8(80, 140, 255, 0.85);
 pub const GRID_BORDER_DIRTY: Rgba = rgba8(255, 200, 50, 0.7);
+/// A row added in the grid and not yet saved.
+pub const GRID_NEW_ROW: Rgba = rgba8(80, 200, 120, 0.10);
+/// A row marked for deletion, and the line through it.
+pub const GRID_DELETED_ROW: Rgba = rgba8(255, 80, 80, 0.08);
+pub const GRID_DELETED_LINE: Rgba = rgba8(255, 90, 90, 0.85);
 pub const AMBER: Rgba = rgba8(255, 200, 50, 1.0);
 
 // One Dark (CodeMirror)
@@ -100,8 +105,46 @@ pub mod one_dark {
 }
 
 /// Fonts. `.SystemUIFont` resolves to the macOS system font, which is what
-/// `-apple-system` rendered in WebKit.
+/// `-apple-system` rendered in WebKit. It is the default UI family; the user
+/// can pick another in the settings menu, which [`set_ui_font`] installs.
 pub const UI_FONT: &str = ".SystemUIFont";
+
+static UI_FONT_OVERRIDE: std::sync::RwLock<Option<gpui::SharedString>> = std::sync::RwLock::new(None);
+static FONT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The UI font family in effect: the user's pick, or [`UI_FONT`].
+pub fn ui_font() -> gpui::SharedString {
+    UI_FONT_OVERRIDE
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| gpui::SharedString::from(UI_FONT))
+}
+
+/// Install the UI family (`None` for the system default).
+pub fn set_ui_font(family: Option<&str>) {
+    let family = family.map(str::trim).filter(|f| !f.is_empty() && *f != UI_FONT);
+    if let Ok(mut g) = UI_FONT_OVERRIDE.write() {
+        *g = family.map(|f| gpui::SharedString::from(f.to_string()));
+    }
+    FONT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Bumped whenever a font family changes, so caches of glyph advances know
+/// to start over.
+pub fn font_generation() -> u64 {
+    FONT_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A stored family name as it should be drawn now: [`UI_FONT`] stands for
+/// "the UI font", so looks built before the user changed it follow along.
+pub fn resolve_family(family: &gpui::SharedString) -> gpui::SharedString {
+    if family.as_ref() == UI_FONT {
+        ui_font()
+    } else {
+        family.clone()
+    }
+}
 pub const MONO_FONTS: &[&str] = &["JetBrains Mono", "Fira Code", "Cascadia Code", "Menlo"];
 
 pub fn scaled(size: f32, scale: f32) -> Pixels {

@@ -3,6 +3,7 @@
 
 use crate::models::{ConnectionConfig, SchemaTree};
 use crate::ui::relationship::Point as LayoutPoint;
+use gpui::SharedString;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -85,6 +86,59 @@ impl Rows {
     pub fn iter(&self) -> impl Iterator<Item = &Vec<Value>> {
         self.chunks.iter().flat_map(|c| c.iter())
     }
+
+    fn locate(&self, index: usize) -> Option<(usize, usize)> {
+        if index >= self.len {
+            return None;
+        }
+        let chunk = match self.starts.binary_search(&index) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        Some((chunk, index - self.starts[chunk]))
+    }
+
+    /// Replace one row. Only the chunk holding it is copied, and only if a
+    /// snapshot still shares it.
+    pub fn set(&mut self, index: usize, row: Vec<Value>) -> bool {
+        let Some((chunk, at)) = self.locate(index) else { return false };
+        Arc::make_mut(&mut self.chunks[chunk])[at] = row;
+        true
+    }
+
+    /// Remove the rows at `indices`; the rest keep their order and move up.
+    /// Only chunks that lose a row are copied.
+    pub fn remove(&mut self, indices: &std::collections::BTreeSet<usize>) {
+        if indices.is_empty() {
+            return;
+        }
+        let mut chunks = Vec::with_capacity(self.chunks.len());
+        for (c, chunk) in std::mem::take(&mut self.chunks).into_iter().enumerate() {
+            let start = self.starts[c];
+            let end = start + chunk.len();
+            if indices.range(start..end).next().is_none() {
+                chunks.push(chunk);
+                continue;
+            }
+            let kept: Vec<Vec<Value>> = chunk
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !indices.contains(&(start + i)))
+                .map(|(_, r)| r.clone())
+                .collect();
+            if !kept.is_empty() {
+                chunks.push(Arc::new(kept));
+            }
+        }
+        self.starts.clear();
+        self.len = 0;
+        self.chunks.clear();
+        for chunk in chunks {
+            self.starts.push(self.len);
+            self.len += chunk.len();
+            self.chunks.push(chunk);
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -97,13 +151,51 @@ pub struct QueryResult {
     pub error: String,
     /// Bumped whenever a new result (column set) replaces the old one.
     pub generation: u64,
+    /// Bumped when rows of this result are changed in place (a save patched,
+    /// removed or added rows), so anything derived from the rows (the sort
+    /// order) is recomputed without treating it as a new result.
+    pub rev: u64,
 }
 
+/// What makes a result editable: the table it reads and how its columns map
+/// onto the table's.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditInfo {
-    pub table_name: String,
-    pub schema_name: String,
-    pub primary_key_cols: Vec<String>,
+    pub driver: crate::grid_edit::Driver,
+    pub meta: Arc<crate::grid_edit::meta::TableMeta>,
+    pub layout: crate::grid_edit::query::Layout,
+}
+
+impl EditInfo {
+    /// The table column a result column shows, if any.
+    pub fn column(&self, col: usize) -> Option<&crate::grid_edit::meta::ColumnMeta> {
+        self.layout.sources.get(col).copied().flatten().and_then(|i| self.meta.columns.get(i))
+    }
+
+    /// Why a result column can't be edited; `None` if it can.
+    pub fn readonly_reason(&self, col: usize) -> Option<&str> {
+        match self.layout.readonly.get(col) {
+            Some(Some(reason)) => Some(reason.as_str()),
+            Some(None) => None,
+            None => Some("unknown column"),
+        }
+    }
+
+    pub fn nullable(&self, col: usize) -> bool {
+        self.column(col).is_some_and(|c| c.nullable)
+    }
+}
+
+/// Where a result came from: what to read the table's details against, and
+/// where to save. Recorded when the query runs, so changing the editor text,
+/// connection or default schema afterwards cannot redirect a save.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ResultSource {
+    pub sql: String,
+    pub conn_id: String,
+    pub driver: String,
+    pub database: String,
+    pub default_schema: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -129,16 +221,6 @@ impl OutputTab {
     ];
 }
 
-/// Pending cell edits: row index → [(column index, new text)] in insertion order.
-pub type PendingEdits = Vec<(usize, Vec<(usize, String)>)>;
-
-pub fn pending_get(edits: &PendingEdits, row: usize, col: usize) -> Option<&String> {
-    edits
-        .iter()
-        .find(|(r, _)| *r == row)
-        .and_then(|(_, cols)| cols.iter().find(|(c, _)| *c == col).map(|(_, v)| v))
-}
-
 // ─── Persisted UI state (was localStorage) ───────────────────────────────────
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -146,6 +228,14 @@ pub fn pending_get(edits: &PendingEdits, row: usize, col: usize) -> Option<&Stri
 pub struct UiSettings {
     pub server_groups: Vec<ServerGroup>,
     pub font_scale_percent: Option<f64>,
+    /// UI font family; `None` is the system font.
+    pub ui_font_family: Option<String>,
+    /// UI base font size in px; `None` is [`DEFAULT_FONT_SIZE`].
+    pub ui_font_size: Option<f64>,
+    /// SQL editor font family; `None` picks the first installed coding font.
+    pub editor_font_family: Option<String>,
+    /// SQL editor font size in px; `None` is [`DEFAULT_FONT_SIZE`].
+    pub editor_font_size: Option<f64>,
     pub connection_order: Vec<String>,
     pub relationship_layouts: BTreeMap<String, HashMap<String, LayoutPoint>>,
 }
@@ -181,6 +271,80 @@ impl UiSettings {
     pub fn font_scale(&self) -> f64 {
         clamp_font_scale(self.font_scale_percent.unwrap_or(100.0))
     }
+
+    pub fn ui_font_size(&self) -> f64 {
+        clamp_font_size(self.ui_font_size.unwrap_or(DEFAULT_FONT_SIZE))
+    }
+
+    pub fn editor_font_size(&self) -> f64 {
+        clamp_font_size(self.editor_font_size.unwrap_or(DEFAULT_FONT_SIZE))
+    }
+}
+
+/// The base size the UI and editor were laid out at; the size settings are
+/// relative to it.
+pub const DEFAULT_FONT_SIZE: f64 = 13.0;
+/// Sizes offered by the font size selects.
+pub const FONT_SIZES: [u32; 15] = [8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32];
+
+/// Installed font families, as the font selects list them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FontLists {
+    /// Every family, sorted.
+    pub all: Vec<SharedString>,
+    /// The monospaced ones, for the editor font select.
+    pub mono: Vec<SharedString>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct FontListsFile {
+    all: Vec<String>,
+    mono: Vec<String>,
+}
+
+fn font_cache_path() -> PathBuf {
+    settings_path().with_file_name("font-cache.json")
+}
+
+impl FontLists {
+    /// The list saved by the last refresh, so the selects have something to
+    /// show at once while the installed fonts are listed again.
+    pub fn load_cached() -> Option<Self> {
+        let bytes = std::fs::read(font_cache_path()).ok()?;
+        let file: FontListsFile = serde_json::from_slice(&bytes).ok()?;
+        if file.all.is_empty() {
+            return None;
+        }
+        Some(FontLists {
+            all: file.all.into_iter().map(SharedString::from).collect(),
+            mono: file.mono.into_iter().map(SharedString::from).collect(),
+        })
+    }
+
+    pub fn save_cache(&self) {
+        let path = font_cache_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = FontListsFile {
+            all: self.all.iter().map(|s| s.to_string()).collect(),
+            mono: self.mono.iter().map(|s| s.to_string()).collect(),
+        };
+        if let Ok(json) = serde_json::to_vec(&file) {
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(tmp, path);
+            }
+        }
+    }
+}
+
+pub fn clamp_font_size(v: f64) -> f64 {
+    if !v.is_finite() {
+        return DEFAULT_FONT_SIZE;
+    }
+    v.round().clamp(8.0, 32.0)
 }
 
 pub fn clamp_font_scale(v: f64) -> f64 {
@@ -278,6 +442,25 @@ mod tests {
         assert_eq!(rows.get(2).unwrap()[0], Value::from(3));
         assert_eq!(rows.get(1).unwrap()[0], Value::from(2));
         assert!(rows.get(3).is_none());
+    }
+
+    #[test]
+    fn rows_set_and_remove_keep_order_and_share_untouched_chunks() {
+        let mut rows = Rows::default();
+        rows.push_chunk((0..3).map(|i| vec![Value::from(i)]).collect());
+        rows.push_chunk((3..6).map(|i| vec![Value::from(i)]).collect());
+        let snapshot = rows.clone();
+        assert!(rows.set(4, vec![Value::from(40)]));
+        assert!(!rows.set(6, vec![]));
+        assert_eq!(snapshot.get(4).unwrap()[0], Value::from(4), "a snapshot is not changed");
+        assert!(Arc::ptr_eq(&rows.chunks[0], &snapshot.chunks[0]), "the untouched chunk is shared");
+        rows.remove(&[0, 1, 2, 5].into());
+        let left: Vec<Value> = rows.iter().map(|r| r[0].clone()).collect();
+        assert_eq!(left, vec![Value::from(3), Value::from(40)]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.get(1).unwrap()[0], Value::from(40));
+        rows.push_chunk(vec![vec![Value::from(7)]]);
+        assert_eq!(rows.get(2).unwrap()[0], Value::from(7));
     }
 
     #[test]

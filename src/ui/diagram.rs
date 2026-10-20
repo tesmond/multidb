@@ -938,7 +938,7 @@ fn paint_cards(window: &mut Window, cx: &mut App, b: Bounds<Pixels>, cards: &[(B
     let radius = px((10.0 * zoom).max(1.0));
     let header_h = px(rel::HEADER_HEIGHT * zoom);
     let title_px = 0.96 * REM * zoom;
-    let font = gpui::Font { weight: FontWeight::BOLD, ..gpui::font(theme::UI_FONT) };
+    let font = gpui::Font { weight: FontWeight::BOLD, ..gpui::font(theme::ui_font()) };
     for (r, title) in cards {
         let r = Bounds::new(point(b.left() + r.origin.x, b.top() + r.origin.y), r.size);
         window.paint_quad(

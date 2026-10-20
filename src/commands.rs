@@ -990,41 +990,52 @@ fn emit_done(emitter: &EventEmitter, done: QueryStreamDone) -> Result<()> {
     Ok(())
 }
 
-pub async fn get_table_primary_keys(
+/// What editing a result needs to know about the table it reads.
+pub async fn get_table_edit_meta(
     state: Arc<AppState>,
     conn_id: String,
     driver: String,
     database_name: String,
     schema_name: String,
     table_name: String,
-) -> CommandResult<Vec<String>> {
-    if driver == "mysql" {
-        let pool = state
-            .get_mysql_pool_or_reconnect(&conn_id)
-            .await
-            .map_err(command_err)?;
-        return schema::get_mysql_primary_keys(&pool, &schema_name, &table_name)
-            .await
-            .map_err(command_err);
+) -> CommandResult<crate::grid_edit::meta::TableMeta> {
+    use crate::grid_edit::meta;
+    match driver.as_str() {
+        "postgres" => {
+            let pool = state.get_pg_pool_for_database_or_reconnect(&conn_id, &database_name).await.map_err(command_err)?;
+            meta::postgres(&pool, &schema_name, &table_name).await.map_err(command_err)
+        }
+        "mysql" => {
+            let pool = state.get_mysql_pool_or_reconnect(&conn_id).await.map_err(command_err)?;
+            meta::mysql(&pool, &schema_name, &table_name).await.map_err(command_err)
+        }
+        "sqlite" => {
+            let pool = state.get_sqlite_pool_or_reconnect(&conn_id).await.map_err(command_err)?;
+            meta::sqlite(&pool, &schema_name, &table_name).await.map_err(command_err)
+        }
+        other => Err(format!("editing results is not supported for {other}")),
     }
+}
 
-    if driver == "postgres" {
-        let pool = state
-            .get_pg_pool_for_database_or_reconnect(&conn_id, &database_name)
-            .await
-            .map_err(command_err)?;
-        return schema::get_postgres_primary_keys(&pool, &schema_name, &table_name)
-            .await
-            .map_err(command_err);
+/// Save queued grid changes in one transaction (see `grid_edit::exec`).
+pub async fn save_grid_changes(
+    state: Arc<AppState>,
+    conn_id: String,
+    database_name: String,
+    request: crate::grid_edit::plan::SaveRequest,
+    control: Arc<crate::grid_edit::exec::SaveControl>,
+) -> crate::grid_edit::exec::SaveOutcome {
+    use crate::grid_edit::exec::{self, Action, SaveFailure, SaveOutcome, Source};
+    use crate::grid_edit::Driver;
+    let source = match request.driver() {
+        Driver::Postgres => state.get_pg_pool_for_database_or_reconnect(&conn_id, &database_name).await.map(Source::Postgres),
+        Driver::MySql => state.get_mysql_pool_or_reconnect(&conn_id).await.map(Source::MySql),
+        Driver::Sqlite => state.get_sqlite_pool_or_reconnect(&conn_id).await.map(Source::Sqlite),
+    };
+    match source {
+        Ok(source) => exec::save(source, request, control).await,
+        Err(e) => SaveOutcome::Failed(SaveFailure { action: Action::Begin, row: None, message: command_err(e) }),
     }
-
-    let pool = state
-        .get_pool_or_reconnect(&conn_id)
-        .await
-        .map_err(command_err)?;
-    schema::get_primary_keys(&pool, &driver, &schema_name, &table_name)
-        .await
-        .map_err(command_err)
 }
 
 /// The `CREATE TABLE` (and index) statements for a table, as the database

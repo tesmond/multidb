@@ -38,7 +38,7 @@ fn load(a: &AtomicU32, default: f32) -> f32 {
 
 pub fn init(cx: &App, mono_family: &str) {
     let ts = cx.text_system();
-    let id = ts.resolve_font(&font(crate::ui::theme::UI_FONT));
+    let id = ts.resolve_font(&font(crate::ui::theme::ui_font()));
     store(&UI_ASCENT, f32::from(ts.ascent(id, px(1000.))) / 1000.0);
     store(&UI_DESCENT, f32::from(ts.descent(id, px(1000.))).abs() / 1000.0);
     let id = ts.resolve_font(&font(mono_family.to_string()));

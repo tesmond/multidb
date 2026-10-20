@@ -7,11 +7,13 @@ pub mod dialogs;
 pub mod editor;
 pub mod icons;
 pub mod grid;
+pub mod grid_save;
 pub mod js;
 pub mod metrics;
 pub mod model;
 pub mod nav_index;
 pub mod nav_rows;
+pub mod pending;
 pub mod pinch;
 mod navigator;
 pub mod output;
@@ -74,7 +76,6 @@ pub fn run() -> anyhow::Result<()> {
         editor::bind_keys(cx);
         render::bind_keys(cx);
         dialogs::bind_keys(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("f1", About, None)]);
         cx.set_menus(vec![
             Menu {
@@ -119,8 +120,20 @@ pub fn run() -> anyhow::Result<()> {
             .update(cx, |ws, window, cx| {
                 window.focus(&ws.focus_handle);
                 cx.activate(true);
+                // Closing the window with unsaved grid changes asks first.
+                let ws_entity = cx.entity().downgrade();
+                window.on_window_should_close(cx, move |_window, cx| {
+                    ws_entity.update(cx, |ws, cx| ws.request_quit(cx)).unwrap_or(true)
+                });
             })
             .ok();
+        // Quitting with unsaved grid changes asks first.
+        cx.on_action(move |_: &Quit, cx| {
+            let quit_now = window.update(cx, |ws, _, cx| ws.request_quit(cx)).unwrap_or(true);
+            if quit_now {
+                cx.quit();
+            }
+        });
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();

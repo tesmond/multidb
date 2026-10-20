@@ -38,7 +38,7 @@ struct ExportProgress {
 }
 
 /// `1234567` → `"1,234,567"`.
-fn group_digits(n: usize) -> String {
+pub fn group_digits(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in digits.chars().enumerate() {
@@ -204,6 +204,13 @@ pub struct Workspace {
     pub expanded_groups: std::collections::HashSet<String>,
     pub add_menu_open: bool,
     pub settings_open: bool,
+    /// Which select in the settings menu has its list open.
+    pub font_select_open: Option<FontSelect>,
+    /// Installed font families: last session's list from the cache file at
+    /// first, replaced whenever a background refresh finds a different one.
+    pub font_families: Option<Arc<FontLists>>,
+    /// The background listing of installed fonts, while one is running.
+    font_refresh: Option<Task<()>>,
     pub nav_filter: Entity<TextInput>,
     pub font_scale_input: Entity<TextInput>,
     pub nav_menu: Option<NavMenu>,
@@ -250,6 +257,13 @@ pub struct Workspace {
     pub hover_schema_spinner: Option<String>,
     /// A busy tab the person asked to close, waiting on "are you sure?".
     pub close_tab_confirm: Option<TabId>,
+    /// Something that would discard unsaved grid changes, waiting on "are you sure?".
+    pub discard_confirm: Option<crate::ui::grid_save::DiscardAction>,
+    /// A save to a table that can't roll back, waiting on "are you sure?".
+    pub nontx_confirm: Option<TabId>,
+    /// A save that found rows changed since they were loaded.
+    pub save_conflicts: Option<crate::ui::grid_save::ConflictPrompt>,
+    pub conflicts_scroll: ScrollHandle,
     /// Scroll handle for the connection dialog's fields, which do not fit on a
     /// short screen.
     pub conn_dialog_scroll: ScrollHandle,
@@ -277,18 +291,65 @@ pub struct Workspace {
 
     pub hovered: Option<SharedString>,
     _subs: Vec<Subscription>,
-    edit_check: Option<Task<()>>,
-    edit_check_debounce: Option<Task<()>>,
+    pub(crate) edit_check: Option<Task<()>>,
 }
 
+/// The selects in the settings menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontSelect {
+    UiFamily,
+    UiSize,
+    EditorFamily,
+    EditorSize,
+}
+
+/// Scale of the UI: the zoom percentage times the chosen UI font size
+/// relative to the size the layout was designed at.
 pub fn scale_of(settings: &UiSettings) -> f32 {
-    (settings.font_scale() / 100.0) as f32
+    (settings.font_scale() / 100.0 * settings.ui_font_size() / DEFAULT_FONT_SIZE) as f32
+}
+
+/// Scale of the SQL editor: the zoom percentage times the chosen editor size.
+pub fn editor_scale_of(settings: &UiSettings) -> f32 {
+    (settings.font_scale() / 100.0 * settings.editor_font_size() / DEFAULT_FONT_SIZE) as f32
+}
+
+/// The editor family in effect: the user's pick, or the first installed
+/// coding font.
+pub fn mono_family_of(settings: &UiSettings, cx: &App) -> SharedString {
+    match settings.editor_font_family.as_deref().map(str::trim) {
+        Some(f) if !f.is_empty() => f.to_string().into(),
+        _ => crate::ui::pick_mono_family(cx).into(),
+    }
+}
+
+/// Installed font families, sorted, without the hidden `.`-prefixed system
+/// ones: every family, and the ones whose `i` and `W` are equally wide.
+/// Loads every font to measure it, so it runs off the UI thread.
+pub fn list_font_families(ts: &gpui::TextSystem) -> FontLists {
+    let mut names: Vec<String> = ts.all_font_names().into_iter().filter(|n| !n.starts_with('.') && !n.trim().is_empty()).collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    let mut mono = Vec::new();
+    for n in &names {
+        let id = ts.resolve_font(&gpui::font(n.clone()));
+        let w = |c: char| ts.advance(id, gpui::px(100.), c).map(|s| f32::from(s.width)).ok();
+        if let (Some(a), Some(b)) = (w('i'), w('W')) {
+            if a > 0.0 && (a - b).abs() < 0.5 {
+                mono.push(SharedString::from(n.clone()));
+            }
+        }
+    }
+    FontLists { all: names.into_iter().map(SharedString::from).collect(), mono }
 }
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = UiSettings::load();
         let scale = scale_of(&settings);
+        crate::ui::theme::set_ui_font(settings.ui_font_family.as_deref());
+        let mono_family = mono_family_of(&settings, cx);
+        crate::ui::metrics::init(cx, mono_family.as_ref());
         let nav_filter = cx.new(|cx| {
             TextInput::new(cx, dialogs::nav_filter_look(scale)).with_placeholder("Filter tables or columns")
         });
@@ -311,7 +372,6 @@ impl Workspace {
             }
             _ => {}
         }));
-        let mono_family: SharedString = crate::ui::pick_mono_family(cx).into();
         let me = cx.entity();
         let tabbar = cx.new(|cx| crate::ui::tabbar::TabBar::new(&me, cx));
         let statusbar = cx.new(|cx| StatusBar::new(&me, cx));
@@ -346,6 +406,9 @@ impl Workspace {
             expanded_groups: Default::default(),
             add_menu_open: false,
             settings_open: false,
+            font_select_open: None,
+            font_families: FontLists::load_cached().map(Arc::new),
+            font_refresh: None,
             nav_filter,
             font_scale_input,
             nav_menu: None,
@@ -374,6 +437,10 @@ impl Workspace {
             schema_refresh_seq: 0,
             hover_schema_spinner: None,
             close_tab_confirm: None,
+            discard_confirm: None,
+            nontx_confirm: None,
+            save_conflicts: None,
+            conflicts_scroll: ScrollHandle::new(),
             conn_dialog_scroll: ScrollHandle::new(),
             nav_indexes: std::collections::HashMap::new(),
             nav_matches: None,
@@ -388,7 +455,6 @@ impl Workspace {
             settings,
             _subs: subs,
             edit_check: None,
-            edit_check_debounce: None,
         };
         let first = ws.make_sql_tab(String::new(), String::new(), cx);
         ws.active_tab_id = first.id.clone();
@@ -424,10 +490,14 @@ impl Workspace {
         scale_of(&self.settings)
     }
 
+    pub fn editor_scale(&self) -> f32 {
+        editor_scale_of(&self.settings)
+    }
+
     // ─── Tabs ───────────────────────────────────────────────────────────────
 
     pub fn make_sql_tab(&mut self, conn_id: String, database_name: String, cx: &mut Context<Self>) -> Tab {
-        let scale = self.scale();
+        let scale = self.editor_scale();
         let mono = self.mono_family.clone();
         let editor = cx.new(|cx| SqlEditor::new("", scale, mono, cx));
         let id = new_id();
@@ -587,7 +657,9 @@ impl Workspace {
 
     /// The tab's close button: a busy tab asks first.
     pub fn request_close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.tab_busy(id) {
+        if !self.tabs_with_changes(None, cx).iter().all(|t| t != id) {
+            self.guard_discard(crate::ui::grid_save::DiscardAction::CloseTabs(vec![id.to_string()]), cx);
+        } else if self.tab_busy(id) {
             self.close_tab_confirm = Some(id.to_string());
             cx.notify();
         } else {
@@ -623,6 +695,10 @@ impl Workspace {
             self.conn_select_open = None;
         }
         if let TabKind::Sql(sql) = &tab.kind {
+            if let Some(ctl) = sql.store.read(cx).saving.clone() {
+                // A save still running for a closed tab is stopped and rolled back.
+                drop(runtime::spawn(async move { ctl.stop().await }));
+            }
             if sql.running && !sql.query_id.is_empty() {
                 let state = runtime::state();
                 let qid = sql.query_id.clone();
@@ -669,23 +745,33 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn close_other_tabs(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.close_tabs_where(|_, t| t.id != id, cx);
+    /// Close the tabs `pick` selects (by index and tab), asking first if any
+    /// of them have unsaved grid changes.
+    fn close_tabs_guarded(&mut self, pick: impl Fn(usize, &Tab) -> bool, cx: &mut Context<Self>) {
+        let ids: Vec<TabId> = self.tabs.iter().enumerate().filter(|(i, t)| pick(*i, t)).map(|(_, t)| t.id.clone()).collect();
+        let changed = self.tabs_with_changes(None, cx);
+        if ids.iter().any(|id| changed.contains(id)) {
+            self.guard_discard(crate::ui::grid_save::DiscardAction::CloseTabs(ids), cx);
+            return;
+        }
+        self.close_tabs_where(|i, t| pick(i, t), cx);
         self.ensure_active_valid(cx);
+    }
+
+    pub fn close_other_tabs(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.close_tabs_guarded(|_, t| t.id != id, cx);
     }
 
     pub fn close_tabs_right(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
-            self.close_tabs_where(|j, _| j > i, cx);
+            self.close_tabs_guarded(|j, _| j > i, cx);
         }
-        self.ensure_active_valid(cx);
     }
 
     pub fn close_tabs_left(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
-            self.close_tabs_where(|j, _| j < i, cx);
+            self.close_tabs_guarded(|j, _| j < i, cx);
         }
-        self.ensure_active_valid(cx);
     }
 
     pub fn reorder_tabs(&mut self, from: usize, to: usize) {
@@ -829,28 +915,8 @@ impl Workspace {
     }
 
     fn on_sql_changed(&mut self, _tab_id: &str, cx: &mut Context<Self>) {
-        // The editability check is a database round trip. Run it once typing
-        // pauses, and not at all while the statement still targets the table
-        // whose primary key is already known.
-        self.edit_check_debounce = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(500)).await;
-            this.update(cx, |this, cx| {
-                let unchanged = this.active_tab().and_then(|t| t.sql()).is_some_and(|s| {
-                    let sql = s.editor.read(cx).text().to_string();
-                    match (&s.store.read(cx).edit_info, sql_text::parse_simple_select(&sql)) {
-                        (Some(info), Some(p)) => {
-                            let schema = if p.schema_name.is_empty() { &s.default_schema } else { &p.schema_name };
-                            info.table_name == p.table_name && info.schema_name == *schema
-                        }
-                        _ => false,
-                    }
-                });
-                if !unchanged {
-                    this.schedule_edit_check(cx);
-                }
-            })
-            .ok();
-        }));
+        // Whether a result can be edited depends on the query that produced
+        // it, not on what the editor holds now.
         cx.notify();
     }
 
@@ -1093,6 +1159,10 @@ impl Workspace {
     }
 
     pub fn disconnect_conn(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.tabs_with_changes(Some(id), cx).is_empty() {
+            self.guard_discard(crate::ui::grid_save::DiscardAction::Disconnect(id.to_string()), cx);
+            return;
+        }
         let state = runtime::state();
         let conn_id = id.to_string();
         let fut = runtime::spawn(async move { commands::disconnect(state, conn_id).await });
@@ -1211,6 +1281,11 @@ impl Workspace {
     /// "Remove Connection" would one at a time.
     pub fn delete_server_group(&mut self, group_id: &str, cx: &mut Context<Self>) {
         let Some(pos) = self.settings.server_groups.iter().position(|g| g.id == group_id) else { return };
+        let changed = self.settings.server_groups[pos].connection_ids.iter().any(|c| !self.tabs_with_changes(Some(c), cx).is_empty());
+        if changed {
+            self.guard_discard(crate::ui::grid_save::DiscardAction::DeleteGroup(group_id.to_string()), cx);
+            return;
+        }
         let group = self.settings.server_groups.remove(pos);
         self.settings.save();
         self.expanded_groups.remove(group_id);
@@ -1314,14 +1389,95 @@ impl Workspace {
         self.settings.font_scale_percent = Some(clamp_font_scale(value));
         self.settings.save();
         self.sync_font_scale_input(cx);
+        self.apply_fonts(cx);
+    }
+
+    /// Push the font settings out to everything that draws text.
+    fn apply_fonts(&mut self, cx: &mut Context<Self>) {
+        crate::ui::theme::set_ui_font(self.settings.ui_font_family.as_deref());
+        self.mono_family = mono_family_of(&self.settings, cx);
+        crate::ui::metrics::init(cx, self.mono_family.as_ref());
         let scale = self.scale();
+        let editor_scale = self.editor_scale();
+        let mono = self.mono_family.clone();
         for t in &self.tabs {
             if let Some(sql) = t.sql() {
-                sql.editor.update(cx, |e, cx| e.set_font_scale(scale, cx));
+                sql.editor.update(cx, |e, cx| {
+                    e.set_mono_family(mono.clone(), cx);
+                    e.set_font_scale(editor_scale, cx);
+                });
             }
         }
         dialogs::rescale_inputs(self, scale, cx);
+        self.nav_rows_cache = None;
+        let ctx = self.output_ctx();
+        self.output.update(cx, |o, cx| o.set_ctx(ctx, cx));
         cx.notify();
+    }
+
+    /// `None` returns to the default family.
+    pub fn set_ui_font_family(&mut self, family: Option<String>, cx: &mut Context<Self>) {
+        self.settings.ui_font_family = family.filter(|f| !f.trim().is_empty());
+        self.settings.save();
+        self.apply_fonts(cx);
+    }
+
+    pub fn set_ui_font_size(&mut self, size: f64, cx: &mut Context<Self>) {
+        let size = clamp_font_size(size);
+        self.settings.ui_font_size = (size != DEFAULT_FONT_SIZE).then_some(size);
+        self.settings.save();
+        self.apply_fonts(cx);
+    }
+
+    /// `None` returns to the default family.
+    pub fn set_editor_font_family(&mut self, family: Option<String>, cx: &mut Context<Self>) {
+        self.settings.editor_font_family = family.filter(|f| !f.trim().is_empty());
+        self.settings.save();
+        self.apply_fonts(cx);
+    }
+
+    pub fn set_editor_font_size(&mut self, size: f64, cx: &mut Context<Self>) {
+        let size = clamp_font_size(size);
+        self.settings.editor_font_size = (size != DEFAULT_FONT_SIZE).then_some(size);
+        self.settings.save();
+        self.apply_fonts(cx);
+    }
+
+    /// Open or close one of the settings menu's selects.
+    pub fn toggle_font_select(&mut self, which: FontSelect, cx: &mut Context<Self>) {
+        if self.font_select_open == Some(which) {
+            self.font_select_open = None;
+        } else {
+            if matches!(which, FontSelect::UiFamily | FontSelect::EditorFamily) && self.font_families.is_none() {
+                self.refresh_font_families(cx);
+            }
+            self.font_select_open = Some(which);
+        }
+        cx.notify();
+    }
+
+    /// List the installed fonts again in the background. Whatever list is
+    /// already there stays usable meanwhile; if the new one differs (fonts
+    /// installed or removed since) it replaces it and goes to the cache.
+    pub fn refresh_font_families(&mut self, cx: &mut Context<Self>) {
+        if self.font_refresh.is_some() {
+            return;
+        }
+        let ts = cx.text_system().clone();
+        self.font_refresh = Some(cx.spawn(async move |this, cx| {
+            let lists = cx.background_spawn(async move { list_font_families(&ts) }).await;
+            this.update(cx, |this, cx| {
+                this.font_refresh = None;
+                if this.font_families.as_deref() == Some(&lists) {
+                    return;
+                }
+                let lists = Arc::new(lists);
+                this.font_families = Some(lists.clone());
+                cx.background_spawn(async move { lists.save_cache() }).detach();
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     pub fn sync_font_scale_input(&mut self, cx: &mut Context<Self>) {
@@ -1473,6 +1629,16 @@ impl Workspace {
         if sql_tab.running {
             return;
         }
+        // Running again replaces the result, and with it any unsaved changes.
+        if sql_tab.store.read(cx).has_pending() {
+            self.guard_discard(crate::ui::grid_save::DiscardAction::RunQuery(tab_id.to_string()), cx);
+            return;
+        }
+        if sql_tab.store.read(cx).is_saving() {
+            self.set_tab_status(tab_id, "Wait for the save to finish, or stop it");
+            cx.notify();
+            return;
+        }
         let sql = self.selected_or_all_sql(sql_tab, cx).trim().to_string();
         if sql.is_empty() {
             return;
@@ -1494,8 +1660,11 @@ impl Workspace {
                 s.query_id = query_id.clone();
             }
         }
+        let driver = self.connection(&conn_id).map(|c| c.config.driver.clone()).unwrap_or_default();
+        let source = ResultSource { sql: sql.clone(), conn_id: conn_id.clone(), driver, database: database.clone(), default_schema: default_schema.clone() };
         store.update(cx, |st, cx| {
             st.start();
+            st.source = Some(source);
             cx.notify();
         });
         self.set_tab_status(tab_id, "Running query…");
@@ -1664,94 +1833,6 @@ impl Workspace {
         self.configure_editors(cx);
     }
 
-    // ─── Editability (simple SELECT with a primary key) ─────────────────────
-
-    pub fn schedule_edit_check(&mut self, cx: &mut Context<Self>) {
-        let Some(tab) = self.active_tab() else { return };
-        let Some(s) = tab.sql() else { return };
-        let store = s.store.clone();
-        let sql = s.editor.read(cx).text().to_string();
-        let ok = store.read(cx).result.as_ref().is_some_and(|r| r.error.is_empty()) && !sql.is_empty();
-        let clear = |store: &Entity<ResultStore>, cx: &mut Context<Self>| {
-            if store.read(cx).edit_info.is_some() {
-                store.update(cx, |st, cx| {
-                    st.edit_info = None;
-                    cx.notify();
-                });
-            }
-        };
-        if !ok {
-            clear(&store, cx);
-            return;
-        }
-        let Some(parsed) = sql_text::parse_simple_select(&sql) else {
-            clear(&store, cx);
-            return;
-        };
-        let conn_id = tab.conn_id.clone();
-        let database = s.database_name.clone();
-        // An unqualified table is the one in the tab's default schema.
-        let mut parsed = parsed;
-        if parsed.schema_name.is_empty() {
-            parsed.schema_name = s.default_schema.clone();
-        }
-        let Some(conn) = self.connection(&conn_id) else {
-            clear(&store, cx);
-            return;
-        };
-        let driver = conn.config.driver.clone();
-        let state = runtime::state();
-        let p = parsed.clone();
-        let fut = runtime::spawn(async move {
-            commands::get_table_primary_keys(state, conn_id, driver, database, p.schema_name, p.table_name).await
-        });
-        self.edit_check = Some(cx.spawn(async move |_this, cx| {
-            let res = fut.await;
-            store
-                .update(cx, |st, cx| {
-                    st.edit_info = match res {
-                        Ok(pk) if !pk.is_empty() => Some(EditInfo {
-                            table_name: parsed.table_name,
-                            schema_name: parsed.schema_name,
-                            primary_key_cols: pk,
-                        }),
-                        _ => None,
-                    };
-                    cx.notify();
-                })
-                .ok();
-        }));
-    }
-
-    pub fn save_edits(&mut self, cx: &mut Context<Self>) {
-        let Some(tab) = self.active_tab() else { return };
-        let Some(s) = tab.sql() else { return };
-        let st = s.store.read(cx);
-        let (Some(info), Some(result)) = (&st.edit_info, &st.result) else { return };
-        let driver = self.connection(&tab.conn_id).map(|c| c.config.driver.clone()).unwrap_or_else(|| "postgres".into());
-        // Only the edited rows are read, straight from the result; no copy.
-        let sql = sql_text::generate_update_sql(
-            &sql_text::EditTarget {
-                driver: &driver,
-                table_name: &info.table_name,
-                schema_name: &info.schema_name,
-                primary_key_cols: &info.primary_key_cols,
-            },
-            &result.columns,
-            |i| result.rows.get(i),
-            &st.pending_edits,
-        );
-        if sql.is_empty() {
-            return;
-        }
-        let sql = sql_text::formatted(&sql, &driver);
-        let (conn, db, schema) = (tab.conn_id.clone(), s.database_name.clone(), s.default_schema.clone());
-        let id = self.add_tab(conn, db, cx);
-        self.set_tab_default_schema(&id, schema, cx);
-        self.set_tab_sql(&id, &sql, cx);
-        self.set_active_tab(id, cx);
-    }
-
     // ─── Misc ───────────────────────────────────────────────────────────────
 
     pub fn copy_to_clipboard(&self, text: String, cx: &mut Context<Self>) {
@@ -1864,10 +1945,15 @@ impl Workspace {
     }
 
     pub fn close_floating(&mut self) {
+        // Escape on a save prompt is the safe answer: keep the changes, save nothing.
+        self.discard_confirm = None;
+        self.nontx_confirm = None;
+        self.save_conflicts = None;
         self.nav_menu = None;
         self.nav_template_open = false;
         self.add_menu_open = false;
         self.settings_open = false;
+        self.font_select_open = None;
     }
 
     pub fn request_schema_refresh(&mut self, conn_id: &str, cx: &mut Context<Self>) {
@@ -2034,6 +2120,9 @@ async fn stream_query(
                             cx.notify();
                         })
                         .ok();
+                    // The columns are known: whether they can be edited can be
+                    // worked out while the rows stream in.
+                    this.update(cx, |this, cx| this.schedule_edit_check(cx)).ok();
                 }
                 StreamEvent::Chunk(chunk) if chunk.query_id == query_id => chunks.push(chunk.rows),
                 StreamEvent::Done(d) if d.query_id == query_id => {

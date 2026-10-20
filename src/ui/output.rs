@@ -8,7 +8,9 @@
 //! a drag in progress) lives here. A streaming chunk, a scroll or a selection
 //! therefore redraws this view and nothing else.
 
+use crate::grid_edit::{Cell, RowRef};
 use crate::ui::grid::{self, Bar, CellSel, EditOverlay, GridBody, GridState, Jump, ScrollDrag};
+use crate::ui::pending::{edit_text, ViewRows};
 use crate::ui::js;
 use crate::ui::model::{OutputTab, QueryResult, SortDirection, TabId};
 use crate::ui::render::*;
@@ -30,7 +32,17 @@ use std::sync::Arc;
 pub enum OutputMenu {
     History { pos: Point<Pixels> },
     Saved { pos: Point<Pixels>, id: i64, title: String },
+    /// A results cell: (row, column) where it was opened.
+    GridCell { pos: Point<Pixels>, row: RowRef, col: usize },
+    /// The row-number gutter: the rows it acts on.
+    GridRows { pos: Point<Pixels>, rows: Vec<RowRef>, clicked: RowRef },
+    /// Empty grid space or the header.
+    Grid { pos: Point<Pixels> },
 }
+
+/// What a cached row order was built from: (generation, rev, sort order,
+/// pending changes, rows).
+type ViewKey = (u64, u64, usize, u64, usize);
 
 /// What the panel reads of the workspace. Copied out whenever the workspace
 /// changes; cheap, since the heavy parts are `Arc`s or entity handles.
@@ -75,6 +87,7 @@ pub struct OutputPanel {
     /// What the lists were last loaded for.
     list_key: (OutputTab, String, u64),
     store_sub: Option<Subscription>,
+    view_cache: Option<(ViewKey, ViewRows)>,
     _ws_sub: Subscription,
 }
 
@@ -96,6 +109,7 @@ impl OutputPanel {
             menu: None,
             list_key: (OutputTab::Results, String::new(), 0),
             store_sub: None,
+            view_cache: None,
             _ws_sub: sub,
         };
         panel
@@ -165,8 +179,62 @@ impl OutputPanel {
         self.ctx.store.as_ref()?.read(cx).sort()
     }
 
+    /// Rows shown: the result's rows plus any new ones.
     fn total_rows(&self, cx: &App) -> usize {
-        self.ctx.store.as_ref().map_or(0, |s| s.read(cx).row_count())
+        self.ctx.store.as_ref().map_or(0, |s| {
+            let st = s.read(cx);
+            st.row_count() + st.pending.new_rows.len()
+        })
+    }
+
+    /// The rows in the order shown (sort, then new and pinned rows placed).
+    fn view_for(&mut self, r: &QueryResult, cx: &App) -> ViewRows {
+        let sort = self.sort(cx);
+        let sorted = self.grid.sort_index(r, sort);
+        let Some(store) = self.ctx.store.clone() else { return ViewRows::Plain(r.rows.len()) };
+        let st = store.read(cx);
+        let key = (r.generation, r.rev, sorted.as_ref().map_or(0, |a| Arc::as_ptr(a) as usize), st.pending.rev, r.rows.len());
+        if let Some((k, v)) = &self.view_cache {
+            if *k == key {
+                return v.clone();
+            }
+        }
+        let v = st.view(sorted);
+        self.view_cache = Some((key, v.clone()));
+        v
+    }
+
+    /// The rows in the order shown right now.
+    pub fn current_view(&mut self, cx: &mut Context<Self>) -> ViewRows {
+        match self.result(cx) {
+            Some(r) => self.view_for(&r, cx),
+            None => ViewRows::default(),
+        }
+    }
+
+    /// A save went through: row positions may have moved, so drop the
+    /// selection and any open editor.
+    pub fn after_save(&mut self, cx: &mut Context<Self>) {
+        self.grid.clear_selection();
+        self.grid.edit = None;
+        self.view_cache = None;
+        self.menu = None;
+        self.clamp_grid_scroll(cx);
+        cx.notify();
+    }
+
+    /// Select and scroll to a row (the one a save failed on).
+    pub fn reveal_row(&mut self, row: RowRef, cx: &mut Context<Self>) {
+        let view = self.current_view(cx);
+        if let Some(pos) = view.position(row) {
+            let total = view.len();
+            let size = self.grid_view_size(cx);
+            self.grid.clear_selection();
+            self.grid.selected_rows.insert(pos);
+            self.grid.row_anchor = Some(pos);
+            self.grid.ensure_row_visible(pos, total, size);
+        }
+        cx.notify();
     }
 
     // ─── Lists ──────────────────────────────────────────────────────────────
@@ -499,6 +567,7 @@ impl OutputPanel {
                         cx.notify();
                     }))),
             ),
+            OutputMenu::GridCell { pos, .. } | OutputMenu::GridRows { pos, .. } | OutputMenu::Grid { pos } => (pos, self.grid_menu_body(&menu, s, cx)),
         };
         let menu = div()
             .id("ctx-menu")
@@ -516,6 +585,247 @@ impl OutputPanel {
         Some(deferred(anchored().position(pos).anchor(Corner::TopLeft).child(menu)).with_priority(3).into_any_element())
     }
 
+    // ─── Editing from the grid's context menus ──────────────────────────────
+
+    /// The rows a row-number menu acts on: every highlighted row if the
+    /// clicked one is highlighted, otherwise just the clicked one (which then
+    /// becomes the highlight).
+    fn rows_for_menu(&mut self, display_row: usize, view: &ViewRows) -> Vec<RowRef> {
+        if !self.grid.selected_rows.contains(&display_row) {
+            self.grid.selected_rows.clear();
+            self.grid.selected_rows.insert(display_row);
+            self.grid.row_anchor = Some(display_row);
+            self.grid.sel = None;
+        }
+        self.grid.selected_rows.iter().filter_map(|&r| view.get(r)).collect()
+    }
+
+    fn on_grid_right_click(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(b) = self.grid.body_bounds else { return };
+        let Some(r) = self.result(cx) else { return };
+        if self.grid.edit.is_some() {
+            self.commit_cell_edit(cx);
+        }
+        if let Some(f) = &self.grid.focus {
+            window.focus(f);
+        }
+        let total = self.total_rows(cx);
+        let local = point(e.position.x - b.left(), e.position.y - b.top());
+        let geom = self.grid.geom(total);
+        if geom.bar_at(local).is_some() || f32::from(local.x) >= geom.view_w || f32::from(local.y) >= geom.view_h {
+            return;
+        }
+        let view = self.view_for(&r, cx);
+        let pos = e.position;
+        self.menu = if let Some(row) = self.grid.row_at(local, total) {
+            let rows = self.rows_for_menu(row, &view);
+            let Some(clicked) = view.get(row) else { return };
+            Some(OutputMenu::GridRows { pos, rows, clicked })
+        } else if let Some(hit) = self.grid.cell_at(local, total) {
+            let Some(row_ref) = view.get(hit.0) else { return };
+            // A right-click outside the cell selection moves it there; the
+            // row-number highlight is left alone.
+            let inside = self.grid.sel.is_some_and(|sel| {
+                let (r0, r1, c0, c1) = sel.norm();
+                (r0..=r1).contains(&hit.0) && (c0..=c1).contains(&hit.1)
+            });
+            if !inside && self.grid.selected_rows.is_empty() {
+                self.grid.sel = Some(CellSel { r0: hit.0, c0: hit.1, r1: hit.0, c1: hit.1 });
+                self.grid.last_selected = Some(hit);
+            }
+            Some(OutputMenu::GridCell { pos, row: row_ref, col: hit.1 })
+        } else {
+            Some(OutputMenu::Grid { pos })
+        };
+        cx.notify();
+    }
+
+    /// The cells "Set to NULL" / "Set to NOW()" apply to from a menu opened on (`row`, `col`):
+    /// the cell selection, when it is within that one column and includes the
+    /// cell; otherwise just the cell. Cells that can't be changed are skipped.
+    fn cell_targets(&mut self, row: RowRef, col: usize, cx: &App) -> Vec<(RowRef, usize)> {
+        let Some(r) = self.result(cx) else { return vec![] };
+        let view = self.view_for(&r, cx);
+        let mut cells = vec![(row, col)];
+        if let (Some(sel), Some(pos)) = (self.grid.sel, view.position(row)) {
+            let (r0, r1, c0, c1) = sel.norm();
+            if c0 == col && c1 == col && (r0..=r1).contains(&pos) {
+                cells = (r0..=r1).filter_map(|d| view.get(d)).map(|rr| (rr, col)).collect();
+            }
+        }
+        cells.retain(|(rr, c)| self.cell_lock(*rr, *c, cx).is_none());
+        cells
+    }
+
+    fn update_pending(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut crate::ui::pending::Pending, &QueryResult)) {
+        let Some(store) = self.ctx.store.clone() else { return };
+        store.update(cx, |st, cx| {
+            let Some(result) = st.result.clone() else { return };
+            if st.is_saving() || st.edit_info.is_none() {
+                return;
+            }
+            f(&mut st.pending, &result);
+            st.save_error = None;
+            cx.notify();
+        });
+        self.menu = None;
+        cx.notify();
+    }
+
+    fn set_null(&mut self, cells: Vec<(RowRef, usize)>, cx: &mut Context<Self>) {
+        self.update_pending(cx, |p, r| {
+            for (row, col) in cells {
+                let original = match row {
+                    RowRef::Data(i) => r.rows.get(i).and_then(|v| v.get(col)).cloned(),
+                    RowRef::New(_) => None,
+                };
+                p.set_cell(row, col, Cell::Null, original.as_ref());
+            }
+        });
+    }
+
+    fn set_now(&mut self, cells: Vec<(RowRef, usize)>, cx: &mut Context<Self>) {
+        self.update_pending(cx, |p, _| {
+            for (row, col) in cells {
+                p.set_cell(row, col, Cell::Now, None);
+            }
+        });
+    }
+
+    fn revert(&mut self, row: RowRef, col: usize, cx: &mut Context<Self>) {
+        self.update_pending(cx, |p, _| p.revert_cell(row, col));
+    }
+
+    fn delete_rows(&mut self, rows: Vec<RowRef>, cx: &mut Context<Self>) {
+        let removes_new = rows.iter().any(|r| matches!(r, RowRef::New(_)));
+        self.update_pending(cx, |p, _| p.delete(&rows));
+        if removes_new {
+            // New rows are gone outright, so positions below them moved up.
+            self.grid.clear_selection();
+        }
+        self.clamp_grid_scroll(cx);
+    }
+
+    fn undelete_rows(&mut self, rows: Vec<RowRef>, cx: &mut Context<Self>) {
+        self.update_pending(cx, |p, _| p.undelete(&rows));
+    }
+
+    fn insert_row(&mut self, anchor: Option<RowRef>, cx: &mut Context<Self>) {
+        let mut added = None;
+        self.update_pending(cx, |p, r| added = Some(p.insert_below(anchor, r.columns.len())));
+        let Some(added) = added else { return };
+        // Select the new row and bring it into view.
+        let view = self.current_view(cx);
+        if let Some(pos) = view.position(added) {
+            let size = self.grid_view_size(cx);
+            self.grid.clear_selection();
+            self.grid.selected_rows.insert(pos);
+            self.grid.row_anchor = Some(pos);
+            self.grid.ensure_row_visible(pos, view.len(), size);
+        }
+        cx.notify();
+    }
+
+    fn grid_menu_body(&mut self, menu: &OutputMenu, s: Scale, cx: &mut Context<Self>) -> gpui::Div {
+        let item = |id: &'static str, label: String, blocked: Option<String>| {
+            let enabled = blocked.is_none();
+            div()
+                .id(id)
+                .w_full()
+                .px(px(14.))
+                .py(px(6.))
+                .t(s, 12.0)
+                .text_color(if enabled { theme::TEXT } else { theme::TEXT_MUTED })
+                .when(enabled, |d| d.cursor_pointer().hover(|st| st.bg(theme::BG_HOVER)))
+                .child(label)
+                .when_some(blocked, |d, why| d.child(div().t(s, 10.5).text_color(theme::TEXT_MUTED).child(why)))
+        };
+        let separator = || div().my(px(4.)).h(px(1.)).bg(theme::BORDER_SUBTLE);
+        let rows_lock = self.rows_lock(cx);
+        let mut body = div();
+        match menu.clone() {
+            OutputMenu::GridCell { row, col, .. } => {
+                let st = self.ctx.store.as_ref().map(|s| s.read(cx));
+                let nullable = st.and_then(|st| st.edit_info.as_ref()).is_some_and(|i| i.nullable(col));
+                let queued = st.and_then(|st| st.pending.cell(row, col).cloned());
+                let deleted = st.is_some_and(|st| st.pending.is_deleted(row));
+                let lock = self.cell_lock(row, col, cx);
+                let targets = self.cell_targets(row, col, cx);
+                let null_block = lock.clone().or_else(|| (!nullable).then(|| "the column is NOT NULL".to_string()));
+                let null_label = if targets.len() > 1 { format!("Set {} cells to NULL", targets.len()) } else { "Set to NULL".to_string() };
+                let now_targets = targets.clone();
+                body = body.child(item("grid-null", null_label, null_block.clone()).when(null_block.is_none(), |d| {
+                    d.on_click(cx.listener(move |this, _, _, cx| this.set_null(targets.clone(), cx)))
+                }));
+                // Date and time columns can take the database's current time.
+                let info = st.and_then(|st| st.edit_info.clone());
+                let temporal = info
+                    .as_ref()
+                    .and_then(|i| i.column(col).map(|c| (i.driver, c)))
+                    .is_some_and(|(d, c)| crate::grid_edit::now_sql(d, &c.data_type).is_some());
+                if temporal {
+                    let is_key = info.as_ref().is_some_and(|i| i.layout.key.contains(&col));
+                    let now_block = lock.clone().or_else(|| is_key.then(|| "the row is found by this key column, so it needs a known value".to_string()));
+                    let now_label = if now_targets.len() > 1 { format!("Set {} cells to NOW()", now_targets.len()) } else { "Set to NOW()".to_string() };
+                    body = body.child(item("grid-now", now_label, now_block.clone()).when(now_block.is_none(), |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| this.set_now(now_targets.clone(), cx)))
+                    }));
+                }
+                let is_new = matches!(row, RowRef::New(_));
+                let changed = match (&queued, is_new) {
+                    (Some(Cell::Default), true) | (None, _) => false,
+                    (Some(_), _) => true,
+                };
+                let revert_block = lock.clone().filter(|_| !deleted).or_else(|| (!changed).then(|| "nothing to undo".to_string()));
+                let revert_label = if is_new { "Reset to DEFAULT" } else { "Revert Cell" };
+                body = body.child(item("grid-revert", revert_label.to_string(), revert_block.clone()).when(revert_block.is_none(), |d| {
+                    d.on_click(cx.listener(move |this, _, _, cx| this.revert(row, col, cx)))
+                }));
+                body = body.child(separator());
+                if deleted {
+                    body = body.child(item("grid-undelete-row", "Undelete Row".into(), rows_lock.clone()).when(rows_lock.is_none(), |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| this.undelete_rows(vec![row], cx)))
+                    }));
+                } else {
+                    body = body.child(item("grid-delete-row", "Delete Row".into(), rows_lock.clone()).when(rows_lock.is_none(), |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| this.delete_rows(vec![row], cx)))
+                    }));
+                }
+                body = body.child(item("grid-insert-row", "Insert Row Below".into(), rows_lock.clone()).when(rows_lock.is_none(), |d| {
+                    d.on_click(cx.listener(move |this, _, _, cx| this.insert_row(Some(row), cx)))
+                }));
+            }
+            OutputMenu::GridRows { rows, clicked, .. } => {
+                let st = self.ctx.store.as_ref().map(|s| s.read(cx));
+                let (marked, unmarked): (Vec<RowRef>, Vec<RowRef>) = rows.iter().partition(|r| st.is_some_and(|st| st.pending.is_deleted(**r)));
+                let n = |k: usize| if k == 1 { "1 Row".to_string() } else { format!("{k} Rows") };
+                if !unmarked.is_empty() {
+                    let label = format!("Delete {}", n(unmarked.len()));
+                    body = body.child(item("grid-delete-rows", label, rows_lock.clone()).when(rows_lock.is_none(), |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| this.delete_rows(unmarked.clone(), cx)))
+                    }));
+                }
+                if !marked.is_empty() {
+                    let label = format!("Undelete {}", n(marked.len()));
+                    body = body.child(item("grid-undelete-rows", label, rows_lock.clone()).when(rows_lock.is_none(), |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| this.undelete_rows(marked.clone(), cx)))
+                    }));
+                }
+                let anchor = Some(clicked);
+                body = body.child(separator()).child(item("grid-insert-row", "Insert Row Below".into(), rows_lock.clone()).when(rows_lock.is_none(), |d| {
+                    d.on_click(cx.listener(move |this, _, _, cx| this.insert_row(anchor, cx)))
+                }));
+            }
+            OutputMenu::Grid { .. } => {
+                body = body.child(item("grid-insert-row", "Insert Row".into(), rows_lock.clone()).when(rows_lock.is_none(), |d| {
+                    d.on_click(cx.listener(|this, _, _, cx| this.insert_row(None, cx)))
+                }));
+            }
+            _ => {}
+        }
+        body
+    }
+
     // ─── Results grid ───────────────────────────────────────────────────────
 
     fn render_results(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -527,7 +837,7 @@ impl OutputPanel {
         let Some(store) = self.ctx.store.clone() else {
             return empty_state(s, theme::TEXT_MUTED, "No results.".into());
         };
-        let (result, sort, pending, editable) = {
+        let (result, sort, pending, editable, error_row) = {
             let st = store.read(cx);
             let Some(result) = st.result.clone() else {
                 return empty_state(s, theme::TEXT_MUTED, "Run a query to see results here.".into());
@@ -535,8 +845,9 @@ impl OutputPanel {
             (
                 result,
                 st.sort(),
-                st.pending_edits.clone(),
-                st.edit_info.as_ref().is_some_and(|e| !e.primary_key_cols.is_empty()),
+                Arc::new(st.pending.clone()),
+                st.edit_info.is_some() && !st.is_saving(),
+                st.save_error.as_ref().and_then(|(_, r)| *r),
             )
         };
         if !result.error.is_empty() {
@@ -554,9 +865,9 @@ impl OutputPanel {
         if self.grid.sync_measurements(&result, loading, cx) && !loading {
             cx.notify();
         }
-        let total = result.rows.len();
+        let view = self.view_for(&result, cx);
+        let total = view.len();
         let rnw = grid::row_num_width(total, s.0);
-        let sort_index = self.grid.sort_index(&result, sort);
         if let Some(req) = self.grid.take_sort_request() {
             let snapshot = result.clone();
             cx.spawn(async move |this, cx| {
@@ -612,6 +923,11 @@ impl OutputPanel {
                             return;
                         }
                         this.toggle_sort(i, cx);
+                    }))
+                    .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.menu = Some(OutputMenu::Grid { pos: e.position });
+                        cx.notify();
                     }))
                     .child(div().flex_1().min_w(px(0.)).overflow_hidden().text_ellipsis().child(name2))
                     .when_some(sorted, |d, dir| {
@@ -687,7 +1003,7 @@ impl OutputPanel {
         let panel = cx.entity().downgrade();
         let body = GridBody {
             result: result.clone(),
-            sort_index,
+            view: view.clone(),
             col_widths: self.grid.col_widths.clone(),
             scale: s.0,
             scroll: (self.grid.scroll_x, self.grid.scroll_y),
@@ -696,7 +1012,8 @@ impl OutputPanel {
             hovered_row: self.grid.hovered_row,
             active_bar: self.grid.scroll_drag.map(|d| d.bar).or(self.grid.hovered_bar),
             pending,
-            editing: self.grid.edit.as_ref().map(|e| (e.row_data_idx, e.col)),
+            editing: self.grid.edit.as_ref().map(|e| (e.row_ref, e.col)),
+            error_row,
             on_bounds: Box::new(move |b, cx| {
                 panel.update(cx, |p, _| p.grid.body_bounds = Some(b)).ok();
             }),
@@ -734,6 +1051,9 @@ impl OutputPanel {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                 this.on_grid_mouse_down(e, editable, window, cx);
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                this.on_grid_right_click(e, window, cx);
             }))
             .child(body);
 
@@ -813,7 +1133,7 @@ impl OutputPanel {
                         .when(!ty.is_empty(), |d| {
                             d.child(crate::ui::widgets::spaced_text::spaced_text(
                                 ty.to_uppercase(),
-                                gpui::Font { weight: FontWeight::SEMIBOLD, ..gpui::font(theme::UI_FONT) },
+                                gpui::Font { weight: FontWeight::SEMIBOLD, ..gpui::font(theme::ui_font()) },
                                 11.0 * s.0,
                                 s.lh_f(11.0),
                                 theme::ACCENT,
@@ -891,7 +1211,8 @@ impl OutputPanel {
     fn grid_move(&mut self, dr: isize, dc: isize, extend: bool, cx: &mut Context<Self>) {
         let Some(r) = self.result(cx) else { return };
         let view = self.grid_view_size(cx);
-        self.grid.move_selection(dr, dc, extend, r.rows.len(), r.columns.len(), view);
+        let total = self.total_rows(cx);
+        self.grid.move_selection(dr, dc, extend, total, r.columns.len(), view);
         cx.notify();
     }
 
@@ -900,7 +1221,7 @@ impl OutputPanel {
     /// everything from the cursor down to the last row.
     fn grid_jump(&mut self, row: Option<Jump>, col: Option<Jump>, extend: bool, cx: &mut Context<Self>) {
         let Some(r) = self.result(cx) else { return };
-        let (total, cols) = (r.rows.len(), r.columns.len());
+        let (total, cols) = (self.total_rows(cx), r.columns.len());
         if total == 0 || cols == 0 {
             return;
         }
@@ -937,16 +1258,18 @@ impl OutputPanel {
 
     fn grid_copy(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.result(cx) else { return };
-        let sort = self.sort(cx);
-        if let Some(text) = self.grid.copy_text(&r, sort) {
+        let view = self.view_for(&r, cx);
+        let Some(store) = self.ctx.store.clone() else { return };
+        let pending = store.read(cx).pending.clone();
+        if let Some(text) = self.grid.copy_text(&r, &view, &pending) {
             self.copy_to_clipboard(text, cx);
         }
     }
 
     fn grid_select_all(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.result(cx) else { return };
-        if (self.grid.sel.is_some() || !self.grid.selected_rows.is_empty()) && !r.rows.is_empty() && !r.columns.is_empty() {
-            let total = r.rows.len();
+        let total = self.total_rows(cx);
+        if (self.grid.sel.is_some() || !self.grid.selected_rows.is_empty()) && total > 0 && !r.columns.is_empty() {
             let cols = r.columns.len();
             self.grid.sel = Some(CellSel { r0: 0, c0: 0, r1: total - 1, c1: cols - 1 });
             self.grid.selected_rows.clear();
@@ -962,7 +1285,7 @@ impl OutputPanel {
         if let Some(f) = &self.grid.focus {
             window.focus(f);
         }
-        let total = r.rows.len();
+        let total = self.total_rows(cx);
         let local = point(e.position.x - b.left(), e.position.y - b.top());
         let geom = self.grid.geom(total);
         if let Some(bar) = geom.bar_at(local) {
@@ -1035,19 +1358,61 @@ impl OutputPanel {
         cx.notify();
     }
 
-    /// The text a cell shows, following the current sort and any pending edit.
+    /// The text a cell shows, following the current order and any queued change.
     fn cell_text(&mut self, r: &QueryResult, row: usize, col: usize, cx: &App) -> Option<String> {
-        let sort = self.sort(cx);
-        let idx = self.grid.sort_index(r, sort);
-        let data_idx = idx.as_ref().and_then(|i| i.get(row).copied()).unwrap_or(row);
-        let pending = self.ctx.store.as_ref().map(|s| s.read(cx).pending_edits.clone()).unwrap_or_default();
-        if let Some(edited) = crate::ui::model::pending_get(&pending, data_idx, col) {
-            return Some(edited.clone());
+        let view = self.view_for(r, cx);
+        let row_ref = view.get(row)?;
+        let store = self.ctx.store.clone()?;
+        let st = store.read(cx);
+        match st.pending.cell(row_ref, col) {
+            Some(Cell::Value(t)) => return Some(t.clone()),
+            Some(_) => return None,
+            None => {}
         }
-        match r.rows.get(data_idx)?.get(col)? {
+        let RowRef::Data(i) = row_ref else { return None };
+        match r.rows.get(i)?.get(col)? {
             serde_json::Value::Null => None,
             v => Some(js::value_to_string(v)),
         }
+    }
+
+    /// Why a cell can't be changed right now; `None` when it can.
+    fn cell_lock(&self, row: RowRef, col: usize, cx: &App) -> Option<String> {
+        let Some(store) = self.ctx.store.as_ref() else { return Some("there is no result".into()) };
+        let st = store.read(cx);
+        if st.is_saving() {
+            return Some("a save is in progress".into());
+        }
+        let Some(info) = &st.edit_info else {
+            return Some(st.edit_blocked.clone().map(|r| format!("read-only: {r}")).unwrap_or_else(|| "this result can't be edited".into()));
+        };
+        if st.pending.is_deleted(row) {
+            return Some("the row is marked for deletion".into());
+        }
+        if let Some(reason) = info.readonly_reason(col) {
+            return Some(reason.to_string());
+        }
+        if let RowRef::Data(i) = row {
+            if let Some(serde_json::Value::String(v)) = st.result.as_ref().and_then(|r| r.rows.get(i)).and_then(|r| r.get(col)) {
+                if v.starts_with("<unsupported") {
+                    return Some("this value can't be shown as text".into());
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether rows can be inserted or deleted right now; the reason if not.
+    fn rows_lock(&self, cx: &App) -> Option<String> {
+        let store = self.ctx.store.as_ref()?;
+        let st = store.read(cx);
+        if st.is_saving() {
+            return Some("a save is in progress".into());
+        }
+        if st.edit_info.is_none() {
+            return Some(st.edit_blocked.clone().map(|r| format!("read-only: {r}")).unwrap_or_else(|| "this result can't be edited".into()));
+        }
+        None
     }
 
     /// A press on a scrollbar: grab the thumb, or page towards a click on the
@@ -1081,18 +1446,21 @@ impl OutputPanel {
     }
 
     fn on_grid_double_click(&mut self, local: Point<Pixels>, editable: bool, r: &QueryResult, window: &mut Window, cx: &mut Context<Self>) {
-        let total = r.rows.len();
+        let total = self.total_rows(cx);
         let Some(hit) = self.grid.cell_at(local, total) else { return };
-        let sort = self.sort(cx);
-        let idx = self.grid.sort_index(r, sort);
-        let data_idx = idx.as_ref().and_then(|i| i.get(hit.0).copied()).unwrap_or(hit.0);
-        let Some(row) = r.rows.get(data_idx) else { return };
-        if editable {
-            let pending = self.ctx.store.as_ref().map(|s| s.read(cx).pending_edits.clone()).unwrap_or_default();
-            let current = crate::ui::model::pending_get(&pending, data_idx, hit.1).cloned().unwrap_or_else(|| match &row[hit.1] {
-                serde_json::Value::Null => String::new(),
-                v => js::value_to_string(v),
-            });
+        let view = self.view_for(r, cx);
+        let Some(row_ref) = view.get(hit.0) else { return };
+        let loaded = match row_ref {
+            RowRef::Data(i) => r.rows.get(i).and_then(|row| row.get(hit.1)).cloned(),
+            RowRef::New(_) => None,
+        };
+        if editable && self.cell_lock(row_ref, hit.1, cx).is_none() {
+            let queued = self.ctx.store.as_ref().and_then(|s| s.read(cx).pending.cell(row_ref, hit.1).cloned());
+            let current = match queued {
+                Some(Cell::Value(t)) => t,
+                Some(_) => String::new(),
+                None => loaded.as_ref().map(edit_text).unwrap_or_default(),
+            };
             let s = self.grid.font_scale;
             let rh = grid::row_height(s);
             let rnw = grid::row_num_width(total, s);
@@ -1116,6 +1484,7 @@ impl OutputPanel {
             // The value opens fully selected, so Cmd+C copies it straight
             // away and typing replaces it. After a stray click collapses the
             // selection, a double click or Cmd+A selects it all again.
+            let initial = current.clone();
             let input = cx.new(|cx| {
                 let mut t = TextInput::new(cx, look);
                 t.double_click_selects_all = true;
@@ -1155,7 +1524,8 @@ impl OutputPanel {
             self.grid.edit = Some(EditOverlay {
                 row: hit.0,
                 col: hit.1,
-                row_data_idx: data_idx,
+                row_ref,
+                initial,
                 input,
                 origin: point(b.left() + px(x), b.top() + px(y)),
                 width: w,
@@ -1166,7 +1536,11 @@ impl OutputPanel {
             return;
         }
         let ty = r.column_types.get(hit.1).map(String::as_str);
-        let text = crate::ui::textfmt::format_value_for_clipboard(&row[hit.1], ty, "NULL");
+        let text = match (row_ref, self.ctx.store.as_ref().and_then(|s| s.read(cx).pending.cell(row_ref, hit.1).cloned())) {
+            (_, Some(Cell::Value(t))) => t,
+            (_, Some(_)) | (RowRef::New(_), None) => "NULL".to_string(),
+            (RowRef::Data(_), None) => crate::ui::textfmt::format_value_for_clipboard(loaded.as_ref().unwrap_or(&serde_json::Value::Null), ty, "NULL"),
+        };
         self.copy_to_clipboard(text, cx);
         self.grid.sel = Some(CellSel { r0: hit.0, c0: hit.1, r1: hit.0, c1: hit.1 });
         self.grid.last_selected = Some(hit);
@@ -1176,33 +1550,20 @@ impl OutputPanel {
     fn commit_cell_edit(&mut self, cx: &mut Context<Self>) {
         let Some(edit) = self.grid.edit.take() else { return };
         let value = edit.input.read(cx).text().to_string();
+        // Closing the editor without changing its text changes nothing.
+        if value == edit.initial || self.cell_lock(edit.row_ref, edit.col, cx).is_some() {
+            cx.notify();
+            return;
+        }
         let Some(r) = self.result(cx) else { return };
-        let original = r.rows.get(edit.row_data_idx).and_then(|row| row.get(edit.col)).map(|v| match v {
-            serde_json::Value::Null => String::new(),
-            v => js::value_to_string(v),
-        });
+        let original = match edit.row_ref {
+            RowRef::Data(i) => r.rows.get(i).and_then(|row| row.get(edit.col)).cloned(),
+            RowRef::New(_) => None,
+        };
         if let Some(store) = self.ctx.store.clone() {
             store.update(cx, |s, cx| {
-                let row_pos = s.pending_edits.iter().position(|(r, _)| *r == edit.row_data_idx);
-                if Some(&value) == original.as_ref() {
-                    if let Some(p) = row_pos {
-                        s.pending_edits[p].1.retain(|(c, _)| *c != edit.col);
-                        if s.pending_edits[p].1.is_empty() {
-                            s.pending_edits.remove(p);
-                        }
-                    }
-                } else {
-                    match row_pos {
-                        Some(p) => {
-                            let cols = &mut s.pending_edits[p].1;
-                            match cols.iter_mut().find(|(c, _)| *c == edit.col) {
-                                Some(e) => e.1 = value,
-                                None => cols.push((edit.col, value)),
-                            }
-                        }
-                        None => s.pending_edits.push((edit.row_data_idx, vec![(edit.col, value)])),
-                    }
-                }
+                s.pending.set_cell(edit.row_ref, edit.col, Cell::Value(value), original.as_ref());
+                s.save_error = None;
                 cx.notify();
             });
         }
@@ -1303,10 +1664,119 @@ impl OutputPanel {
     }
 }
 
+impl OutputPanel {
+    /// Save / Clear / Open as SQL while changes are queued; progress and Stop
+    /// while saving; why the result is read-only when it is.
+    fn render_edit_bar(&mut self, s: Scale, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let store = self.ctx.store.clone()?;
+        let st = store.read(cx);
+        st.result.as_ref().filter(|r| r.error.is_empty() && !r.columns.is_empty())?;
+        let amber = |id: &'static str, label: String, enabled: bool| {
+            div()
+                .id(id)
+                .px(px(12.))
+                .py(px(3.))
+                .rounded(px(4.))
+                .border_1()
+                .t(s, 11.0)
+                .font_weight(FontWeight::SEMIBOLD)
+                .whitespace_nowrap()
+                .when(enabled, |d| {
+                    d.bg(theme::rgba8(255, 200, 50, 0.15))
+                        .border_color(theme::rgba8(255, 200, 50, 0.6))
+                        .text_color(theme::AMBER)
+                        .cursor_pointer()
+                        .hover(|st| st.bg(theme::rgba8(255, 200, 50, 0.25)).border_color(theme::rgba8(255, 200, 50, 0.9)))
+                })
+                .when(!enabled, |d| d.border_color(theme::BORDER).text_color(theme::TEXT_MUTED))
+                .child(label)
+        };
+        let plain = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .px(px(10.))
+                .py(px(3.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(theme::BORDER)
+                .t(s, 11.0)
+                .text_color(theme::TEXT_DIM)
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .hover(|st| st.bg(theme::BG_HOVER).text_color(theme::TEXT))
+                .child(label)
+        };
+        let mut bar = div().flex().items_center().gap(px(6.)).mr(px(8.));
+        if let Some(ctl) = st.saving.clone() {
+            let done = ctl.done.load(std::sync::atomic::Ordering::Relaxed);
+            let total = ctl.total.load(std::sync::atomic::Ordering::Relaxed);
+            let committing = ctl.committing();
+            let text = if committing {
+                "Committing…".to_string()
+            } else if total > 1 {
+                format!("Saving {} / {}…", crate::ui::workspace::group_digits(done.min(total)), crate::ui::workspace::group_digits(total))
+            } else {
+                "Saving…".to_string()
+            };
+            bar = bar.child(div().t(s, 11.0).text_color(theme::TEXT_DIM).whitespace_nowrap().child(text));
+            let stop = div()
+                .id("stop-save")
+                .px(px(10.))
+                .py(px(3.))
+                .rounded(px(4.))
+                .border_1()
+                .t(s, 11.0)
+                .whitespace_nowrap()
+                .when(!committing, |d| {
+                    d.border_color(theme::ERROR).text_color(theme::ERROR).cursor_pointer().hover(|st| st.bg(theme::rgba8(255, 80, 80, 0.12))).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            let tab = this.ctx.tab_id.clone();
+                            this.with_ws(cx, |ws, cx| ws.stop_save(&tab, cx));
+                        }),
+                    )
+                })
+                .when(committing, |d| d.border_color(theme::BORDER).text_color(theme::TEXT_MUTED))
+                .child("Stop");
+            return Some(bar.child(stop).into_any_element());
+        }
+        let count = st.pending.count();
+        if count > 0 {
+            let loading = st.loading;
+            let tab = self.ctx.tab_id.clone();
+            bar = bar
+                .child(plain("clear-edits", "Clear").on_click(cx.listener(move |this, _, _, cx| {
+                    let tab = tab.clone();
+                    this.with_ws(cx, |ws, cx| ws.guard_discard(crate::ui::grid_save::DiscardAction::Clear(tab), cx));
+                })))
+                .child(plain("edits-as-sql", "Open as SQL").on_click(cx.listener(|this, _, _, cx| {
+                    this.with_ws(cx, |ws, cx| ws.open_edits_as_sql(cx));
+                })));
+            let label = if loading { "Loading rows…".to_string() } else { format!("Save Changes ({count})") };
+            let save = amber("save-edits", label, !loading);
+            let save = if loading {
+                save
+            } else {
+                save.on_click(cx.listener(|this, _, _, cx| {
+                    if this.grid.edit.is_some() {
+                        this.commit_cell_edit(cx);
+                    }
+                    let view = this.current_view(cx);
+                    this.with_ws(cx, |ws, cx| ws.save_edits(view, cx));
+                }))
+            };
+            return Some(bar.child(save).into_any_element());
+        }
+        if let Some(reason) = &st.edit_blocked {
+            let text = format!("Read-only: {reason}");
+            return Some(bar.child(div().t(s, 11.0).text_color(theme::TEXT_MUTED).whitespace_nowrap().overflow_hidden().text_ellipsis().max_w(px(420.)).child(text)).into_any_element());
+        }
+        None
+    }
+}
+
 impl Render for OutputPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = Scale(self.ctx.scale);
-        let pending = self.ctx.store.as_ref().map(|st| st.read(cx).pending_edits.len()).unwrap_or(0);
         let output_tab = self.ctx.output_tab;
         let mut tabs = div()
             .flex()
@@ -1338,28 +1808,10 @@ impl Render for OutputPanel {
                     .child(label),
             );
         }
-        if output_tab == OutputTab::Results && pending > 0 {
-            tabs = tabs.child(div().flex_1()).child(
-                div()
-                    .id("save-edits")
-                    .mr(px(8.))
-                    .px(px(12.))
-                    .py(px(3.))
-                    .bg(theme::rgba8(255, 200, 50, 0.15))
-                    .border_1()
-                    .border_color(theme::rgba8(255, 200, 50, 0.6))
-                    .rounded(px(4.))
-                    .text_color(theme::AMBER)
-                    .t(s, 11.0)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .hover(|st| st.bg(theme::rgba8(255, 200, 50, 0.25)).border_color(theme::rgba8(255, 200, 50, 0.9)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.with_ws(cx, |ws, cx| ws.save_edits(cx));
-                    }))
-                    .child(format!("Save Changes ({pending})")),
-            );
+        if output_tab == OutputTab::Results {
+            if let Some(bar) = self.render_edit_bar(s, cx) {
+                tabs = tabs.child(div().flex_1()).child(bar);
+            }
         }
         let content: AnyElement = match output_tab {
             OutputTab::Results => self.render_results(cx),

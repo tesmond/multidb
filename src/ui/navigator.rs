@@ -12,11 +12,14 @@ use crate::ui::theme::{self, Rgba};
 use crate::ui::widgets::scroll;
 use crate::ui::widgets::spaced_text::spaced_text;
 use crate::ui::widgets::{overlay, separator, shadow, Scale, TextExt};
-use crate::ui::workspace::{DragKind, NavDrag, NavIndexTip, NavMenu, Workspace};
+use crate::ui::workspace::{DragKind, FontSelect, NavDrag, NavIndexTip, NavMenu, Workspace};
 use gpui::{
-    deferred, div, point, prelude::*, px, AnimationExt, AnyElement, App, Context, CursorStyle, Div, FontWeight, MouseButton,
+    anchored, deferred, div, point, prelude::*, px, AnimationExt, AnyElement, App, Context, CursorStyle, Div, FontWeight, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
 };
+
+/// Width of the settings menu, which may be wider than the navigator.
+const SETTINGS_MENU_WIDTH: f32 = 300.0;
 
 /// Padding above the first row of the tree.
 const NAV_PAD_TOP: f32 = 4.0;
@@ -470,7 +473,7 @@ impl Workspace {
         // Header
         let title = spaced_text(
             "CONNECTIONS",
-            gpui::Font { weight: FontWeight::SEMIBOLD, ..gpui::font(theme::UI_FONT) },
+            gpui::Font { weight: FontWeight::SEMIBOLD, ..gpui::font(theme::ui_font()) },
             11.0 * s.0,
             s.lh_f(11.0),
             theme::TEXT_MUTED,
@@ -493,7 +496,13 @@ impl Workspace {
             .hover(|st| st.bg(theme::BG_HOVER).text_color(theme::TEXT))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.settings_open = !this.settings_open;
+                this.font_select_open = None;
                 this.add_menu_open = false;
+                if this.settings_open {
+                    // Show the cached list straight away, but pick up any
+                    // fonts installed or removed since it was made.
+                    this.refresh_font_families(cx);
+                }
                 cx.notify();
             }));
         let mut header = div()
@@ -566,46 +575,57 @@ impl Workspace {
                     .hover(|st| st.text_color(theme::TEXT))
                     .child(glyph)
             };
-            header = header.child(deferred(
-                div()
-                    .id("settings-menu")
-                    .occlude()
-                    .absolute()
-                    .top(px(8.0 + 22.0 + 8.0 + 1.0 + 4.0))
-                    .right(px(8.))
-                    .w(px(220.))
-                    .p(px(10.))
-                    .bg(theme::BG_SURFACE)
-                    .border_1()
-                    .border_color(theme::BORDER)
-                    .rounded(px(4.))
-                    .shadow(vec![shadow(0.0, 4.0, 16.0, 0.0, theme::rgba8(0, 0, 0, 0.4))])
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.))
-                            .t(s, 12.0)
-                            .text_color(theme::TEXT_MUTED)
-                            .child("Font size")
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .child(scale_btn("scale-dec", "−").on_click(cx.listener(|this, _, _, cx| {
-                                        let v = this.settings.font_scale() - 10.0;
-                                        this.set_font_scale(v, cx);
-                                    })))
-                                    .child(div().flex_1().min_w(px(0.)).child(self.font_scale_input.clone()))
-                                    .child(div().text_color(theme::TEXT_MUTED).child("%"))
-                                    .child(scale_btn("scale-inc", "+").on_click(cx.listener(|this, _, _, cx| {
-                                        let v = this.settings.font_scale() + 10.0;
-                                        this.set_font_scale(v, cx);
-                                    }))),
-                            ),
-                    ),
-            ).with_priority(2));
+            // Floats over the navigator and the editor beside it: it opens
+            // from the navigator's left edge and grows rightwards, so a narrow
+            // navigator doesn't push it off the window, and it is nudged back
+            // inside the window when that is too small for it.
+            let menu = div()
+                .id("settings-menu")
+                .occlude()
+                .w(px(SETTINGS_MENU_WIDTH))
+                .p(px(10.))
+                .bg(theme::BG_SURFACE)
+                .border_1()
+                .border_color(theme::BORDER)
+                .rounded(px(4.))
+                .shadow(vec![shadow(0.0, 4.0, 16.0, 0.0, theme::rgba8(0, 0, 0, 0.4))])
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .t(s, 12.0)
+                        .text_color(theme::TEXT_MUTED)
+                        .child("Zoom")
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(scale_btn("scale-dec", "−").on_click(cx.listener(|this, _, _, cx| {
+                                    let v = this.settings.font_scale() - 10.0;
+                                    this.set_font_scale(v, cx);
+                                })))
+                                .child(div().flex_1().min_w(px(0.)).child(self.font_scale_input.clone()))
+                                .child(div().text_color(theme::TEXT_MUTED).child("%"))
+                                .child(scale_btn("scale-inc", "+").on_click(cx.listener(|this, _, _, cx| {
+                                    let v = this.settings.font_scale() + 10.0;
+                                    this.set_font_scale(v, cx);
+                                }))),
+                        )
+                        .child(self.font_setting_rows(s, false, cx))
+                        .child(self.font_setting_rows(s, true, cx)),
+                );
+            header = header.child(
+                deferred(
+                    div()
+                        .absolute()
+                        .top(px(8.0 + 22.0 + 8.0 + 1.0 + 4.0))
+                        .left(px(8.))
+                        .child(anchored().snap_to_window().child(menu)),
+                )
+                .with_priority(2),
+            );
         }
 
         // Filter
@@ -1599,7 +1619,7 @@ impl Workspace {
                     (
                         pos,
                         div()
-                            .w(px(280.))
+                            .w(px(220.))
                             .child(div().t(s, 12.0).text_color(theme::TEXT).px(px(16.)).pt(px(10.)).pb(px(8.)).child(question))
                             .when_some(warning, |d, w| d.child(div().t(s, 12.0).text_color(theme::ERROR).px(px(16.)).pb(px(10.)).child(w)))
                             .child(div().border_b_1().border_color(theme::BORDER))
@@ -1974,4 +1994,204 @@ impl Workspace {
     pub fn nav_row_mid(&self, key: &str, y: Pixels) -> Pixels {
         self.nav_row_bounds.get(key).map(|b| b.top() + b.size.height / 2.).unwrap_or(y)
     }
+}
+
+// ─── Font settings ──────────────────────────────────────────────────────────
+
+/// One choice in a settings select: value (`None` = default), label, and the
+/// family to draw the label in.
+struct SelectItem {
+    value: Option<SharedString>,
+    label: SharedString,
+    preview: Option<SharedString>,
+}
+
+impl Workspace {
+    /// "UI font" or "Editor font": a family select and a size select side by
+    /// side, with whichever list is open shown beneath them.
+    fn font_setting_rows(&self, s: Scale, editor: bool, cx: &mut Context<Self>) -> AnyElement {
+        let (family_sel, size_sel) =
+            if editor { (FontSelect::EditorFamily, FontSelect::EditorSize) } else { (FontSelect::UiFamily, FontSelect::UiSize) };
+        let (family, size) = if editor {
+            (self.settings.editor_font_family.clone(), self.settings.editor_font_size())
+        } else {
+            (self.settings.ui_font_family.clone(), self.settings.ui_font_size())
+        };
+        let default_label: SharedString = if editor {
+            format!("Default ({})", crate::ui::pick_mono_family(cx)).into()
+        } else {
+            "System default".into()
+        };
+        let family_label: SharedString = family.clone().map(SharedString::from).unwrap_or_else(|| default_label.clone());
+        let family_font: SharedString = if editor { self.mono_family.clone() } else { theme::ui_font() };
+        let size_label: SharedString = format!("{}", size as i64).into();
+        let id_base = if editor { "editor-font" } else { "ui-font" };
+        let open = self.font_select_open;
+
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div().flex_1().min_w(px(0.)).child(
+                    settings_select_button(SharedString::from(format!("{id_base}-family")), s, family_label, Some(family_font), open == Some(family_sel))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_font_select(family_sel, cx))),
+                ),
+            )
+            .child(
+                div().w(px(64.)).flex_shrink_0().child(
+                    settings_select_button(SharedString::from(format!("{id_base}-size")), s, size_label, None, open == Some(size_sel))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_font_select(size_sel, cx))),
+                ),
+            );
+
+        let list = if open == Some(family_sel) {
+            let lists = self.font_families.clone().unwrap_or_default();
+            let families = if editor { &lists.mono } else { &lists.all };
+            let mut items = vec![SelectItem { value: None, label: default_label, preview: None }];
+            let loading = self.font_families.is_none();
+            // A family that is set but isn't in the list (uninstalled, or not
+            // detected as monospaced) stays visible so it can be seen selected.
+            if let Some(f) = &family {
+                if !families.iter().any(|n| n.as_ref() == f.as_str()) {
+                    let f = SharedString::from(f.clone());
+                    items.push(SelectItem { value: Some(f.clone()), label: f.clone(), preview: Some(f) });
+                }
+            }
+            items.extend(families.iter().map(|n| SelectItem { value: Some(n.clone()), label: n.clone(), preview: Some(n.clone()) }));
+            let selected = family.map(SharedString::from);
+            Some(settings_select_list(SharedString::from(format!("{id_base}-family-list")), s, items, selected, loading, cx, move |this, v, cx| {
+                this.font_select_open = None;
+                let v = v.map(|v| v.to_string());
+                if editor {
+                    this.set_editor_font_family(v, cx);
+                } else {
+                    this.set_ui_font_family(v, cx);
+                }
+            }))
+        } else if open == Some(size_sel) {
+            let items = crate::ui::model::FONT_SIZES
+                .iter()
+                .map(|n| {
+                    let label = if f64::from(*n) == crate::ui::model::DEFAULT_FONT_SIZE { format!("{n} (default)") } else { n.to_string() };
+                    SelectItem { value: Some(n.to_string().into()), label: label.into(), preview: None }
+                })
+                .collect();
+            let selected = Some(SharedString::from((size as i64).to_string()));
+            Some(settings_select_list(SharedString::from(format!("{id_base}-size-list")), s, items, selected, false, cx, move |this, v, cx| {
+                this.font_select_open = None;
+                let n = v.and_then(|v| v.parse::<f64>().ok()).unwrap_or(crate::ui::model::DEFAULT_FONT_SIZE);
+                if editor {
+                    this.set_editor_font_size(n, cx);
+                } else {
+                    this.set_ui_font_size(n, cx);
+                }
+            }))
+        } else {
+            None
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(if editor { "Editor font" } else { "UI font" })
+            .child(row)
+            .children(list)
+            .into_any_element()
+    }
+}
+
+/// The closed face of a settings select, drawn like the import dialog's.
+fn settings_select_button(id: SharedString, s: Scale, label: SharedString, family: Option<SharedString>, open: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w_full()
+        .h(px(26.))
+        .pl(px(8.))
+        .pr(px(8.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(6.))
+        .bg(theme::BG_INPUT)
+        .border_1()
+        .border_color(if open { theme::ACCENT } else { theme::BORDER })
+        .rounded(px(4.))
+        .t(s, 12.0)
+        .text_color(theme::TEXT)
+        .cursor_default()
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .when_some(family, |d, f| d.font_family(f))
+                .child(label),
+        )
+        .child(select_arrows(s))
+}
+
+/// An open select's options, laid out under its button inside the settings
+/// menu (which is itself deferred, so the list can't float over it).
+fn settings_select_list(
+    id: SharedString,
+    s: Scale,
+    items: Vec<SelectItem>,
+    selected: Option<SharedString>,
+    loading: bool,
+    cx: &mut Context<Workspace>,
+    on_pick: impl Fn(&mut Workspace, Option<SharedString>, &mut Context<Workspace>) + 'static,
+) -> AnyElement {
+    let on_pick = std::rc::Rc::new(on_pick);
+    let mut list = div()
+        .id(id.clone())
+        .flex()
+        .flex_col()
+        .max_h(px(240.))
+        .overflow_y_scroll()
+        .py(px(4.))
+        .px(px(4.))
+        .bg(theme::hex(0x2a2a2c))
+        .border_1()
+        .border_color(theme::rgba8(255, 255, 255, 0.12))
+        .rounded(px(6.));
+    for (i, item) in items.into_iter().enumerate() {
+        let is_sel = item.value == selected;
+        let pick = on_pick.clone();
+        let value = item.value.clone();
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("{id}-{i}")))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(6.))
+                .py(px(2.))
+                .rounded(px(4.))
+                .t(s, 12.0)
+                .text_color(theme::WHITE)
+                .hover(|st| st.bg(theme::hex(0x0a64d8)))
+                .child(div().w(px(12.)).flex_shrink_0().flex().items_center().when(is_sel, |d| d.child(icon(Icon::Check, s.fs(12.0), theme::WHITE))))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .when_some(item.preview, |d, f| d.font_family(f))
+                        .child(item.label),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| pick(this, value.clone(), cx))),
+        );
+    }
+    if loading {
+        // Only before the very first listing; after that the cached list is
+        // shown while a refresh runs.
+        list = list.child(div().px(px(24.)).py(px(2.)).t(s, 12.0).text_color(theme::TEXT_MUTED).child("Loading fonts…"));
+    }
+    list.into_any_element()
 }

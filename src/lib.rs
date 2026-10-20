@@ -3,6 +3,7 @@ mod backup;
 mod commands;
 mod connections;
 mod ddl;
+mod grid_edit;
 mod history;
 mod ipc_diagnostics;
 mod models;

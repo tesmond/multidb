@@ -2,7 +2,9 @@
 //! from divs, body painted directly like the old `<canvas>` renderer.
 
 use crate::ui::js;
-use crate::ui::model::{pending_get, PendingEdits, QueryResult, SortDirection};
+use crate::grid_edit::{Cell, RowRef};
+use crate::ui::model::{QueryResult, SortDirection};
+use crate::ui::pending::{Pending, ViewRows};
 use crate::ui::textfmt::{escape_tsv_cell, format_value_for_clipboard};
 use crate::ui::theme::{self, hsla, Rgba};
 pub use crate::ui::widgets::scroll::{Bar, ScrollDrag, ScrollGeom, SCROLLBAR};
@@ -102,7 +104,9 @@ pub struct CellPopup {
 pub struct EditOverlay {
     pub row: usize,
     pub col: usize,
-    pub row_data_idx: usize,
+    pub row_ref: crate::grid_edit::RowRef,
+    /// The text the editor opened with: closing it unchanged changes nothing.
+    pub initial: String,
     pub input: Entity<crate::ui::widgets::text_input::TextInput>,
     pub origin: Point<Pixels>,
     pub width: f32,
@@ -147,11 +151,16 @@ pub struct GridState {
     pub hovered_bar: Option<Bar>,
     sort_pending: Option<SortRequest>,
     sort_request: Option<SortRequest>,
-    sort_cache: Option<(u64, usize, usize, SortDirection, Arc<Vec<usize>>)>,
+    sort_cache: Option<SortCache>,
     advance_cache: HashMap<char, f32>,
+    /// [`theme::font_generation`] the advances were measured at.
+    advance_font_gen: u64,
     pub focus: Option<gpui::FocusHandle>,
     pub last_drag_pos: Option<Point<Pixels>>,
 }
+
+/// A computed sort: (generation, rev, rows sorted, column, direction, order).
+type SortCache = (u64, u64, usize, usize, SortDirection, Arc<Vec<usize>>);
 
 pub fn row_height(scale: f32) -> f32 {
     BASE_ROW_HEIGHT * scale
@@ -179,6 +188,7 @@ const BACKGROUND_SORT_ROWS: usize = 50_000;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SortRequest {
     pub generation: u64,
+    pub rev: u64,
     pub rows: usize,
     pub col: usize,
     pub dir: SortDirection,
@@ -220,6 +230,11 @@ impl GridState {
     fn measure(&mut self, text: &str, cx: &App) -> f32 {
         // Sum of per-character advances of the UI font at 12px (what the old
         // canvas `measureText` returned for these strings).
+        let font_gen = theme::font_generation();
+        if font_gen != self.advance_font_gen {
+            self.advance_cache.clear();
+            self.advance_font_gen = font_gen;
+        }
         let mut missing: Vec<char> = Vec::new();
         for ch in text.chars() {
             if !self.advance_cache.contains_key(&ch) {
@@ -228,7 +243,7 @@ impl GridState {
         }
         if !missing.is_empty() {
             let ts = cx.text_system();
-            let id = ts.resolve_font(&gpui::font(theme::UI_FONT));
+            let id = ts.resolve_font(&gpui::font(theme::ui_font()));
             for ch in missing {
                 let w = ts.advance(id, px(12.), ch).map(|s| f32::from(s.width)).unwrap_or(5.6);
                 self.advance_cache.insert(ch, w);
@@ -382,8 +397,9 @@ impl GridState {
         if n == 0 {
             return None;
         }
-        if let Some((g, len, c, d, idx)) = &self.sort_cache {
-            if *g == result.generation && *len == n && *c == col && *d == dir {
+        let (gen, rev) = (result.generation, result.rev);
+        if let Some((g, r, len, c, d, idx)) = &self.sort_cache {
+            if *g == gen && *r == rev && *len == n && *c == col && *d == dir {
                 return Some(idx.clone());
             }
             // Rows are still arriving: re-sorting everything for every batch
@@ -391,32 +407,33 @@ impl GridState {
             // rows after it. The full sort happens once the rows stop.
             // (The cache keeps the length that was actually sorted, so the full
             // sort still runs once loading ends.)
-            if loading && *g == result.generation && *c == col && *d == dir && *len < n {
+            if loading && *g == gen && *r == rev && *c == col && *d == dir && *len < n {
                 if idx.len() == n {
                     return Some(idx.clone());
                 }
                 let mut extended = idx.as_ref().clone();
                 extended.extend(idx.len()..n);
                 let extended = Arc::new(extended);
-                self.sort_cache = Some((result.generation, *len, col, dir, extended.clone()));
+                self.sort_cache = Some((gen, rev, *len, col, dir, extended.clone()));
                 return Some(extended);
             }
         }
         // A big result is sorted off the UI thread (see `SortRequest`); until
-        // that lands, keep showing the order the last sort gave, if any.
+        // that lands, keep showing the order the last sort gave, if any — as
+        // long as it still covers exactly these rows.
         if n >= BACKGROUND_SORT_ROWS && !loading {
-            let req = SortRequest { generation: result.generation, rows: n, col, dir };
+            let req = SortRequest { generation: gen, rev, rows: n, col, dir };
             if self.sort_pending != Some(req) {
                 self.sort_pending = Some(req);
                 self.sort_request = Some(req);
             }
             return match &self.sort_cache {
-                Some((g, _, c, d, idx)) if *g == result.generation && *c == col && *d == dir => Some(idx.clone()),
+                Some((g, r, _, c, d, idx)) if *g == gen && *r == rev && *c == col && *d == dir && idx.len() == n => Some(idx.clone()),
                 _ => None,
             };
         }
         let idx = Arc::new(compute_sort(result, col, dir));
-        self.sort_cache = Some((result.generation, n, col, dir, idx.clone()));
+        self.sort_cache = Some((gen, rev, n, col, dir, idx.clone()));
         Some(idx)
     }
 
@@ -431,7 +448,7 @@ impl GridState {
             self.sort_pending = None;
         }
         if req.generation == self.generation {
-            self.sort_cache = Some((req.generation, req.rows, req.col, req.dir, Arc::new(idx)));
+            self.sort_cache = Some((req.generation, req.rev, req.rows, req.col, req.dir, Arc::new(idx)));
         }
     }
 
@@ -519,36 +536,40 @@ impl GridState {
         self.last_selected = None;
     }
 
-    pub fn copy_text(&mut self, result: &QueryResult, sort: Option<(usize, SortDirection)>) -> Option<String> {
-        let idx = self.sort_index(result, sort);
-        let data_idx = |r: usize| idx.as_ref().and_then(|i| i.get(r).copied()).unwrap_or(r);
+    /// Tab-separated text of the selected rows or cells, as shown: queued
+    /// edits and new rows included.
+    pub fn copy_text(&mut self, result: &QueryResult, view: &ViewRows, pending: &Pending) -> Option<String> {
         let cols = result.columns.len();
         let ty = |c: usize| result.column_types.get(c).map(String::as_str);
+        let cell = |row: RowRef, c: usize| -> String {
+            match pending.cell(row, c) {
+                Some(Cell::Value(t)) => t.clone(),
+                Some(Cell::Null) | Some(Cell::Default) => String::new(),
+                Some(Cell::Now) => "NOW()".to_string(),
+                None => match row {
+                    RowRef::Data(i) => format_value_for_clipboard(
+                        result.rows.get(i).and_then(|r| r.get(c)).unwrap_or(&serde_json::Value::Null),
+                        ty(c),
+                        "",
+                    ),
+                    RowRef::New(_) => String::new(),
+                },
+            }
+        };
+        let line = |row: RowRef, c0: usize, c1: usize| -> String {
+            (c0..=c1).map(|c| escape_tsv_cell(&cell(row, c))).collect::<Vec<_>>().join("\t")
+        };
+        if cols == 0 {
+            return None;
+        }
         if !self.selected_rows.is_empty() {
-            let lines: Vec<String> = self
-                .selected_rows
-                .iter()
-                .filter_map(|&r| result.rows.get(data_idx(r)))
-                .map(|row| {
-                    (0..cols)
-                        .map(|c| escape_tsv_cell(&format_value_for_clipboard(row.get(c).unwrap_or(&serde_json::Value::Null), ty(c), "")))
-                        .collect::<Vec<_>>()
-                        .join("\t")
-                })
-                .collect();
+            let lines: Vec<String> = self.selected_rows.iter().filter_map(|&r| view.get(r)).map(|row| line(row, 0, cols - 1)).collect();
             return (!lines.is_empty()).then(|| lines.join("\n"));
         }
         let sel = self.sel?;
         let (r0, r1, c0, c1) = sel.norm();
-        let lines: Vec<String> = (r0..=r1)
-            .filter_map(|r| result.rows.get(data_idx(r)))
-            .map(|row| {
-                (c0..=c1)
-                    .map(|c| escape_tsv_cell(&format_value_for_clipboard(row.get(c).unwrap_or(&serde_json::Value::Null), ty(c), "")))
-                    .collect::<Vec<_>>()
-                    .join("\t")
-            })
-            .collect();
+        let c1 = c1.min(cols - 1);
+        let lines: Vec<String> = (r0..=r1).filter_map(|r| view.get(r)).map(|row| line(row, c0, c1)).collect();
         Some(lines.join("\n"))
     }
 
@@ -655,7 +676,8 @@ impl GridState {
 
 pub struct GridBody {
     pub result: QueryResult,
-    pub sort_index: Option<Arc<Vec<usize>>>,
+    /// The rows in the order shown.
+    pub view: ViewRows,
     pub col_widths: Vec<f32>,
     pub scale: f32,
     /// `(x, y)`; y is f64 like [`GridState::scroll_y`].
@@ -665,8 +687,11 @@ pub struct GridBody {
     pub hovered_row: Option<usize>,
     /// Scrollbar being hovered or dragged, drawn with the thumb's hover colour.
     pub active_bar: Option<Bar>,
-    pub pending: PendingEdits,
-    pub editing: Option<(usize, usize)>,
+    pub pending: Arc<Pending>,
+    /// The cell under the open editor.
+    pub editing: Option<(RowRef, usize)>,
+    /// The row the last save failed on.
+    pub error_row: Option<RowRef>,
     pub on_bounds: Box<dyn Fn(Bounds<Pixels>, &mut App)>,
 }
 
@@ -678,7 +703,7 @@ impl IntoElement for GridBody {
 }
 
 fn ui_font(style: FontStyle) -> Font {
-    Font { family: theme::UI_FONT.into(), features: Default::default(), fallbacks: None, weight: FontWeight::NORMAL, style }
+    Font { family: theme::ui_font(), features: Default::default(), fallbacks: None, weight: FontWeight::NORMAL, style }
 }
 
 impl Element for GridBody {
@@ -715,7 +740,7 @@ impl Element for GridBody {
         let s = self.scale;
         let rh = row_height(s);
         let pad = BASE_CELL_PAD_X * s;
-        let total = self.result.rows.len();
+        let total = self.view.len();
         let rnw = row_num_width(total, s);
         let content_w = rnw + self.col_widths.iter().sum::<f32>();
         let content_h = total as f32 * rh;
@@ -786,8 +811,16 @@ impl Element for GridBody {
                 if abs >= total {
                     break;
                 }
-                let data_idx = self.sort_index.as_ref().and_then(|x| x.get(abs).copied()).unwrap_or(abs);
-                let Some(row) = self.result.rows.get(data_idx) else { continue };
+                let Some(row_ref) = self.view.get(abs) else { continue };
+                let loaded: Option<&Vec<serde_json::Value>> = match row_ref {
+                    RowRef::Data(i) => match self.result.rows.get(i) {
+                        Some(r) => Some(r),
+                        None => continue,
+                    },
+                    RowRef::New(_) => None,
+                };
+                let is_new = matches!(row_ref, RowRef::New(_));
+                let deleted = self.pending.is_deleted(row_ref);
                 let y = y_off + i as f32 * rh;
                 if y + rh < 0.0 || y > h {
                     continue;
@@ -803,6 +836,12 @@ impl Element for GridBody {
                 };
                 if let Some(c) = row_bg {
                     paint(window, rect(rnw, y, w - rnw, rh), c);
+                }
+                if is_new {
+                    paint(window, rect(rnw, y, w - rnw, rh - 1.0), theme::GRID_NEW_ROW);
+                }
+                if deleted {
+                    paint(window, rect(rnw, y, w - rnw, rh - 1.0), theme::GRID_DELETED_ROW);
                 }
                 if in_row_sel {
                     paint(window, rect(rnw, y, w - rnw, rh - 1.0), theme::GRID_ROW_SEL);
@@ -829,28 +868,34 @@ impl Element for GridBody {
                     if text_max <= 0.0 {
                         continue;
                     }
-                    if self.editing == Some((data_idx, c)) {
+                    if self.editing == Some((row_ref, c)) {
                         paint(window, rect(x + 1.0, y, cw - 2.0, rh - 1.0), theme::BG_PANEL);
                         continue;
                     }
-                    let dirty = pending_get(&self.pending, data_idx, c);
-                    if dirty.is_some() {
+                    let queued = self.pending.cell(row_ref, c);
+                    let dirty = !is_new && !deleted && queued.is_some();
+                    if dirty {
                         paint(window, rect(x, y, cw - 1.0, rh - 1.0), theme::GRID_DIRTY);
                         paint(window, rect(x, y, 2.0, rh - 1.0), theme::GRID_BORDER_DIRTY);
                     }
                     let clip = rect(x + 1.0, y, cw - 2.0, rh);
-                    let value = row.get(c).cloned().unwrap_or(serde_json::Value::Null);
-                    let (text, color, italic) = match dirty {
-                        Some(d) if d.is_empty() => (None, theme::TEXT, false),
-                        Some(d) => (Some(d.clone()), theme::TEXT, false),
-                        None => match &value {
-                            serde_json::Value::Null => (Some("NULL".to_string()), theme::with_alpha(theme::TEXT_MUTED, 0.6), true),
+                    let null_look = (Some("NULL".to_string()), theme::with_alpha(theme::TEXT_MUTED, 0.6), true);
+                    let (text, color, italic) = match queued {
+                        Some(Cell::Value(d)) if d.is_empty() => (None, theme::TEXT, false),
+                        Some(Cell::Value(d)) => (Some(d.clone()), theme::TEXT, false),
+                        Some(Cell::Null) => null_look,
+                        Some(Cell::Default) => (Some("DEFAULT".to_string()), theme::with_alpha(theme::TEXT_MUTED, 0.5), false),
+                        // Filled in by the database when the save runs.
+                        Some(Cell::Now) => (Some("NOW()".to_string()), theme::ACCENT_HOVER, true),
+                        None => match loaded.and_then(|r| r.get(c)).unwrap_or(&serde_json::Value::Null) {
+                            serde_json::Value::Null => null_look,
                             v => {
                                 let t = js::value_to_string(v);
                                 if t.is_empty() { (None, theme::TEXT, false) } else { (Some(t), theme::TEXT, false) }
                             }
                         },
                     };
+                    let color = if deleted { theme::with_alpha(color, 0.45) } else { color };
                     if let Some(text) = text {
                         // Values too long to ever fit get an eye button that
                         // opens the whole thing; the text stops short of it.
@@ -888,11 +933,28 @@ impl Element for GridBody {
                     }
                 }
 
+                // A row marked for deletion is struck through.
+                if deleted {
+                    paint(window, rect(rnw, y + rh / 2.0 - 0.75, w - rnw, 1.5), theme::GRID_DELETED_LINE);
+                }
+                // The row the last save failed on.
+                if self.error_row == Some(row_ref) {
+                    window.paint_quad(quad(
+                        rect(rnw, y, w - rnw, rh - 1.0),
+                        Corners::default(),
+                        gpui::transparent_black(),
+                        Edges::all(px(1.5)),
+                        hsla(theme::ERROR),
+                        BorderStyle::Solid,
+                    ));
+                }
+
                 // Sticky row-number column.
                 paint(window, rect(0.0, y, rnw, rh), if in_row_sel { theme::GRID_ROWNUM_SEL } else { theme::BG_PANEL });
                 paint(window, rect(rnw - 1.0, y, 1.0, rh), theme::BORDER);
-                let num = (abs + 1).to_string();
-                let run = TextRun { len: num.len(), font: font.clone(), color: hsla(theme::TEXT_MUTED), background_color: None, underline: None, strikethrough: None };
+                let num = if is_new { "+".to_string() } else { (abs + 1).to_string() };
+                let num_color = if is_new { theme::SUCCESS } else if deleted { theme::ERROR } else { theme::TEXT_MUTED };
+                let run = TextRun { len: num.len(), font: font.clone(), color: hsla(num_color), background_color: None, underline: None, strikethrough: None };
                 let line = ts.shape_line(SharedString::from(num), px(fs11), &[run], None);
                 let ascent: f32 = line.ascent.into();
                 let descent: f32 = f32::from(line.descent).abs();

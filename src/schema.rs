@@ -198,118 +198,6 @@ pub async fn postgres_database_catalog_with_progress(
     Ok(tree)
 }
 
-pub async fn get_primary_keys(
-    pool: &AnyPool,
-    driver: &str,
-    schema_name: &str,
-    table_name: &str,
-) -> Result<Vec<String>> {
-    match driver {
-        "mysql" => {
-            string_column(
-                pool,
-                r#"
-            SELECT COLUMN_NAME FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY = 'PRI'
-            ORDER BY ORDINAL_POSITION
-            "#,
-                &[schema_name, table_name],
-            )
-            .await
-        }
-        "postgres" => {
-            let schema_name = if schema_name.is_empty() {
-                "public"
-            } else {
-                schema_name
-            };
-            string_column(
-                pool,
-                r#"
-                SELECT kcu.column_name::text
-                FROM information_schema.table_constraints tc
-                JOIN information_schema.key_column_usage kcu
-                  ON tc.constraint_name = kcu.constraint_name
-                 AND tc.table_schema = kcu.table_schema
-                 AND tc.table_name = kcu.table_name
-                WHERE tc.constraint_type = 'PRIMARY KEY'
-                  AND tc.table_schema = $1
-                  AND tc.table_name = $2
-                ORDER BY kcu.ordinal_position
-                "#,
-                &[schema_name, table_name],
-            )
-            .await
-        }
-        "sqlite" => {
-            let rows = sqlx::query(&format!(
-                "PRAGMA table_info({})",
-                quote_sqlite_pragma(table_name)
-            ))
-            .fetch_all(pool)
-            .await?;
-            let mut entries: Vec<(i64, String)> = rows
-                .into_iter()
-                .filter_map(|row| {
-                    let name = decode_any_text(&row, "name").ok()?;
-                    let pk: i64 = row.try_get("pk").ok()?;
-                    (pk > 0).then_some((pk, name))
-                })
-                .collect();
-            entries.sort_by_key(|(pk, _)| *pk);
-            Ok(entries.into_iter().map(|(_, name)| name).collect())
-        }
-        other => Err(anyhow!("unsupported driver: {other}")),
-    }
-}
-
-pub async fn get_mysql_primary_keys(
-    pool: &MySqlPool,
-    schema_name: &str,
-    table_name: &str,
-) -> Result<Vec<String>> {
-    string_column_mysql(
-        pool,
-        r#"
-        SELECT COLUMN_NAME FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY = 'PRI'
-        ORDER BY ORDINAL_POSITION
-        "#,
-        &[schema_name, table_name],
-    )
-    .await
-}
-
-pub async fn get_postgres_primary_keys(
-    pool: &PgPool,
-    schema_name: &str,
-    table_name: &str,
-) -> Result<Vec<String>> {
-    let schema_name = if schema_name.is_empty() {
-        "public"
-    } else {
-        schema_name
-    };
-    Ok(sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT kcu.column_name::text
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name
-         AND tc.table_schema = kcu.table_schema
-         AND tc.table_name = kcu.table_name
-        WHERE tc.constraint_type = 'PRIMARY KEY'
-          AND tc.table_schema = $1
-          AND tc.table_name = $2
-        ORDER BY kcu.ordinal_position
-        "#,
-    )
-    .bind(schema_name)
-    .bind(table_name)
-    .fetch_all(pool)
-    .await?)
-}
-
 async fn mysql_schema(pool: &AnyPool) -> Result<SchemaTree> {
     let sizes = mysql_table_sizes(pool).await.unwrap_or_default();
     let relationships = mysql_relationships(pool).await?;
@@ -1225,17 +1113,6 @@ async fn string_column(pool: &AnyPool, sql: &str, args: &[&str]) -> Result<Vec<S
     let rows = query.fetch_all(pool).await?;
     rows.into_iter()
         .map(|row| decode_any_text(&row, 0))
-        .collect()
-}
-
-async fn string_column_mysql(pool: &MySqlPool, sql: &str, args: &[&str]) -> Result<Vec<String>> {
-    let mut query = sqlx::query(sql);
-    for arg in args {
-        query = query.bind(*arg);
-    }
-    let rows = query.fetch_all(pool).await?;
-    rows.into_iter()
-        .map(|row| decode_mysql_text(&row, 0))
         .collect()
 }
 

@@ -31,7 +31,7 @@ Because the bundle is only ad-hoc signed, macOS may ask again for Keychain acces
 
 ### One-click formatting
 
-**Format** (or `⌥⇧F`) lays a query out in the [Mozilla SQL style](https://docs.telemetry.mozilla.org/concepts/sql_style): upper-case keywords, one column per line, readable joins. It only changes whitespace and keyword case, never what the query does, and one undo puts it back. SQL the app writes for you (View Data, templates, saved edits) comes out formatted too.
+**Format** (or `⌥⇧F`) lays a query out in the [Mozilla SQL style](https://docs.telemetry.mozilla.org/concepts/sql_style): upper-case keywords, one column per line, readable joins. It only changes whitespace and keyword case, never what the query does, and one undo puts it back. SQL the app writes for you (View Data, templates) comes out formatted too.
 
 ![Formatting a one-line query](docs/screenshots/02-format.png)
 
@@ -43,9 +43,11 @@ Right-click a table in the sidebar to view its data, open a CREATE TABLE, INSERT
 
 ### Edit results in place
 
-Double-click a cell of a single-table `SELECT` that has a primary key. The value opens selected, ready to copy or replace; changes are marked in amber, and **Save Changes** writes the `UPDATE` statements into a new tab for you to review and run.
+Results of a single-table `SELECT` that has a primary key can be edited in place. Double-click a cell to change it, or right-click for **Set to NULL**, **Revert Cell**, **Delete Row** and **Insert Row Below**. Right-click the row numbers to delete or undelete every highlighted row. Edited cells show in amber, new rows in green, and deleted rows are struck through until you save.
 
-![Editing a cell in the results grid](docs/screenshots/05-edit-cells.png)
+**Save Changes** writes everything in one transaction, in the background, and the grid updates in place without re-running the query. Rows that changed since you loaded them are flagged before anything is overwritten, so you can cancel or override. Any error rolls back the whole save and keeps your changes. **Stop** cancels a save that is stuck waiting on a lock. **Open as SQL** shows the statements a save would run, and **Clear** discards the changes.
+
+![Editing, inserting and deleting rows in the results grid](docs/screenshots/05-edit-cells.png)
 
 ### Mistakes flagged as you type
 
@@ -90,7 +92,7 @@ Give a connection (or its server group) a tab colour in Edit Connection, and eve
   - Streamed query results for large datasets
   - Virtualized results grid for performance
   - Column sorting and copy/select behavior
-  - Edit cells in place and review the generated `UPDATE` before running
+  - Edit, insert and delete rows in place, saved together in one transaction with a check for rows changed since they were loaded
   - Fast CSV export streamed to disk, with progress in the status bar
 - Schema explorer:
   - Expandable navigation tree for schemas, tables, views, indexes, and columns

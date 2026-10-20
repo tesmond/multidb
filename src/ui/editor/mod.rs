@@ -334,6 +334,13 @@ impl SqlEditor {
         cx.notify();
     }
 
+    pub fn set_mono_family(&mut self, family: SharedString, cx: &mut Context<Self>) {
+        if family != self.mono_family {
+            self.mono_family = family;
+            cx.notify();
+        }
+    }
+
     pub fn set_font_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
         if (scale - self.font_scale).abs() > f32::EPSILON {
             self.font_scale = scale;

@@ -90,7 +90,9 @@ impl Workspace {
     }
 
     fn close_overlay(&mut self, _: &CloseOverlay, _: &mut Window, cx: &mut Context<Self>) {
-        if self.close_update_dialog() {
+        // Escape on a save prompt is the safe answer: keep the changes, save nothing.
+        if self.save_conflicts.take().is_some() || self.discard_confirm.take().is_some() || self.nontx_confirm.take().is_some() {
+        } else if self.close_update_dialog() {
             // handled (or ignored while an update is installing)
         } else if self.about_open {
             self.about_open = false;
@@ -128,7 +130,7 @@ impl Workspace {
             .flex_col()
             .bg(theme::BG)
             .text_color(theme::TEXT)
-            .font_family(theme::UI_FONT)
+            .font_family(theme::ui_font())
             .t(s, 13.0)
             .overflow_hidden()
             .on_mouse_move({
@@ -299,6 +301,15 @@ impl Workspace {
         if let Some(el) = self.render_close_tab_confirm(window, cx) {
             root = root.child(el);
         }
+        if let Some(el) = self.render_save_conflicts(window, cx) {
+            root = root.child(el);
+        }
+        if let Some(el) = self.render_nontx_confirm(window, cx) {
+            root = root.child(el);
+        }
+        if let Some(el) = self.render_discard_confirm(window, cx) {
+            root = root.child(el);
+        }
         // Opened from inside other dialogs (the connection test), so on top.
         if let Some(el) = self.render_error_popup(window, cx) {
             root = root.child(el);
@@ -330,7 +341,7 @@ impl Workspace {
                     .max_h(px(420.))
                     .p(px(16.))
                     .t(s, 12.0)
-                    .font_family(crate::ui::pick_mono_family(cx))
+                    .font_family(self.mono_family.clone())
                     .text_color(theme::TEXT)
                     .child(text)
                     .into_any_element();
@@ -446,7 +457,7 @@ impl Workspace {
                     .max_h(px(420.))
                     .p(px(16.))
                     .t(s, 12.0)
-                    .font_family(crate::ui::pick_mono_family(cx))
+                    .font_family(self.mono_family.clone())
                     .text_color(theme::ERROR)
                     .child(text)
                     .into_any_element();
@@ -646,7 +657,7 @@ impl Workspace {
                     .gap(px(8.))
                     .child(crate::ui::widgets::spaced_text::spaced_text(
                         "QUERY TITLE",
-                        gpui::Font { weight: gpui::FontWeight::MEDIUM, ..gpui::font(theme::UI_FONT) },
+                        gpui::Font { weight: gpui::FontWeight::MEDIUM, ..gpui::font(theme::ui_font()) },
                         12.0 * s.0,
                         s.lh_f(12.0),
                         theme::TEXT_MUTED,
