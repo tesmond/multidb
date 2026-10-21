@@ -40,6 +40,8 @@ pub enum DiscardAction {
 pub struct ConflictPrompt {
     pub tab_id: TabId,
     pub columns: Arc<Vec<String>>,
+    /// The result columns of the primary key, to name each row by its key.
+    pub key: Vec<usize>,
     pub conflicts: Vec<ConflictRow>,
 }
 
@@ -51,6 +53,74 @@ pub struct ConflictRow {
     pub loaded: Vec<Value>,
     /// The values queued for it (empty for a row being deleted).
     pub yours: Vec<(usize, Cell)>,
+}
+
+/// Your side of one column of a conflicting row.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Yours {
+    /// You didn't edit this column.
+    NotEdited,
+    /// What you set it to.
+    Value(String),
+    /// You're deleting the row.
+    Deleted,
+}
+
+/// One line of a conflicting row's table: a column with its value when
+/// loaded, now in the database (`None` when they didn't change it) and yours.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConflictLine {
+    pub col: usize,
+    pub loaded: String,
+    pub now: Option<String>,
+    pub yours: Yours,
+}
+
+/// What kind of conflict a row is, for the badge in its header.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConflictKind {
+    /// You both changed these columns.
+    Both(Vec<usize>),
+    /// They changed a row you're deleting.
+    Deleting,
+    /// They and you changed different columns.
+    Separate,
+}
+
+/// The columns they changed, then any other columns you edited.
+pub fn conflict_lines(row: &ConflictRow) -> Vec<ConflictLine> {
+    let loaded = |c: usize| row.loaded.get(c).map(value_text).unwrap_or_default();
+    let mut lines: Vec<ConflictLine> = row
+        .conflict
+        .changed
+        .iter()
+        .map(|&c| ConflictLine {
+            col: c,
+            loaded: loaded(c),
+            now: Some(row.conflict.current.get(c).map(value_text).unwrap_or_default()),
+            yours: if row.conflict.deleting {
+                Yours::Deleted
+            } else {
+                row.yours.iter().find(|(col, _)| *col == c).map(|(_, v)| Yours::Value(cell_text(v))).unwrap_or(Yours::NotEdited)
+            },
+        })
+        .collect();
+    if !row.conflict.deleting {
+        for (c, v) in &row.yours {
+            if !row.conflict.changed.contains(c) {
+                lines.push(ConflictLine { col: *c, loaded: loaded(*c), now: None, yours: Yours::Value(cell_text(v)) });
+            }
+        }
+    }
+    lines
+}
+
+pub fn conflict_kind(row: &ConflictRow) -> ConflictKind {
+    if row.conflict.deleting {
+        return ConflictKind::Deleting;
+    }
+    let both: Vec<usize> = row.conflict.changed.iter().copied().filter(|c| row.yours.iter().any(|(y, _)| y == c)).collect();
+    if both.is_empty() { ConflictKind::Separate } else { ConflictKind::Both(both) }
 }
 
 /// The text of a value in the dialogs.
@@ -349,7 +419,7 @@ impl Workspace {
                         ConflictRow { shown_at: view.position(c.row).map(|p| p + 1), conflict: c, loaded, yours }
                     })
                     .collect();
-                self.save_conflicts = Some(ConflictPrompt { tab_id: tab_id.to_string(), columns, conflicts: rows });
+                self.save_conflicts = Some(ConflictPrompt { tab_id: tab_id.to_string(), columns, key: req.key.clone(), conflicts: rows });
                 self.set_tab_status(tab_id, "Save paused: rows changed since they were loaded");
             }
             SaveOutcome::Failed(f) => {
@@ -612,83 +682,231 @@ impl Workspace {
         )
     }
 
-    pub fn render_save_conflicts(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub fn render_save_conflicts(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let prompt = self.save_conflicts.clone()?;
         let s = Scale(self.scale());
+        let mono = self.mono_family.clone();
         let total = prompt.conflicts.len();
-        let deleting = prompt.conflicts.iter().filter(|c| c.conflict.deleting).count();
-        let mut list = div().flex().flex_col().gap(px(10.));
+        // Colours: loaded (struck through), theirs (blue), yours (amber).
+        let loaded_fg = theme::rgba8(154, 154, 172, 1.0);
+        let theirs_fg = theme::rgba8(199, 215, 255, 1.0);
+        let theirs_bg = theme::rgba8(91, 140, 255, 0.14);
+        let yours_fg = theme::rgba8(255, 216, 117, 1.0);
+        let yours_bg = theme::rgba8(255, 200, 50, 0.13);
+        let warn_fg = theme::rgba8(255, 180, 168, 1.0);
+        let line_border = theme::rgba8(38, 38, 54, 1.0);
+        let name_w = px(120. * s.0);
+        let cell = |content: AnyElement| div().flex_1().min_w(px(0.)).px(px(12.)).py(px(7.)).child(content);
+        let value = |text: String, fg: theme::Rgba| {
+            div().font_family(mono.clone()).text_color(fg).overflow_hidden().text_ellipsis().whitespace_nowrap().child(short(text)).into_any_element()
+        };
+        let note = |text: &str, fg: theme::Rgba| div().text_color(fg).child(text.to_string()).into_any_element();
+
+        let mut list = div().flex().flex_col().gap(px(12.));
         for row in prompt.conflicts.iter().take(CONFLICTS_SHOWN) {
             let place = match (row.conflict.row, row.shown_at) {
                 (RowRef::Data(_), Some(n)) => format!("Row {n}"),
                 _ => "Row".into(),
             };
-            let what = if row.conflict.deleting { " (marked for deletion)" } else { "" };
-            let mut entry = div()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(div().t(s, 12.0).font_weight(FontWeight::SEMIBOLD).text_color(theme::TEXT).child(format!("{place}{what}")));
-            for &c in &row.conflict.changed {
-                let name = prompt.columns.get(c).cloned().unwrap_or_default();
-                let loaded = row.loaded.get(c).map(value_text).unwrap_or_default();
-                let now = row.conflict.current.get(c).map(value_text).unwrap_or_default();
-                let yours = row.yours.iter().find(|(col, _)| *col == c).map(|(_, v)| cell_text(v));
-                let mut line = format!("{name}: was {}, now {}", short(loaded), short(now));
-                if let Some(y) = yours {
-                    line.push_str(&format!(", yours {}", short(y)));
+            let key = prompt
+                .key
+                .iter()
+                .map(|&k| format!("{} = {}", prompt.columns.get(k).cloned().unwrap_or_default(), row.loaded.get(k).map(value_text).unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let badge = match conflict_kind(row) {
+                ConflictKind::Both(cols) => {
+                    let names: Vec<String> = cols.iter().filter_map(|c| prompt.columns.get(*c).cloned()).collect();
+                    Some(format!("You both changed {}", names.join(", ")))
                 }
-                entry = entry.child(div().t(s, 12.0).text_color(theme::TEXT_DIM).child(line));
+                ConflictKind::Deleting => Some("Marked for deletion".to_string()),
+                ConflictKind::Separate => None,
+            };
+            let header = div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(9.))
+                .bg(theme::rgba8(35, 35, 58, 1.0))
+                .child(div().t(s, 13.0).font_weight(FontWeight::SEMIBOLD).child(place))
+                .child(div().t(s, 12.0).font_family(mono.clone()).text_color(theme::TEXT_DIM).overflow_hidden().text_ellipsis().whitespace_nowrap().min_w(px(0.)).child(key))
+                .child(div().flex_1())
+                .child(match badge {
+                    Some(b) => div()
+                        .flex_none()
+                        .t(s, 11.0)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(warn_fg)
+                        .bg(theme::rgba8(248, 113, 113, 0.16))
+                        .border_1()
+                        .border_color(theme::rgba8(248, 113, 113, 0.45))
+                        .rounded(px(999.))
+                        .px(px(8.))
+                        .py(px(2.))
+                        .child(b)
+                        .into_any_element(),
+                    None => div().flex_none().t(s, 11.0).text_color(theme::TEXT_DIM).child("Different columns changed").into_any_element(),
+                });
+            let column_heads = div()
+                .flex()
+                .t(s, 12.0)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::TEXT_MUTED)
+                .border_b_1()
+                .border_color(theme::BORDER)
+                .child(div().w(name_w).flex_none().px(px(12.)).py(px(7.)).child("Column"))
+                .child(cell(note("Loaded", theme::TEXT_MUTED)))
+                .child(cell(note("Now in database", theme::TEXT_MUTED)))
+                .child(cell(note("Your change", theme::TEXT_MUTED)));
+            let lines = conflict_lines(row);
+            let count = lines.len();
+            let mut table = div().flex().flex_col().t(s, 12.0).child(column_heads);
+            for (i, line) in lines.into_iter().enumerate() {
+                let name = prompt.columns.get(line.col).cloned().unwrap_or_default();
+                // Struck through where their value replaced it.
+                let loaded = value(line.loaded, loaded_fg);
+                let loaded = if line.now.is_some() { div().line_through().child(loaded).into_any_element() } else { loaded };
+                let (now_el, now_bg) = match line.now {
+                    Some(v) => (value(v, theirs_fg), Some(theirs_bg)),
+                    None => (note("unchanged", theme::TEXT_MUTED), None),
+                };
+                let (yours_el, yours_bg_c) = match line.yours {
+                    Yours::Value(v) => (value(v, yours_fg), Some(yours_bg)),
+                    Yours::NotEdited => (note("not edited", theme::TEXT_MUTED), None),
+                    Yours::Deleted => (note("row deleted", warn_fg), None),
+                };
+                table = table.child(
+                    div()
+                        .flex()
+                        .when(i + 1 < count, |d| d.border_b_1().border_color(line_border))
+                        .child(div().w(name_w).flex_none().px(px(12.)).py(px(7.)).font_weight(FontWeight::MEDIUM).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name))
+                        .child(cell(loaded))
+                        .child(cell(now_el).when_some(now_bg, |d, bg| d.bg(bg)))
+                        .child(cell(yours_el).when_some(yours_bg_c, |d, bg| d.bg(bg))),
+                );
             }
-            list = list.child(entry);
+            list = list.child(div().border_1().border_color(theme::BORDER).rounded(px(8.)).overflow_hidden().child(header).child(table));
         }
         if total > CONFLICTS_SHOWN {
-            list = list.child(div().t(s, 12.0).text_color(theme::TEXT_MUTED).child(format!("…and {} more", total - CONFLICTS_SHOWN)));
+            list = list.child(div().t(s, 12.0).text_color(theme::TEXT_MUTED).child(format!("…and {} more rows", total - CONFLICTS_SHOWN)));
         }
+
+        // Only the list scrolls: the header and the buttons always stay on screen.
         let scroll = self.conflicts_scroll.clone();
         let body = div()
             .id("save-conflicts-list")
+            .flex_1()
+            .min_h(px(0.))
             .overflow_y_scroll()
             .track_scroll(&scroll)
-            .max_h(px(360.))
-            .px(px(20.))
-            .py(px(12.))
+            .px(px(22.))
+            .py(px(14.))
             .child(list)
             .into_any_element();
-        let body = self.scrollable("save-conflicts", &scroll, body, cx);
-        let intro = format!(
-            "{total} row(s) changed in the database since they were loaded{}. Nothing has been saved. Override writes your changes over theirs; Cancel keeps your changes queued so you can look again.",
-            if deleting > 0 { format!(", {deleting} of them marked for deletion") } else { String::new() }
-        );
-        let tab_id = prompt.tab_id.clone();
-        let modal = dialogs::modal_box(560.0)
-            .id("save-conflicts")
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(dialogs::modal_header(s, "Rows Changed Since Loaded", cx.listener(|this, _, _, cx| {
-                this.save_conflicts = None;
-                cx.notify();
-            })))
-            .child(div().px(px(20.)).pt(px(14.)).t(s, 13.0).text_color(theme::TEXT_DIM).child(intro))
-            .child(body)
+        let body = self.scrollable("save-conflicts", &scroll, body, cx).flex_1().min_h(px(0.));
+        let max_h = (f32::from(window.viewport_size().height) - 2.0 * dialogs::MODAL_GUTTER).max(240.0);
+
+        let title = if total == 1 { "1 row changed since you loaded it".to_string() } else { format!("{total} rows changed since you loaded them") };
+        let swatch = |color: theme::Rgba, label: &'static str| {
+            div().flex().items_center().gap(px(6.)).child(div().w(px(10.)).h(px(10.)).rounded(px(2.)).bg(color)).child(label)
+        };
+        let close = cx.listener(|this, _, _, cx| {
+            this.save_conflicts = None;
+            cx.notify();
+        });
+        let header = div()
+            .flex_none()
+            .flex()
+            .items_start()
+            .gap(px(14.))
+            .px(px(22.))
+            .pt(px(20.))
+            .pb(px(16.))
+            .border_b_1()
+            .border_color(theme::BORDER)
             .child(
                 div()
+                    .flex_none()
+                    .w(px(36.))
+                    .h(px(36.))
+                    .rounded(px(8.))
+                    .bg(theme::rgba8(255, 200, 50, 0.14))
                     .flex()
-                    .justify_end()
-                    .gap(px(8.))
-                    .px(px(20.))
-                    .py(px(14.))
-                    .border_t_1()
-                    .border_color(theme::BORDER)
-                    .child(dialogs::button("conflict-cancel", s, "Cancel", Btn::Primary, false, cx.listener(|this, _, _, cx| {
-                        this.save_conflicts = None;
-                        cx.notify();
-                    })))
-                    .child(dialogs::button("conflict-override", s, "Override", Btn::Stop, false, cx.listener(move |this, _, _, cx| {
-                        this.save_conflicts = None;
-                        this.start_save(&tab_id, false, None, cx);
-                    }))),
+                    .items_center()
+                    .justify_center()
+                    .t(s, 18.0)
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme::AMBER)
+                    .child("!"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(div().t(s, 17.0).font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(div().t(s, 13.0).text_color(theme::TEXT_DIM).child("Someone else saved changes to these rows. Nothing has been written yet.")),
+            )
+            .child(
+                div()
+                    .id("conflict-close")
+                    .flex_none()
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(|st| st.bg(theme::BG_HOVER))
+                    .on_click(close)
+                    .child(crate::ui::icons::icon(crate::ui::icons::Icon::Close, s.fs(14.0), theme::TEXT_MUTED)),
             );
+        let legend = div()
+            .flex_none()
+            .flex()
+            .gap(px(16.))
+            .px(px(22.))
+            .py(px(10.))
+            .bg(theme::BG_PANEL)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .t(s, 12.0)
+            .text_color(theme::TEXT_DIM)
+            .child(swatch(theme::rgba8(59, 59, 82, 1.0), "Loaded"))
+            .child(swatch(theme::rgba8(91, 140, 255, 1.0), "Now in database"))
+            .child(swatch(theme::AMBER, "Your change"));
+        let tab_id = prompt.tab_id.clone();
+        let footer = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(22.))
+            .py(px(14.))
+            .border_t_1()
+            .border_color(theme::BORDER)
+            .bg(theme::BG_PANEL)
+            .child(div().flex_1().t(s, 12.0).text_color(theme::TEXT_DIM).child("Override writes your changes over theirs. Cancel keeps your changes queued."))
+            .child(dialogs::button("conflict-override", s, "Override", Btn::Stop, false, cx.listener(move |this, _, _, cx| {
+                this.save_conflicts = None;
+                this.start_save(&tab_id, false, None, cx);
+            })))
+            .child(dialogs::button("conflict-cancel", s, "Cancel", Btn::Primary, false, cx.listener(|this, _, _, cx| {
+                this.save_conflicts = None;
+                cx.notify();
+            })));
+        let modal = dialogs::modal_box(720.0)
+            .id("save-conflicts")
+            .occlude()
+            .flex()
+            .flex_col()
+            .max_h(px(max_h))
+            .overflow_hidden()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(header)
+            .child(legend)
+            .child(body)
+            .child(footer);
         Some(
             overlay(0.6)
                 .id("save-conflicts-overlay")
@@ -720,4 +938,52 @@ pub fn saved_summary(r: &SaveReport) -> SharedString {
         text.push_str(&format!(" ({} already deleted by someone else)", r.already_deleted.len()));
     }
     text.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(changed: Vec<usize>, deleting: bool, yours: Vec<(usize, Cell)>) -> ConflictRow {
+        ConflictRow {
+            conflict: Conflict {
+                row: RowRef::Data(2),
+                current: vec![json!(3), json!("Fast as a Shark"), json!("1.29"), json!(263500)],
+                changed,
+                deleting,
+            },
+            shown_at: Some(3),
+            loaded: vec![json!(3), json!("Fast As a Shark"), json!("0.99"), Value::Null],
+            yours,
+        }
+    }
+
+    #[test]
+    fn both_changed_lists_theirs_then_your_other_edits() {
+        let r = row(vec![1, 2], false, vec![(1, Cell::Value("Live".into())), (3, Cell::Now)]);
+        assert_eq!(conflict_kind(&r), ConflictKind::Both(vec![1]));
+        let lines = conflict_lines(&r);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], ConflictLine { col: 1, loaded: "Fast As a Shark".into(), now: Some("Fast as a Shark".into()), yours: Yours::Value("Live".into()) });
+        assert_eq!(lines[1].yours, Yours::NotEdited);
+        assert_eq!(lines[1].now.as_deref(), Some("1.29"));
+        assert_eq!(lines[2], ConflictLine { col: 3, loaded: "NULL".into(), now: None, yours: Yours::Value("NOW()".into()) });
+    }
+
+    #[test]
+    fn a_row_being_deleted_shows_only_their_changes() {
+        let r = row(vec![2], true, vec![(1, Cell::Value("ignored".into()))]);
+        assert_eq!(conflict_kind(&r), ConflictKind::Deleting);
+        let lines = conflict_lines(&r);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].yours, Yours::Deleted);
+    }
+
+    #[test]
+    fn different_columns_are_not_a_clash() {
+        let r = row(vec![3], false, vec![(1, Cell::Value("x".into()))]);
+        assert_eq!(conflict_kind(&r), ConflictKind::Separate);
+        assert_eq!(conflict_lines(&r).iter().map(|l| l.col).collect::<Vec<_>>(), vec![3, 1]);
+    }
 }
