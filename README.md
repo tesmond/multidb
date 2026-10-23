@@ -189,8 +189,13 @@ cargo build --release
 Releases are built locally on a Mac and published through the GitHub API
 (there is no CI workflow):
 
-1. Commit your changes and push to `main`.
+1. Commit your changes on `main`.
 2. Run `make release VERSION=x.y.z` with `GITHUB_TOKEN` set (or logged in with `gh`).
+
+All git steps (fetching tags, pushing the bump and the `vx.y.z` tag) go over
+SSH to `git@github.com:tesmond/multidb.git` using your SSH key, whatever URL
+`origin` has; set `GIT_REMOTE` to use another. The token is only used for the
+GitHub API calls that create the release and upload the zip.
 
 This sets `version` in `Cargo.toml` (and `Cargo.lock`) to `x.y.z`, commits and
 pushes the bump as "Release vx.y.z", builds `MultiDB.app`, zips it with a

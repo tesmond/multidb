@@ -7,8 +7,13 @@
 # "Release v<version>", pushes it, then builds and publishes v<version>.
 # Refuses to run if tag v<version> already exists or the tree is dirty.
 #
-# Token: $GITHUB_TOKEN (or $GH_TOKEN), falling back to `gh auth token`.
-# Needs repo "contents: write" (fine-grained) or "repo" (classic) scope.
+# Git (fetching tags, pushing the bump commit and the release tag) goes over
+# SSH to $GIT_REMOTE (default git@github.com:<repo>.git) with your SSH key,
+# whatever URL `origin` has.
+#
+# Creating the GitHub release and uploading the zip can't be done over git, so
+# those still use the REST API with $GITHUB_TOKEN (or $GH_TOKEN, falling back
+# to `gh auth token`). Needs "contents: write" (fine-grained) or "repo" scope.
 #
 # DRY_RUN=1 bumps, builds, packages and prints the changelog, then reverts the
 # bump; nothing is committed, pushed or published.
@@ -18,6 +23,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
 REPO=${REPO:-tesmond/multidb}
+GIT_REMOTE=${GIT_REMOTE:-git@github.com:$REPO.git}
 API=https://api.github.com
 DRY_RUN=${DRY_RUN:-0}
 
@@ -41,13 +47,22 @@ CURRENT=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n 1)
 [ -z "$(git status --porcelain --untracked-files=no)" ] \
   || die "working tree has uncommitted changes - commit or stash them first"
 
-git fetch --quiet --tags origin
+BRANCH=$(git symbolic-ref --quiet --short HEAD) \
+  || die "not on a branch (detached HEAD) - check out the branch to release"
+
+git ls-remote --exit-code "$GIT_REMOTE" HEAD >/dev/null 2>&1 \
+  || die "can't reach $GIT_REMOTE over SSH - check your key (ssh -T git@github.com)"
+
+git fetch --quiet --tags "$GIT_REMOTE"
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   die "tag $TAG already exists - pick a newer version"
 fi
 
-if [ "$DRY_RUN" != 1 ] && [ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
-  die "HEAD is not on origin - push it first"
+if [ "$DRY_RUN" != 1 ]; then
+  git fetch --quiet "$GIT_REMOTE" "refs/heads/$BRANCH" \
+    || die "branch $BRANCH is not on $GIT_REMOTE - push it first"
+  git merge-base --is-ancestor FETCH_HEAD HEAD \
+    || die "$BRANCH on $GIT_REMOTE has commits you don't - pull first"
 fi
 
 if [ "$DRY_RUN" != 1 ]; then
@@ -73,10 +88,14 @@ if [ "$CURRENT" != "$VERSION" ]; then
   if [ "$DRY_RUN" != 1 ]; then
     git add Cargo.toml Cargo.lock
     git commit --quiet -m "Release $TAG"
-    git push --quiet origin HEAD || die "pushing the version bump failed"
   fi
 else
   echo "Cargo.toml is already at $VERSION"
+fi
+if [ "$DRY_RUN" != 1 ]; then
+  # Pushes the bump commit (and any local commits not yet on the remote).
+  git push --quiet "$GIT_REMOTE" "HEAD:refs/heads/$BRANCH" \
+    || die "pushing $BRANCH to $GIT_REMOTE failed"
 fi
 SHA=$(git rev-parse HEAD)
 
@@ -146,6 +165,15 @@ gh_api() { # method url [curl args...]
     -H "X-GitHub-Api-Version: 2022-11-28" "$@"
 }
 
+# Tag the release commit over SSH; the release below attaches to this tag.
+git tag -a "$TAG" -m "multidb $TAG" "$SHA"
+git push --quiet "$GIT_REMOTE" "refs/tags/$TAG" || {
+  git tag -d "$TAG" >/dev/null
+  die "pushing tag $TAG to $GIT_REMOTE failed"
+}
+echo "Pushed tag $TAG"
+TAG_HINT="to retry, delete the tag first: git tag -d $TAG && git push $GIT_REMOTE :refs/tags/$TAG"
+
 # Created as a draft so the updater (which reads releases/latest) never sees
 # a release whose assets are still uploading; published once they're in.
 PAYLOAD=$(jq -n --arg tag "$TAG" --arg sha "$SHA" --arg name "multidb $TAG" \
@@ -153,7 +181,7 @@ PAYLOAD=$(jq -n --arg tag "$TAG" --arg sha "$SHA" --arg name "multidb $TAG" \
   '{tag_name:$tag, target_commitish:$sha, name:$name, body:$body, draft:true, prerelease:false}')
 
 RELEASE=$(gh_api POST "$API/repos/$REPO/releases" -d "$PAYLOAD") \
-  || die "creating the release failed (check the token's permissions)"
+  || die "creating the release failed (check the token's permissions); $TAG_HINT"
 RELEASE_ID=$(printf '%s' "$RELEASE" | jq -r .id)
 UPLOAD_URL=$(printf '%s' "$RELEASE" | jq -r .upload_url | sed 's/{.*}//')
 echo "Created draft release $RELEASE_ID"
@@ -169,5 +197,4 @@ done
 URL=$(gh_api PATCH "$API/repos/$REPO/releases/$RELEASE_ID" -d '{"draft":false}' | jq -r .html_url) \
   || die "publishing draft release $RELEASE_ID failed"
 
-git fetch --quiet --tags origin
 echo "Published $URL"
