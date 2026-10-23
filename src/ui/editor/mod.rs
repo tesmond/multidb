@@ -665,7 +665,7 @@ impl SqlEditor {
                         Selection { anchor: start + c.len_utf8(), head: start + c.len_utf8() + inner.len() },
                         EditKind::Type,
                     );
-                    self.after_change(true, cx);
+                    self.after_typed(text, cx);
                     return;
                 }
                 let next_ok = match next {
@@ -679,13 +679,33 @@ impl SqlEditor {
                     self.buffer.edit(range.clone(), &pair, EditKind::Type);
                     let pos = range.start + c.len_utf8();
                     self.buffer.selection = Selection::cursor(pos);
-                    self.after_change(true, cx);
+                    self.after_typed(text, cx);
                     return;
                 }
             }
         }
         self.buffer.edit(range, text, EditKind::Type);
-        self.after_change(true, cx);
+        self.after_typed(text, cx);
+    }
+
+    /// Finish a typed edit, deciding what the completion popup does from the
+    /// last character typed.
+    ///
+    /// Only identifier characters (`a-zA-Z`, `.`, `_`, `-`) open the popup.
+    /// Whitespace, commas and other punctuation close it, so a quick
+    /// `space`/`,` followed by `enter` inserts a newline rather than whatever
+    /// option happened to be selected (e.g. a list of ids inside `IN (...)`).
+    /// Digits keep an already-open list filtering (`table1`) but never open one.
+    fn after_typed(&mut self, text: &str, cx: &mut Context<Self>) {
+        match text.chars().last() {
+            Some(c) if c.is_ascii_alphabetic() || matches!(c, '.' | '_' | '-') => self.after_change(true, cx),
+            Some(c) if c.is_ascii_digit() && self.completion.is_some() => self.after_change(true, cx),
+            _ => {
+                self.completion = None;
+                self.completion_task = None;
+                self.after_change(false, cx);
+            }
+        }
     }
 
     fn is_auto_closed_at(&self, pos: usize) -> bool {

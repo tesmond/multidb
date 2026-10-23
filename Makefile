@@ -1,4 +1,4 @@
-.PHONY: build dev check test test-db test-db-down fetch bundle
+.PHONY: build dev check test test-db test-db-down fetch bundle release release-dry-run
 
 # Extra cargo flags, e.g. `make build CARGO_FLAGS=--no-default-features` to
 # compile the Metal shaders ahead of time (needs Xcode, not just the Command
@@ -12,6 +12,21 @@ build:
 
 bundle:
 	@sh packaging/macos/bundle.sh
+
+# `make release VERSION=1.2.3`: set Cargo.toml's version to VERSION, commit
+# and push the bump, build the macOS app and publish GitHub release v<VERSION>
+# with a changelog of commits since the last tag. Needs GITHUB_TOKEN (or `gh`
+# login). See packaging/release.sh.
+VERSION ?=
+release:
+	@[ -n "$(VERSION)" ] || { echo "usage: make release VERSION=x.y.z" >&2; exit 1; }
+	@CARGO_FLAGS="$(CARGO_FLAGS)" sh packaging/release.sh "$(VERSION)"
+
+# Same bump, build and changelog, but the bump is reverted afterwards and
+# nothing is committed, pushed or uploaded.
+release-dry-run:
+	@[ -n "$(VERSION)" ] || { echo "usage: make release-dry-run VERSION=x.y.z" >&2; exit 1; }
+	@CARGO_FLAGS="$(CARGO_FLAGS)" DRY_RUN=1 sh packaging/release.sh "$(VERSION)"
 
 dev:
 	@$(call CARGO,run)

@@ -139,7 +139,7 @@ HOME=/tmp/multidb-demo CFFIXED_USER_HOME=/tmp/multidb-demo \
 
 - `src`: the whole application - GPUI front end, Rust backend, and command handlers
 - `icons`: application icons (macOS iconset PNGs and Windows `icon.ico`)
-- `packaging`: release packaging (macOS `.app` bundle script)
+- `packaging`: release packaging (macOS `.app` bundle script, `release.sh` GitHub publisher)
 - `src/ui`: GPUI window, workspace layout, navigator, SQL editor, results grid, and dialogs
 - `src/commands.rs`: command handlers the UI calls into
 - `src/connections.rs`: connection manager, DSN logic, and Kubernetes port-forwarding
@@ -183,6 +183,21 @@ just as well:
 ```bash
 cargo build --release
 ```
+
+### Releasing
+
+Releases are built locally on a Mac and published through the GitHub API
+(there is no CI workflow):
+
+1. Commit your changes and push to `main`.
+2. Run `make release VERSION=x.y.z` with `GITHUB_TOKEN` set (or logged in with `gh`).
+
+This sets `version` in `Cargo.toml` (and `Cargo.lock`) to `x.y.z`, commits and
+pushes the bump as "Release vx.y.z", builds `MultiDB.app`, zips it with a
+`.sha256` (required by the in-app updater), and publishes release `vx.y.z`
+whose notes list the commits since the previous tag.
+`make release-dry-run VERSION=x.y.z` does the bump and build and prints the
+notes, then reverts the bump without committing or uploading. Requires `jq`.
 
 ### Metal shaders on macOS
 
