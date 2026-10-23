@@ -194,7 +194,29 @@ for f in "$ZIP_NAME" "$ZIP_NAME.sha256"; do
     || die "uploading $f failed - draft release $RELEASE_ID left for inspection"
 done
 
+# The in-app updater needs exactly these two files (see src/updater.rs:
+# MultiDB-*-macos-<arch>.zip plus <zip>.sha256). Check GitHub really has them,
+# fully uploaded and the right size, before the release goes public.
+check_assets() { # release json on stdin; exits non-zero on a mismatch
+  jq -e --arg zip "$ZIP_NAME" --arg sha "$ZIP_NAME.sha256" \
+    --argjson zs "$(wc -c < "$DIST/$ZIP_NAME" | tr -d ' ')" \
+    --argjson ss "$(wc -c < "$DIST/$ZIP_NAME.sha256" | tr -d ' ')" '
+    [.assets[] | select(.state == "uploaded") | {(.name): .size}] | add // {}
+    | .[$zip] == $zs and .[$sha] == $ss' >/dev/null
+}
+gh_api GET "$API/repos/$REPO/releases/$RELEASE_ID" | check_assets \
+  || die "draft release $RELEASE_ID is missing $ZIP_NAME or its .sha256 - not publishing"
+echo "Verified assets on draft release $RELEASE_ID"
+
 URL=$(gh_api PATCH "$API/repos/$REPO/releases/$RELEASE_ID" -d '{"draft":false}' | jq -r .html_url) \
   || die "publishing draft release $RELEASE_ID failed"
+
+# What the updater sees: releases/latest must now be this tag with both files.
+LATEST=$(gh_api GET "$API/repos/$REPO/releases/latest") \
+  || die "published $URL but could not read releases/latest back"
+[ "$(printf '%s' "$LATEST" | jq -r .tag_name)" = "$TAG" ] \
+  || die "published $URL but releases/latest is not $TAG - check it on GitHub"
+printf '%s' "$LATEST" | check_assets \
+  || die "published $URL but its assets don't match - the updater won't find them"
 
 echo "Published $URL"
