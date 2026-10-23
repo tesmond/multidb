@@ -306,10 +306,6 @@ impl Buffer {
         let text = self.line_text(line);
         text.char_indices().nth(col).map(|(i, _)| ls + i).unwrap_or(ls + text.len())
     }
-
-    pub fn indentation_of_line(&self, line: usize) -> usize {
-        self.line_text(line).chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum()
-    }
 }
 
 #[cfg(test)]

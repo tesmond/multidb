@@ -1052,8 +1052,8 @@ impl SqlEditor {
             return;
         }
         let range = self.buffer.selection.range();
-        let indent = self.indent_for_newline(range.start);
-        // Strip trailing whitespace on the line being split (CodeMirror does).
+        // No auto-indent: the new line starts at column 0 (Format lays the
+        // SQL out). Strip trailing whitespace on the line being split.
         let line = self.buffer.line_of(range.start);
         let ls = self.buffer.line_start(line);
         let before = &self.buffer.text()[ls..range.start];
@@ -1064,21 +1064,8 @@ impl SqlEditor {
         while self.buffer.char_at(end) == Some(' ') {
             end += 1;
         }
-        let text = format!("\n{}", " ".repeat(indent));
-        self.buffer.edit(start..end, &text, EditKind::Other);
+        self.buffer.edit(start..end, "\n", EditKind::Other);
         self.after_change(false, cx);
-    }
-
-    fn indent_for_newline(&self, pos: usize) -> usize {
-        let spans = crate::ui::sql::statements(&self.tokens);
-        let inside = spans.iter().find(|s| {
-            let terminated = self.tokens.get(s.end_token.saturating_sub(1)).is_some_and(|t| t.kind == Tok::Semi);
-            s.from < pos && (pos < s.to || (!terminated && pos >= s.to))
-        });
-        match inside {
-            Some(span) => self.buffer.indentation_of_line(self.buffer.line_of(span.from)) + 2,
-            None => 0,
-        }
     }
 
     fn a_tab(&mut self, _: &Tab, window: &mut Window, cx: &mut Context<Self>) {

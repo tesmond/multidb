@@ -188,7 +188,7 @@ echo "Created draft release $RELEASE_ID"
 
 for f in "$ZIP_NAME" "$ZIP_NAME.sha256"; do
   case $f in *.zip) ct=application/zip ;; *) ct=text/plain ;; esac
-  echo "Uploading $f…"
+  echo "Uploading ${f}..."
   gh_api POST "$UPLOAD_URL?name=$f" -H "Content-Type: $ct" \
     --data-binary "@$DIST/$f" -o /dev/null \
     || die "uploading $f failed - draft release $RELEASE_ID left for inspection"
