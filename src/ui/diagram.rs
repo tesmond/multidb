@@ -686,7 +686,7 @@ impl Workspace {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let conn = this.active_tab().map(|t| t.conn_id.clone()).unwrap_or_default();
                                 let driver = this.connection(&conn).map(|c| c.config.driver.clone()).unwrap_or_else(|| "postgres".into());
-                                let sql = rel::query_sql(&driver, &schema_name, &table_name);
+                                let sql = crate::ui::sql_text::formatted(&rel::query_sql(&driver, &schema_name, &table_name), &driver);
                                 this.selected_conn_id = conn.clone();
                                 this.open_query_tab_with_sql(&conn, "", &sql, Some(table_name.clone()), cx);
                             }))

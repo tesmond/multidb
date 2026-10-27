@@ -112,40 +112,7 @@ impl Workspace {
                         .hover(|st| st.bg(theme::ACCENT_HOVER))
                         .on_click(cx.listener(move |this, _, _, cx| this.run_query(&t2, cx))),
                 )
-                .child({
-                    // A secondary action: Run's indigo as an outline rather
-                    // than a fill, so Run and Save stay the primary buttons.
-                    let text = theme::hex(0xa5b4fc);
-                    let text_hover = theme::hex(0xc7d2fe);
-                    let b = div()
-                        .id("btn-format")
-                        .group("btn-format")
-                        .px(px(14.))
-                        .py(px(5.))
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(theme::with_alpha(theme::ACCENT, 0.55))
-                        .text_color(text)
-                        .t(s, 12.0)
-                        .font_weight(FontWeight::MEDIUM)
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(icon(Icon::Format, s.fs(12.0), text).group_hover("btn-format", move |st| st.text_color(text_hover)))
-                        .child("Format");
-                    if empty {
-                        b.opacity(0.5).cursor(CursorStyle::OperationNotAllowed)
-                    } else {
-                        b.cursor_pointer()
-                            .hover(move |st| {
-                                st.bg(theme::with_alpha(theme::ACCENT, 0.12))
-                                    .border_color(theme::ACCENT_HOVER)
-                                    .text_color(text_hover)
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| this.format_tab_sql(&t4, window, cx)))
-                    }
-                })
+                .child(self.render_format_split(&t4, empty, s, cx))
                 .child({
                     let b = btn("btn-save", Icon::Save, "Save", theme::SAVE_BLUE, theme::TRANSPARENT);
                     if empty {
@@ -164,6 +131,157 @@ impl Workspace {
             .child(toolbar)
             .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(editor))
             .into_any_element()
+    }
+
+    /// The Format split button: "Format" formats the tab's SQL (or the
+    /// selection); the arrow opens a menu choosing the default style, which
+    /// the button and every statement the app writes for you then use.
+    fn render_format_split(&mut self, tab_id: &str, empty: bool, s: Scale, cx: &mut Context<Self>) -> AnyElement {
+        use crate::ui::sql::format::{default_style, SqlStyle};
+        // A secondary action: Run's indigo as an outline rather than a fill,
+        // so Run and Save stay the primary buttons.
+        let text = theme::hex(0xa5b4fc);
+        let text_hover = theme::hex(0xc7d2fe);
+        let open = self.format_style_open.as_deref() == Some(tab_id);
+        let current = default_style();
+        let tid = tab_id.to_string();
+        let format = div()
+            .id("btn-format")
+            .group("btn-format")
+            .pl(px(14.))
+            .pr(px(10.))
+            .py(px(5.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(icon(Icon::Format, s.fs(12.0), text).group_hover("btn-format", move |st| st.text_color(text_hover)))
+            .child("Format");
+        let format = if empty {
+            format.opacity(0.5).cursor(CursorStyle::OperationNotAllowed)
+        } else {
+            let tid = tid.clone();
+            format
+                .cursor_pointer()
+                .hover(move |st| st.bg(theme::with_alpha(theme::ACCENT, 0.12)).text_color(text_hover))
+                .on_click(cx.listener(move |this, _, window, cx| this.format_tab_sql(&tid, window, cx)))
+        };
+        let arrow = {
+            let tid = tid.clone();
+            div()
+                .id("btn-format-style")
+                .group("btn-format-style")
+                .px(px(6.))
+                .py(px(5.))
+                .flex()
+                .items_center()
+                .border_l_1()
+                .border_color(theme::with_alpha(theme::ACCENT, 0.55))
+                .cursor_pointer()
+                .when(open, |d| d.bg(theme::with_alpha(theme::ACCENT, 0.12)))
+                .hover(move |st| st.bg(theme::with_alpha(theme::ACCENT, 0.12)))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.conn_select_open = None;
+                    this.schema_select_open = None;
+                    this.format_style_open = if this.format_style_open.is_some() { None } else { Some(tid.clone()) };
+                    cx.notify();
+                }))
+                .child(
+                    icon(Icon::ChevronDown, s.fs(11.0), text)
+                        .group_hover("btn-format-style", move |st| st.text_color(text_hover)),
+                )
+        };
+        let button = div()
+            .flex()
+            .rounded(px(4.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(if open { theme::ACCENT_HOVER } else { theme::with_alpha(theme::ACCENT, 0.55) })
+            .text_color(text)
+            .t(s, 12.0)
+            .font_weight(FontWeight::MEDIUM)
+            .child(format)
+            .child(arrow);
+        let mut root = div().relative().flex().flex_shrink_0().child(button);
+        if open {
+            let mut menu = div()
+                .id("format-style-menu")
+                .occlude()
+                .absolute()
+                .right_0()
+                .top(px(5.0 + 5.0 + 2.0 + s.lh_f(12.0) + 4.0))
+                .min_w(px(220.))
+                .p(px(4.))
+                .border_1()
+                .border_color(theme::BORDER)
+                .rounded(px(8.))
+                .bg(theme::BG_PANEL)
+                .shadow(vec![shadow(0.0, 14.0, 40.0, 0.0, theme::rgba8(0, 0, 0, 0.32))])
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .px(px(10.))
+                        .pt(px(6.))
+                        .pb(px(4.))
+                        .t(s, 11.0)
+                        .text_color(theme::TEXT_MUTED)
+                        .child("Default SQL format"),
+                );
+            for style in SqlStyle::ALL {
+                let selected = style == current;
+                let (name, hint) = match style {
+                    SqlStyle::Mozilla => ("Mozilla (default)", "Keywords on their own lines"),
+                    SqlStyle::Holywell => ("Holywell", "sqlstyle.guide river alignment"),
+                };
+                menu = menu.child(
+                    div()
+                        .id(SharedString::from(format!("format-style-{}", style.label())))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::BG_HOVER))
+                        .when(selected, |d| d.bg(theme::rgba8(255, 255, 255, 0.08)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.format_style_open = None;
+                            this.set_sql_style(style, cx);
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(div().t(s, 12.0).text_color(theme::TEXT).child(name))
+                                .child(div().t(s, 11.0).text_color(theme::TEXT_MUTED).child(hint)),
+                        )
+                        .when(selected, |d| d.child(icon(Icon::Check, s.fs(12.0), theme::ACCENT))),
+                );
+            }
+            root = root
+                .child(
+                    deferred(
+                        div()
+                            .id("format-style-backdrop")
+                            .absolute()
+                            .top(px(-2000.))
+                            .left(px(-2000.))
+                            .w(px(8000.))
+                            .h(px(8000.))
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.format_style_open = None;
+                                cx.notify();
+                            })),
+                    )
+                    .with_priority(3),
+                )
+                .child(deferred(menu).with_priority(4));
+        }
+        root.into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]

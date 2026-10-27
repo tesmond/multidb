@@ -286,6 +286,8 @@ pub struct Workspace {
     pub conn_select_open: Option<(TabId, usize)>,
     /// The default-schema dropdown: which tab's is open, and the highlighted row.
     pub schema_select_open: Option<(TabId, usize)>,
+    /// The Format button's style menu, open on this tab.
+    pub format_style_open: Option<TabId>,
     /// The "SQL Template" submenu of a table's context menu is showing.
     pub nav_template_open: bool,
 
@@ -346,6 +348,7 @@ pub fn list_font_families(ts: &gpui::TextSystem) -> FontLists {
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = UiSettings::load();
+        crate::ui::sql::format::set_default_style(settings.sql_style);
         let scale = scale_of(&settings);
         crate::ui::theme::set_ui_font(settings.ui_font_family.as_deref());
         let mono_family = mono_family_of(&settings, cx);
@@ -450,6 +453,7 @@ impl Workspace {
             nav_index_pending: std::collections::HashMap::new(),
             conn_select_open: None,
             schema_select_open: None,
+            format_style_open: None,
             nav_template_open: false,
             hovered: None,
             settings,
@@ -794,6 +798,16 @@ impl Workspace {
             editor.update(cx, |e, cx| e.format_sql(cx));
             editor.update(cx, |e, _| e.focus(window));
         }
+    }
+
+    /// Make `style` the default for the Format button and generated SQL.
+    pub fn set_sql_style(&mut self, style: crate::ui::sql::format::SqlStyle, cx: &mut Context<Self>) {
+        crate::ui::sql::format::set_default_style(style);
+        if self.settings.sql_style != style {
+            self.settings.sql_style = style;
+            self.settings.save();
+        }
+        cx.notify();
     }
 
     pub fn set_tab_sql(&mut self, id: &str, sql: &str, cx: &mut Context<Self>) {

@@ -74,8 +74,9 @@ pub fn ident(name: &str, driver: &str) -> String {
     }
 }
 
-/// `sql` laid out in the Mozilla SQL style for the connection's driver; what
-/// every statement the app writes for you is passed through.
+/// `sql` laid out in the default SQL style (Mozilla or Holywell, picked from
+/// the Format button's menu) for the connection's driver; what every
+/// statement the app writes for you is passed through.
 pub fn formatted(sql: &str, driver: &str) -> String {
     crate::ui::sql::format::format_sql(sql, crate::ui::sql::Dialect::for_driver(driver))
 }

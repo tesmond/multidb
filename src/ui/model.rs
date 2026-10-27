@@ -237,6 +237,8 @@ pub struct UiSettings {
     /// SQL editor font size in px; `None` is [`DEFAULT_FONT_SIZE`].
     pub editor_font_size: Option<f64>,
     pub connection_order: Vec<String>,
+    /// Style the Format button and generated SQL use.
+    pub sql_style: crate::ui::sql::format::SqlStyle,
     pub relationship_layouts: BTreeMap<String, HashMap<String, LayoutPoint>>,
 }
 

@@ -107,6 +107,7 @@ impl Workspace {
         self.output.update(cx, |o, cx| o.close_overlays(cx));
         self.conn_select_open = None;
         self.schema_select_open = None;
+        self.format_style_open = None;
         cx.notify();
     }
 

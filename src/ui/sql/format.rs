@@ -1,4 +1,5 @@
-//! SQL formatter following Mozilla's SQL style guide
+//! SQL formatter with two layouts, picked by [`SqlStyle`]. The default
+//! follows Mozilla's SQL style guide
 //! (<https://docs.telemetry.mozilla.org/concepts/sql_style>):
 //!
 //! * reserved keywords in upper case, function names in lower case;
@@ -11,6 +12,13 @@
 //! * CTEs as `name AS (` … `)` with the body indented and a blank line before
 //!   the final query; subqueries are opened the same way.
 //!
+//! The alternative follows Simon Holywell's guide
+//! (<https://www.sqlstyle.guide/>): root keywords right-aligned so their
+//! arguments form a "river" down the page, list items aligned under the first
+//! one, `AND` / `OR` right-aligned to the river, joins indented past it, and
+//! subqueries opened inline after their bracket with their own river. Keywords
+//! and built-in functions are upper case.
+//!
 //! The formatter only ever changes whitespace and the case of keywords and
 //! built-in function names. Identifiers are never re-cased (MySQL table names
 //! are case-sensitive on Linux) and nothing is added or removed. As a final
@@ -18,6 +26,55 @@
 //! token: if anything differs, the input is returned unchanged.
 
 use super::tokenizer::{tokenize, Dialect, Tok};
+use serde::{Deserialize, Serialize};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Which style guide the formatter lays SQL out by.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SqlStyle {
+    /// <https://docs.telemetry.mozilla.org/concepts/sql_style>
+    #[default]
+    Mozilla,
+    /// <https://www.sqlstyle.guide/>
+    Holywell,
+}
+
+impl SqlStyle {
+    pub const ALL: [SqlStyle; 2] = [SqlStyle::Mozilla, SqlStyle::Holywell];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SqlStyle::Mozilla => "Mozilla",
+            SqlStyle::Holywell => "Holywell",
+        }
+    }
+}
+
+/// The style [`format_sql`] uses: the Format button and every statement the
+/// app writes for you. Set from the user's settings.
+static DEFAULT_STYLE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_default_style(style: SqlStyle) {
+    DEFAULT_STYLE.store(style as u8, Ordering::Relaxed);
+}
+
+pub fn default_style() -> SqlStyle {
+    match DEFAULT_STYLE.load(Ordering::Relaxed) {
+        1 => SqlStyle::Holywell,
+        _ => SqlStyle::Mozilla,
+    }
+}
+
+thread_local! {
+    /// The style of the format call running on this thread.
+    static STYLE: Cell<SqlStyle> = const { Cell::new(SqlStyle::Mozilla) };
+}
+
+fn river() -> bool {
+    STYLE.with(|s| s.get()) == SqlStyle::Holywell
+}
 
 /// Lines are kept to this width where the style leaves a choice (a single
 /// argument on its keyword's line, a window or `VALUES` list kept inline).
@@ -104,9 +161,21 @@ const INTERVAL_UNITS: &[&str] = &[
     "hour_minute", "hour_second", "minute_second", "year_month",
 ];
 
-/// Format `sql` in the Mozilla style. Returns the input unchanged if it cannot
-/// be formatted without changing its tokens.
+/// Format `sql` in the default style (see [`set_default_style`]).
 pub fn format_sql(sql: &str, dialect: Dialect) -> String {
+    format_sql_with(sql, dialect, default_style())
+}
+
+/// Format `sql` in `style`. Returns the input unchanged if it cannot be
+/// formatted without changing its tokens.
+pub fn format_sql_with(sql: &str, dialect: Dialect, style: SqlStyle) -> String {
+    let prev = STYLE.with(|s| s.replace(style));
+    let out = format_checked(sql, dialect);
+    STYLE.with(|s| s.set(prev));
+    out
+}
+
+fn format_checked(sql: &str, dialect: Dialect) -> String {
     if sql.trim().is_empty() {
         return sql.to_string();
     }
@@ -287,10 +356,12 @@ fn prepare(sql: &str, dialect: Dialect) -> Vec<T> {
             // A function call: built-ins lower case, user identifiers as
             // written. A type with a size (`VARCHAR(10)`) in DDL or a cast is
             // a type; elsewhere `date(x)` is a function.
+            // Holywell writes built-in functions in upper case too.
+            let function = if river() { Case::Upper } else { Case::Lower };
             match t.kind {
-                Tok::Keyword | Tok::Builtin => Case::Lower,
+                Tok::Keyword | Tok::Builtin => function,
                 Tok::Type if ddl || after_cast => Case::Upper,
-                Tok::Type => Case::Lower,
+                Tok::Type => function,
                 _ => Case::Keep,
             }
         } else if matches!(t.kind, Tok::Bool | Tok::Null) {
@@ -447,6 +518,9 @@ enum Clause {
 
 /// A query at indent level `n`: CTEs, then one root keyword per clause.
 fn format_query(toks: &[T], n: usize) -> String {
+    if river() {
+        return river_query(toks, ind(n).len());
+    }
     let mut lines: Vec<String> = Vec::new();
     let mut toks = toks;
     // Leading comments.
@@ -855,11 +929,14 @@ struct Printer<'a> {
     /// Column the next character lands in, tracked as text is written so
     /// width checks stay O(1) however long the line gets.
     col: usize,
+    /// Column the printer started at: where a Holywell continuation line
+    /// (after a line comment) starts.
+    base: usize,
 }
 
 impl<'a> Printer<'a> {
     fn new(n: usize, col: usize) -> Self {
-        Printer { out: String::new(), prev: None, n, col }
+        Printer { out: String::new(), prev: None, n, col, base: col }
     }
 
     fn push(&mut self, text: &str) {
@@ -872,7 +949,20 @@ impl<'a> Printer<'a> {
 
     fn newline(&mut self, n: usize) {
         self.push("\n");
-        self.push(&ind(n));
+        if river() {
+            self.push(&sp(self.base));
+        } else {
+            self.push(&ind(n));
+        }
+    }
+
+    /// The column `next` will start in once `gap` has run.
+    fn next_col(&self, next: &T) -> usize {
+        match self.prev {
+            Some(p) if p.kind == Tok::LineComment => self.base,
+            Some(p) if needs_space(p, next) => self.col + 1,
+            _ => self.col,
+        }
     }
 
     fn gap(&mut self, prev: Option<&T>, next: &T) {
@@ -929,6 +1019,19 @@ fn print_group<'a>(p: &mut Printer<'a>, toks: &'a [T], open: usize, close: usize
     let inner = &toks[open + 1..close];
     let first_word = inner.iter().find(|t| !t.is_comment());
     let is_query = first_word.is_some_and(|t| t.is("select") || t.is("with") || (t.is("values") && open > 0 && !toks[open - 1].is("in")));
+    if river() {
+        let text = if is_query {
+            river_bracketed(inner, p.next_col(&toks[open]))
+        } else {
+            let mut q = Printer::new(n, p.next_col(&toks[open]));
+            q.token(&toks[open]);
+            print_tokens(&mut q, inner, n);
+            q.token(&toks[close]);
+            q.out
+        };
+        p.text(&toks[open], &toks[close], &text);
+        return;
+    }
     if is_query {
         let text = format!("(\n{}\n{})", format_query(inner, n + 1), ind(n));
         p.text(&toks[open], &toks[close], &text);
@@ -1018,6 +1121,21 @@ fn print_case<'a>(p: &mut Printer<'a>, toks: &'a [T], n: usize) {
     let parts = case_parts(toks);
     // CASE [operand]
     let head_end = parts.first().map_or(toks.len() - 1, |(k, _)| *k);
+    if river() {
+        // WHEN / ELSE / END aligned under CASE.
+        let col = p.next_col(&toks[0]);
+        let mut text = ritem(&toks[..head_end], col);
+        for (start, end) in &parts {
+            text.push('\n');
+            text.push_str(&sp(col));
+            text.push_str(&ritem(&toks[*start..*end], col));
+        }
+        text.push('\n');
+        text.push_str(&sp(col));
+        text.push_str(&toks[toks.len() - 1].text);
+        p.text(&toks[0], &toks[toks.len() - 1], &text);
+        return;
+    }
     let mut text = item(&toks[..head_end], n);
     for (start, end) in &parts {
         text.push('\n');
@@ -1260,6 +1378,242 @@ fn ind(n: usize) -> String {
     "  ".repeat(n)
 }
 
+fn sp(n: usize) -> String {
+    " ".repeat(n)
+}
+
+// ─── Holywell (river) layout ────────────────────────────────────────────────
+//
+// Every function here takes absolute columns rather than indent levels. A
+// query's "river" is the column just after its widest root keyword's first
+// word; `m` is the column the query's block starts at.
+
+/// One argument printed as if it started at column `col`.
+fn ritem(toks: &[T], col: usize) -> String {
+    let mut p = Printer::new(0, col);
+    print_tokens(&mut p, toks, 0);
+    p.out
+}
+
+fn width(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// A bracketed query opened inline: `(SELECT …` with the query's river
+/// starting just after the bracket at column `col`, and `)` at the end of the
+/// last line (on a line of its own after a line comment, which it would join).
+fn river_bracketed(inner: &[T], col: usize) -> String {
+    if inner.is_empty() {
+        return "()".into();
+    }
+    let q = river_query(inner, col + 1);
+    let pad = sp(col + 1);
+    let body = q.strip_prefix(pad.as_str()).unwrap_or(q.trim_start());
+    let close = if inner.last().is_some_and(|t| t.kind == Tok::LineComment) { format!("\n{})", sp(col)) } else { ")".into() };
+    format!("({body}{close}")
+}
+
+/// Whether a clause's keyword sits on the river (rather than past it).
+fn on_river(c: Clause) -> bool {
+    !matches!(c, Clause::Preamble | Clause::Join | Clause::On | Clause::Using)
+}
+
+/// A query whose block starts at column `m`.
+fn river_query(toks: &[T], m: usize) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut toks = toks;
+    while let Some(t) = toks.first().filter(|t| t.is_comment()) {
+        lines.push(format!("{}{}", sp(m), t.text));
+        toks = &toks[1..];
+    }
+    if toks.is_empty() {
+        return lines.join("\n");
+    }
+    if toks[0].kind == Tok::ParenL && matching(toks, 0) == Some(toks.len() - 1) {
+        lines.push(format!("{}{}", sp(m), river_bracketed(&toks[1..toks.len() - 1], m)));
+        return lines.join("\n");
+    }
+    let (ctes, rest) = if toks[0].is("with") { split_ctes(toks) } else { (None, toks) };
+    let clauses = split_clauses(rest);
+    let mut w = clauses.iter().filter(|(c, kw, _)| on_river(*c) && !kw.is_empty()).map(|(_, kw, _)| width(&kw[0].text)).max().unwrap_or(0);
+    if let Some((head, _)) = &ctes {
+        w = w.max(width(&head[0].text));
+    }
+    if let Some((head, list)) = ctes {
+        lines.push(river_ctes(head, &list, m, w));
+    }
+    if rest.is_empty() {
+        return lines.join("\n");
+    }
+    let river = m + w;
+    // `kw` right-aligned on the river by its first word.
+    let head = |kw: &[T]| {
+        let first = width(&kw[0].text);
+        let indent = river.saturating_sub(first).max(m);
+        let text = ritem(kw, indent);
+        format!("{}{}", sp(indent), text)
+    };
+    for (clause, kw, body) in &clauses {
+        match clause {
+            Clause::Preamble => lines.push(format!("{}{}", sp(m), ritem(body, m))),
+            Clause::Select | Clause::GroupBy | Clause::OrderBy | Clause::Returning | Clause::Window | Clause::Set | Clause::From | Clause::Values => {
+                lines.push(river_list(head(kw), body))
+            }
+            Clause::Where | Clause::Having | Clause::Qualify => lines.push(river_conditions(head(kw), body, river)),
+            Clause::Limit | Clause::Update | Clause::Delete | Clause::Insert => {
+                let h = head(kw);
+                let col = width(&h) + 1;
+                lines.push(join_inline(&h, &ritem(body, col)))
+            }
+            Clause::SetOp => {
+                lines.push(head(kw));
+                if !body.is_empty() {
+                    lines.push(format!("{}{}", sp(m), ritem(body, m)));
+                }
+            }
+            Clause::Join => {
+                let h = format!("{}{}", sp(river + 1), ritem(kw, river + 1));
+                let col = width(&h) + 1;
+                lines.push(join_inline(&h, &ritem(body, col)));
+            }
+            Clause::On => {
+                let h = format!("{}{}", sp(river + 1), ritem(kw, river + 1));
+                lines.push(river_on(h, body));
+            }
+            Clause::Using => {
+                let h = format!("{}{}", sp(river + 1), ritem(kw, river + 1));
+                let col = width(&h) + 1;
+                lines.push(join_inline(&h, &ritem(body, col)));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+/// A comma list: the first item on the keyword's line, the rest aligned
+/// under it.
+fn river_list(head: String, body: &[T]) -> String {
+    let items = split_commas(body);
+    let col = width(&head) + 1;
+    let mut s = head;
+    for (k, it) in items.iter().enumerate() {
+        if k == 0 {
+            s.push(' ');
+        } else {
+            s.push('\n');
+            s.push_str(&sp(col));
+        }
+        let mut end = it.len();
+        while end > 0 && it[end - 1].is_comment() && !it[end - 1].newline_before {
+            end -= 1;
+        }
+        let (main, trailing) = if end == 0 { (&it[..], &it[it.len()..]) } else { (&it[..end], &it[end..]) };
+        s.push_str(&ritem(main, col));
+        if k + 1 < items.len() {
+            s.push(',');
+        }
+        for c in trailing {
+            s.push(' ');
+            s.push_str(&c.text);
+        }
+    }
+    s
+}
+
+/// `WHERE a` / `AND b` / `OR c`, the operators right-aligned to the river.
+fn river_conditions(head: String, body: &[T], river: usize) -> String {
+    let col = width(&head) + 1;
+    let mut s = head;
+    for (k, (op, part)) in split_conditions(body).into_iter().enumerate() {
+        match op {
+            Some(op) if k > 0 => {
+                let indent = river.saturating_sub(width(&op.text));
+                s.push('\n');
+                s.push_str(&sp(indent));
+                s.push_str(&op.text);
+                s.push(' ');
+                s.push_str(&ritem(part, indent + width(&op.text) + 1));
+            }
+            _ => {
+                s.push(' ');
+                s.push_str(&ritem(part, col));
+            }
+        }
+    }
+    s
+}
+
+/// A join's `ON a` with further conditions below, aligned with `a`.
+fn river_on(head: String, body: &[T]) -> String {
+    let col = width(&head) + 1;
+    let mut s = head;
+    for (k, (op, part)) in split_conditions(body).into_iter().enumerate() {
+        match op {
+            Some(op) if k > 0 => {
+                s.push('\n');
+                s.push_str(&sp(col));
+                s.push_str(&op.text);
+                s.push(' ');
+                s.push_str(&ritem(part, col + width(&op.text) + 1));
+            }
+            _ => {
+                s.push(' ');
+                s.push_str(&ritem(part, col));
+            }
+        }
+    }
+    s
+}
+
+/// `WITH [RECURSIVE]` and each `name AS (` … `)`, or `None` (and the whole
+/// input back) when the list isn't one this understands.
+#[allow(clippy::type_complexity)]
+fn split_ctes(toks: &[T]) -> (Option<(&[T], Vec<(&[T], &[T])>)>, &[T]) {
+    let mut i = if toks.get(1).is_some_and(|t| t.is("recursive")) { 2 } else { 1 };
+    let head = &toks[..i];
+    let mut list = Vec::new();
+    loop {
+        let start = i;
+        let Some(open) = (i..toks.len()).find(|&j| toks[j].kind == Tok::ParenL && j > start && toks[j - 1].is_word_like_as()) else {
+            break;
+        };
+        let Some(close) = matching(toks, open) else { break };
+        list.push((&toks[start..open], &toks[open + 1..close]));
+        i = close + 1;
+        if toks.get(i).is_some_and(|t| t.is_comma()) {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    if list.is_empty() {
+        return (None, toks);
+    }
+    (Some((head, list)), &toks[i..])
+}
+
+/// `WITH a AS (SELECT …),` / `b AS (…)`: WITH on the river, each CTE's name
+/// just past it and its query opened inline after the bracket.
+fn river_ctes(head: &[T], list: &[(&[T], &[T])], m: usize, w: usize) -> String {
+    let river = m + w;
+    let indent = river.saturating_sub(width(&head[0].text)).max(m);
+    let mut s = format!("{}{}", sp(indent), ritem(head, indent));
+    for (k, (name, query)) in list.iter().enumerate() {
+        if k == 0 {
+            s.push(' ');
+        } else {
+            s.push_str(",\n");
+            s.push_str(&sp(river + 1));
+        }
+        let name_text = ritem(name, river + 1);
+        let col = river + 1 + width(&name_text) + 1;
+        s.push_str(&name_text);
+        s.push(' ');
+        s.push_str(&river_bracketed(query, col));
+    }
+    s
+}
+
 /// Whether two texts have the same tokens, comments included (words compared
 /// without case), and every pair of atoms that touched in one still touches
 /// in the other (see `is_atom`).
@@ -1291,7 +1645,7 @@ mod tests {
     use super::*;
 
     fn pg(sql: &str) -> String {
-        format_sql(sql, Dialect::PostgreSql)
+        format_sql_with(sql, Dialect::PostgreSql, SqlStyle::Mozilla)
     }
 
     #[test]
@@ -1359,7 +1713,7 @@ mod tests {
     fn create_table() {
         let sql = "CREATE TABLE `t` (\n`id` int NOT NULL AUTO_INCREMENT, `name` varchar(255) DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
         assert_eq!(
-            format_sql(sql, Dialect::MySql),
+            format_sql_with(sql, Dialect::MySql, SqlStyle::Mozilla),
             "CREATE TABLE `t` (\n  `id` INT NOT NULL AUTO_INCREMENT,\n  `name` VARCHAR(255) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4"
         );
     }
@@ -1402,9 +1756,11 @@ mod tests {
             "select @v := 1, b <=> c",
         ] {
             for d in [Dialect::PostgreSql, Dialect::MySql, Dialect::Sqlite] {
-                let once = format_sql(sql, d);
-                assert!(same_tokens(sql, &once, d), "tokens changed for {sql:?} ({d:?}):\n{once}");
-                assert_eq!(format_sql(&once, d), once, "not idempotent for {sql:?} ({d:?})");
+                for style in SqlStyle::ALL {
+                    let once = format_sql_with(sql, d, style);
+                    assert!(same_tokens(sql, &once, d), "tokens changed for {sql:?} ({d:?}, {style:?}):\n{once}");
+                    assert_eq!(format_sql_with(&once, d, style), once, "not idempotent for {sql:?} ({d:?}, {style:?})");
+                }
             }
         }
     }
@@ -1500,10 +1856,10 @@ mod tests {
             ),
         ];
         for (name, dialect, input, expected) in cases {
-            let out = format_sql(input, *dialect);
+            let out = format_sql_with(input, *dialect, SqlStyle::Mozilla);
             assert_eq!(&out, expected, "{name}\n--- got ---\n{out}\n--- want ---\n{expected}");
             // The good version is a fixed point.
-            assert_eq!(&format_sql(expected, *dialect), expected, "{name}: not idempotent");
+            assert_eq!(&format_sql_with(expected, *dialect, SqlStyle::Mozilla), expected, "{name}: not idempotent");
         }
     }
 
@@ -1516,7 +1872,7 @@ mod tests {
         // Empty statements don't open blank lines.
         assert_eq!(pg("select 1;;"), "SELECT 1;;");
         // MySQL built-ins stay attached to their bracket.
-        assert_eq!(format_sql("select if(a, 1, 2), count(*) from t", Dialect::MySql), "SELECT\n  if(a, 1, 2),\n  count(*)\nFROM t");
+        assert_eq!(format_sql_with("select if(a, 1, 2), count(*) from t", Dialect::MySql, SqlStyle::Mozilla), "SELECT\n  if(a, 1, 2),\n  count(*)\nFROM t");
         // Tokens that touch keep touching: `'O''Neil'` is one literal.
         assert_eq!(pg("select 'O''Neil', e'x', x'0f'"), "SELECT\n  'O''Neil',\n  e'x',\n  x'0f'");
         // Absurd nesting is left alone rather than overflowing the stack.
@@ -1570,8 +1926,10 @@ mod tests {
         for sql in samples {
             for (i, _) in sql.char_indices() {
                 for d in [Dialect::PostgreSql, Dialect::MySql, Dialect::Sqlite] {
-                    let out = format_sql(&sql[..i], d);
-                    assert!(same_tokens(&sql[..i], &out, d));
+                    for style in SqlStyle::ALL {
+                        let out = format_sql_with(&sql[..i], d, style);
+                        assert!(same_tokens(&sql[..i], &out, d));
+                    }
                 }
             }
         }
@@ -1584,5 +1942,75 @@ mod tests {
             pg(sql),
             "SELECT\n  *,\n  row_number() OVER (\n    PARTITION BY\n      store_slug,\n      vat_rate_type\n    ORDER BY\n      start_date DESC,\n      vat_config_id DESC\n  ) AS rn\nFROM vat_config"
         );
+    }
+
+    fn hw(sql: &str) -> String {
+        format_sql_with(sql, Dialect::PostgreSql, SqlStyle::Holywell)
+    }
+
+    /// The layouts from <https://www.sqlstyle.guide/>, plus the app's templates.
+    #[test]
+    fn holywell_golden_examples() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "river: list and OR",
+                "select a.title, a.release_date, a.recording_date from albums as a where a.title = 'Charcoal Lane' or a.title = 'The New Danger';",
+                "SELECT a.title,\n       a.release_date,\n       a.recording_date\n  FROM albums AS a\n WHERE a.title = 'Charcoal Lane'\n    OR a.title = 'The New Danger';",
+            ),
+            (
+                "joins past the river",
+                "select r.last_name from riders as r inner join bikes as b on r.bike_vin_num = b.vin_num and b.engine_tally > 2 inner join crew as c on r.crew_chief_last_name = c.last_name and c.chief = 'Y';",
+                "SELECT r.last_name\n  FROM riders AS r\n       INNER JOIN bikes AS b\n       ON r.bike_vin_num = b.vin_num\n          AND b.engine_tally > 2\n       INNER JOIN crew AS c\n       ON r.crew_chief_last_name = c.last_name\n          AND c.chief = 'Y';",
+            ),
+            (
+                "subqueries with their own river",
+                "select r.last_name, (select max(year(championship_date)) from champions as c where c.last_name = r.last_name and c.confirmed = 'Y') as last_championship_year from riders as r where r.last_name in (select c.last_name from champions as c where year(championship_date) > '2008' and c.confirmed = 'Y');",
+                "SELECT r.last_name,\n       (SELECT MAX(YEAR(championship_date))\n          FROM champions AS c\n         WHERE c.last_name = r.last_name\n           AND c.confirmed = 'Y') AS last_championship_year\n  FROM riders AS r\n WHERE r.last_name IN (SELECT c.last_name\n                         FROM champions AS c\n                        WHERE YEAR(championship_date) > '2008'\n                          AND c.confirmed = 'Y');",
+            ),
+            (
+                "UPDATE / SET",
+                "update file_system set file_modified_date = '1980-02-22', file_size = 209732 where file_name = '.vimrc';",
+                "UPDATE file_system\n   SET file_modified_date = '1980-02-22',\n       file_size = 209732\n WHERE file_name = '.vimrc';",
+            ),
+            (
+                "CASE aligned under itself",
+                "select case postcode when 'BN1' then 'Brighton' when 'EH1' then 'Edinburgh' end as city from office_locations group by postcode order by 1 desc",
+                "SELECT CASE postcode\n       WHEN 'BN1' THEN 'Brighton'\n       WHEN 'EH1' THEN 'Edinburgh'\n       END AS city\n  FROM office_locations\n GROUP BY postcode\n ORDER BY 1 DESC",
+            ),
+            (
+                "CTEs",
+                "with sample as (select client_id from main_summary where sample_id = '42'), other as (select 1) select * from sample limit 10",
+                "  WITH sample AS (SELECT client_id\n                    FROM main_summary\n                   WHERE sample_id = '42'),\n       other AS (SELECT 1)\nSELECT *\n  FROM sample\n LIMIT 10",
+            ),
+            ("set operations", "select a from t union all select b from u", "SELECT a\n  FROM t\n UNION ALL\nSELECT b\n  FROM u"),
+            ("View Data template", "SELECT * FROM albums LIMIT 100;", "SELECT *\n  FROM albums\n LIMIT 100;"),
+            (
+                "INSERT template",
+                "INSERT INTO albums (AlbumId, Title, ArtistId)\nVALUES (?, ?, ?);\n",
+                "INSERT INTO albums (AlbumId, Title, ArtistId)\nVALUES (?, ?, ?);\n",
+            ),
+            (
+                "comments kept",
+                "-- top\nselect a, -- first\n b /* inline */ from t; -- after",
+                "-- top\nSELECT a, -- first\n       b /* inline */\n  FROM t; -- after",
+            ),
+            (
+                "a line comment never swallows a closing bracket",
+                "select * from (select 1 -- one\n) s",
+                "SELECT *\n  FROM (SELECT 1 -- one\n       ) s",
+            ),
+        ];
+        for (name, input, expected) in cases {
+            let out = hw(input);
+            assert_eq!(&out, expected, "{name}\n--- got ---\n{out}\n--- want ---\n{expected}");
+            assert_eq!(&hw(expected), expected, "{name}: not idempotent");
+        }
+    }
+
+    #[test]
+    fn mozilla_is_the_default() {
+        // Tests never change the process-wide default: they run in parallel.
+        assert_eq!(default_style(), SqlStyle::Mozilla);
+        assert_eq!(SqlStyle::default(), SqlStyle::Mozilla);
     }
 }

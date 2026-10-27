@@ -482,7 +482,10 @@ impl Workspace {
         if sql.is_empty() {
             return;
         }
-        let sql = format!("-- Changes queued in the grid, as SQL. Running this is not the same as\n-- Save: it does not check for rows changed since they were loaded.\n{sql}\n");
+        let sql = format!(
+            "-- Changes queued in the grid, as SQL. Running this is not the same as\n-- Save: it does not check for rows changed since they were loaded.\n{}\n",
+            crate::ui::sql_text::formatted(&sql, &source.driver)
+        );
         let id = self.add_tab(source.conn_id, source.database, cx);
         self.set_tab_default_schema(&id, source.default_schema, cx);
         self.set_tab_sql(&id, &sql, cx);
